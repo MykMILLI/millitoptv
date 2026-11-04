@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -47,6 +46,7 @@ class MusicTrack {
   final int? year;
   final int durationSeconds;
   final String? coverArtId;
+  @Deprecated('Generate playback URLs with NavidromeClient.streamUri instead.')
   final String? streamUrl;
   const MusicTrack({
     required this.id,
@@ -69,7 +69,6 @@ class MusicTrack {
     'year': year,
     'durationSeconds': durationSeconds,
     'coverArtId': coverArtId,
-    'streamUrl': streamUrl,
   };
 
   static MusicTrack fromJson(Map<String, dynamic> json) {
@@ -77,20 +76,19 @@ class MusicTrack {
     final title = json['title']?.toString().trim() ?? '';
     final artist = json['artist']?.toString().trim() ?? '';
     final album = json['album']?.toString().trim() ?? '';
-    if (id.isEmpty || title.isEmpty || artist.isEmpty || album.isEmpty) {
-      throw const FormatException('Music track payload is incomplete.');
+    if (id.isEmpty) {
+      throw const FormatException('Music track id is missing.');
     }
     final duration = int.tryParse(json['durationSeconds']?.toString() ?? '');
     return MusicTrack(
       id: id,
-      title: title,
-      artist: artist,
-      album: album,
+      title: title.isEmpty ? 'Unknown title' : title,
+      artist: artist.isEmpty ? 'Unknown artist' : artist,
+      album: album.isEmpty ? 'Unknown album' : album,
       genre: json['genre']?.toString().trim(),
       year: int.tryParse(json['year']?.toString() ?? ''),
       durationSeconds: duration == null || duration < 0 ? 0 : duration,
       coverArtId: json['coverArtId']?.toString().trim(),
-      streamUrl: json['streamUrl']?.toString().trim(),
     );
   }
 }
@@ -245,6 +243,11 @@ class MusicService {
       } catch (_) {}
     }
     values.sort((a, b) => b.createdAtUtc.compareTo(a.createdAtUtc));
+    final sanitized = jsonEncode(values.map((value) => value.toJson()).toList());
+    if (raw != sanitized &&
+        !await prefs.setString('$_stationsKeyPrefix$profileId', sanitized)) {
+      throw StateError('Could not sanitize saved music stations.');
+    }
     return values;
   }
 
@@ -294,6 +297,11 @@ class MusicService {
         values.add(MusicTrack.fromJson(Map<String, dynamic>.from(entry)));
       } catch (_) {}
     }
+    final sanitized = jsonEncode(values.map((value) => value.toJson()).toList());
+    if (raw != sanitized &&
+        !await prefs.setString('$_recentKeyPrefix$profileId', sanitized)) {
+      throw StateError('Could not sanitize saved music recently played list.');
+    }
     return values;
   }
 
@@ -315,7 +323,7 @@ class MusicService {
   Future<Map<String, dynamic>> profileSyncState(int profileId) async {
     final cfg = await config(profileId);
     return {
-      'server': cfg?.toJson(includePassword: true),
+      'server': cfg?.toJson(includePassword: false),
       'stations': (await stations(profileId))
           .map((station) => station.toJson())
           .toList(),
@@ -372,9 +380,35 @@ class MusicService {
   }
 }
 
+class _MusicServerException extends StateError {
+  final int? code;
+  _MusicServerException(this.code, String message) : super(message);
+
+  bool get unsupported {
+    final text = message.toLowerCase();
+    return code == 20 ||
+        code == 30 ||
+        ((code == null || code == 0) &&
+            (text.contains('not supported') ||
+                text.contains('unsupported') ||
+                text.contains('not implemented') ||
+                text.contains('unknown method') ||
+                text.contains('unknown endpoint')));
+  }
+}
+
+class _MusicHttpException extends HttpException {
+  final int statusCode;
+  _MusicHttpException(this.statusCode)
+    : super('Music server request failed with HTTP $statusCode.');
+}
+
 class NavidromeClient {
   final MusicServerConfig config;
   NavidromeClient(this.config);
+
+  String _radioDescription = '';
+  String get radioDescription => _radioDescription;
 
   Uri _endpoint(
     String route, {
@@ -405,7 +439,8 @@ class NavidromeClient {
     if (response['status']?.toString() != 'ok') {
       final error = response['error'];
       if (error is Map) {
-        throw StateError(
+        throw _MusicServerException(
+          int.tryParse(error['code']?.toString() ?? ''),
           error['message']?.toString() ??
               'Music server returned an unsuccessful status.',
         );
@@ -428,9 +463,7 @@ class NavidromeClient {
       request.followRedirects = false;
       final response = await request.close().timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(
-          'Music server request failed with HTTP ${response.statusCode}.',
-        );
+        throw _MusicHttpException(response.statusCode);
       }
       final body = await response.transform(utf8.decoder).join();
       final decoded = jsonDecode(body);
@@ -453,27 +486,11 @@ class NavidromeClient {
       _endpoint('getCoverArt.view', query: {'id': coverArtId});
 
   MusicTrack _parseTrack(Map<String, dynamic> json) {
-    final id = json['id']?.toString().trim() ?? '';
-    if (id.isEmpty) {
-      throw const FormatException('Music track id is missing.');
-    }
-    final title = json['title']?.toString().trim() ?? '';
-    final artist = json['artist']?.toString().trim() ?? '';
-    final album = json['album']?.toString().trim() ?? '';
-    if (title.isEmpty || artist.isEmpty || album.isEmpty) {
-      throw const FormatException('Music track metadata is incomplete.');
-    }
-    return MusicTrack(
-      id: id,
-      title: title,
-      artist: artist,
-      album: album,
-      genre: json['genre']?.toString().trim(),
-      year: int.tryParse(json['year']?.toString() ?? ''),
-      durationSeconds: int.tryParse(json['duration']?.toString() ?? '') ?? 0,
-      coverArtId: json['coverArt']?.toString().trim(),
-      streamUrl: streamUri(id).toString(),
-    );
+    return MusicTrack.fromJson({
+      ...json,
+      'durationSeconds': json['duration'],
+      'coverArtId': json['coverArt'],
+    });
   }
 
   Future<List<MusicTrack>> searchSongs(String query, {int limit = 30}) async {
@@ -536,33 +553,120 @@ class NavidromeClient {
     return values;
   }
 
+  Future<List<MusicTrack>> _radioCandidates(
+    Future<List<MusicTrack>> Function() load,
+  ) async {
+    try {
+      return await load();
+    } on _MusicServerException catch (error) {
+      if (!error.unsupported) rethrow;
+      return const [];
+    } on _MusicHttpException catch (error) {
+      if (![404, 405, 501].contains(error.statusCode)) rethrow;
+      return const [];
+    }
+  }
+
+  Future<List<MusicTrack>> _similarSongs(String songId, int limit) async {
+    final payload = await _get(
+      'getSimilarSongs2.view',
+      query: {'id': songId, 'count': '$limit'},
+    );
+    final result = payload['similarSongs2'];
+    if (result is! Map || result['song'] is! List) return const [];
+    final values = <MusicTrack>[];
+    for (final entry in result['song'] as List) {
+      if (entry is! Map) continue;
+      try {
+        values.add(_parseTrack(Map<String, dynamic>.from(entry)));
+      } on FormatException {
+        // A malformed recommendation must not discard the remaining songs.
+      }
+    }
+    return values;
+  }
+
+  /// Always starts with [seed], even when [limit] is less than one.
+  ///
+  /// Unsupported/empty recommendations use only matching genre/era metadata,
+  /// or return the seed alone. Authentication, transport and malformed-response
+  /// errors propagate so a broken server is not presented as an empty station.
   Future<List<MusicTrack>> stationFromSeed(
     MusicTrack seed, {
     int limit = 30,
   }) async {
-    final byArtist = await searchSongs(seed.artist, limit: 120);
-    final byTitle = await searchSongs(seed.title, limit: 80);
-    final aroundEra = await randomSongs(
-      limit: 60,
-      genre: seed.genre,
-      fromYear: seed.year == null ? null : seed.year! - 4,
-      toYear: seed.year == null ? null : seed.year! + 4,
-    );
-    final merged = <MusicTrack>[
-      seed,
-      ...byArtist,
-      ...byTitle,
-      ...aroundEra,
-    ];
-    final deduped = <String, MusicTrack>{};
-    for (final entry in merged) {
-      if (entry.id == seed.id) {
-        continue;
-      }
-      deduped[entry.id] = entry;
+    _radioDescription = '';
+    if (limit <= 1) {
+      _radioDescription = 'Seed only · ${seed.title}';
+      return [seed];
     }
-    final values = deduped.values.toList();
-    values.shuffle(Random());
-    return values.take(limit).toList();
+    final seen = <String>{seed.id};
+    var related = (await _radioCandidates(
+      () => _similarSongs(seed.id, limit),
+    )).where((track) => seen.add(track.id)).toList();
+    if (related.isNotEmpty) {
+      _radioDescription = 'Song radio · server recommendations for ${seed.title}';
+      return [seed, ...related.take(limit - 1)];
+    }
+
+    final genre = seed.genre?.trim() ?? '';
+    final year = seed.year;
+    final hasYear = year != null && year > 0;
+    if (genre.isEmpty && !hasYear) {
+      _radioDescription =
+          'Seed only · no song recommendations or genre/era metadata available';
+      return [seed];
+    }
+    final fromYear = year != null && year > 0 ? year - 4 : null;
+    final toYear = year != null && year > 0 ? year + 4 : null;
+    final criteria = [
+      if (genre.isNotEmpty) genre,
+      if (hasYear) '$fromYear–$toYear',
+    ].join(' · ');
+    _radioDescription =
+        'Genre/era radio · $criteria (metadata fallback, not song similarity)';
+    related = (await _radioCandidates(
+      () => randomSongs(
+        limit: limit * 3,
+        genre: genre.isEmpty ? null : genre,
+        fromYear: fromYear,
+        toYear: toYear,
+      ),
+    )).where((track) {
+      if (genre.isNotEmpty &&
+          track.genre?.trim().toLowerCase() != genre.toLowerCase()) {
+        return false;
+      }
+      if (hasYear &&
+          (track.year == null ||
+              track.year! < fromYear! ||
+              track.year! > toYear!)) {
+        return false;
+      }
+      return seen.add(track.id);
+    }).toList();
+
+    // Round-robin artists rather than letting a large discography fill radio.
+    final byArtist = <String, List<MusicTrack>>{};
+    for (final track in related) {
+      (byArtist[track.artist.trim().toLowerCase()] ??= []).add(track);
+    }
+    final seedArtist = byArtist.remove(seed.artist.trim().toLowerCase());
+    final groups = [...byArtist.values, if (seedArtist != null) seedArtist];
+    final queue = <MusicTrack>[seed];
+    for (var index = 0; queue.length < limit; index++) {
+      var added = false;
+      for (final group in groups) {
+        if (index >= group.length) continue;
+        queue.add(group[index]);
+        added = true;
+        if (queue.length == limit) break;
+      }
+      if (!added) break;
+    }
+    if (queue.length == 1) {
+      _radioDescription += ' · no matching tracks available; seed only';
+    }
+    return queue;
   }
 }

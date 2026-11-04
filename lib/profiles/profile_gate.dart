@@ -8,6 +8,7 @@ import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_source.dart';
+import '../services/music_playback.dart';
 import 'household_store.dart';
 
 class ProfileGate extends StatefulWidget {
@@ -339,6 +340,7 @@ class _ProfileGateState extends State<ProfileGate> {
   }
 
   Future<void> disconnect() async {
+    await MusicPlayback.instance.deactivateProfile();
     await connection.disconnect();
     if (mounted) {
       setState(() {
@@ -490,7 +492,10 @@ class _ProfileGateState extends State<ProfileGate> {
     if (current != null) {
       return SelectedProfileScope(
         profile: current,
-        switchProfile: () => setState(() => selected = null),
+        switchProfile: () {
+          MusicPlayback.instance.deactivateProfile();
+          setState(() => selected = null);
+        },
         child: widget.builder(current),
       );
     }
@@ -584,6 +589,9 @@ class _ProfileGateState extends State<ProfileGate> {
                                   ),
                                 ),
                                 onPressed: () {
+                                  MusicPlayback.instance.activateProfile(
+                                    profile.id,
+                                  );
                                   setState(() => selected = profile);
                                 },
                                 child: Column(

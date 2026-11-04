@@ -21,6 +21,7 @@ import 'services/live_tv_control.dart';
 import 'screens/device_setup_screen.dart';
 import 'profiles/profile_gate.dart';
 import 'services/pip_playback.dart';
+import 'services/music_playback.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
@@ -1269,6 +1270,7 @@ class _PipExpandedScreenState extends State<_PipExpandedScreen> {
     if (playing) {
       await widget.session.player.pause();
     } else {
+      await MusicPlayback.instance.pause();
       await widget.session.player.play();
     }
   }
