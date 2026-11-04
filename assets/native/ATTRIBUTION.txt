@@ -1,0 +1,15 @@
+﻿Native application icons:
+- vlc.png: extracted from the installed VideoLAN VLC executable.
+- iptvnator.png: extracted from the installed IPTVnator executable.
+
+These identify third-party applications and are not MILLITOP branding.
+Review publisher branding/license requirements before public distribution.
+
+Emby and Jellyfin PNG identifiers:
+Source: https://github.com/homarr-labs/dashboard-icons
+Logo collection pages:
+https://dashboardicons.com/icons/emby
+https://dashboardicons.com/icons/jellyfin
+
+Third-party product names and logos identify their respective services.
+Review the collection license and applicable brand guidelines before release.

@@ -1,0 +1,15 @@
+{
+    "protocol":  1,
+    "extensions":  [
+                       {
+                           "slug":  "adblocker-ultimate",
+                           "id":  "adblockultimate@adblockultimate.net",
+                           "installUrl":  "https://addons.mozilla.org/firefox/downloads/latest/adblockultimate%40adblockultimate.net/latest.xpi"
+                       },
+                       {
+                           "slug":  "sponsorblock",
+                           "id":  "sponsorBlocker@ajay.app",
+                           "installUrl":  "https://addons.mozilla.org/firefox/downloads/latest/sponsorBlocker%40ajay.app/latest.xpi"
+                       }
+                   ]
+}

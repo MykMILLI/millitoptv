@@ -1,0 +1,10 @@
+{
+    "version":  "1.4.2",
+    "minimumBuild":  13,
+    "publicOrigin":  "https://tvadmin.millitop.net",
+    "serverAlias":  "millitop-host",
+    "innoCompiler":  "C:\\Users\\Mavae\\AppData\\Local\\Programs\\Inno Setup 6\\ISCC.exe",
+    "vcRedist":  "installer/prerequisites/VC_redist.x64.exe",
+    "webView2Installer":  "installer/prerequisites/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+    "sqliteDll":  "installer/prerequisites/sqlite3.dll"
+}

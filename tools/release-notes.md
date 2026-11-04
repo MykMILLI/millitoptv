@@ -1,0 +1,6 @@
+Square-backed household Account page with server-verified invoices, balances, invoice-linked payment history, Square hosted checkout launch, PIN-gated account view, public project updates and HTTPS billing transport enforcement.
+Pairing-first household onboarding now blocks profile login until the device is paired, then automatically syncs household profiles (including pictures) before profile selection so new devices show the shared profile roster immediately.
+Added PiP mini-player continuity so backing out of active playback returns to Home while media keeps playing in a closable/expandable mini player.
+Added explicit DVR scheduling entry points in the DVR section and EPG-guide-first scheduling flow, plus schedule cancellation controls in Cloud DVR.
+Restored fullscreen controls for Movies/Series playback with on-screen and app-bar fullscreen toggle support.
+Introduced a native Music experience with Navidrome integration, including server setup/validation, library search, random picks, custom station creation from seed tracks, recently played tracking, and synced music profile state across household devices.
