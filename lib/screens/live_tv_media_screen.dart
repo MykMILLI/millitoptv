@@ -13,6 +13,7 @@ import '../services/live_tv_control.dart';
 import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
+import '../services/music_playback.dart';
 import '../services/live_tv_source.dart';
 
 enum _MediaTab { movies, series }
@@ -1641,6 +1642,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
 
   Future<void> _initialize() async {
     try {
+      await MusicPlayback.instance.pause();
       MediaKit.ensureInitialized();
       final created = Player(
         configuration: playerConfigurationFor(widget.playbackPerformance),

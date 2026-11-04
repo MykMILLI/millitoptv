@@ -12,6 +12,7 @@ import '../services/live_tv_sync.dart';
 import '../services/live_tv_control.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
+import '../services/music_playback.dart';
 import '../services/viewing_sessions.dart';
 import 'live_tv_media_screen.dart';
 
@@ -1335,6 +1336,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       status = 'Opening ${channel.title} on $paneName...';
     });
     try {
+      await MusicPlayback.instance.pause();
       if (pane == 0) {
         await _ensurePlayer();
       } else if (pane == 1) {
