@@ -13,7 +13,7 @@ import '../services/live_tv_control.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/viewing_sessions.dart';
-import 'live_tv_media_screen.dart';
+import '../theme/millitop_visual_theme.dart';
 
 enum _ChannelFilterMode { all, favorites, recent }
 
@@ -44,7 +44,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   final timerSessionKey = 'native-live-tv';
   final secondaryTimerSessionKey = 'native-live-tv-secondary';
   final search = TextEditingController();
+  final FocusNode screenFocusNode = FocusNode();
   final FocusNode fullScreenFocusNode = FocusNode();
+  final ScrollController channelScrollController = ScrollController();
   Player? player;
   VideoController? video;
   Player? secondaryPlayer;
@@ -111,6 +113,8 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
   bool playbackTuningWarningShown = false;
+  int focusedChannelIndex = 0;
+  DateTime? backExitArmedUntil;
 
   void _recomputeChannelViews() {
     final availableGroups = channels
@@ -196,7 +200,47 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       groupOptions = nextGroups;
       visibleChannels = filtered;
       duplicateChannelTitles = duplicates;
+      if (visibleChannels.isEmpty) {
+        focusedChannelIndex = 0;
+      } else if (focusedChannelIndex >= visibleChannels.length) {
+        focusedChannelIndex = visibleChannels.length - 1;
+      } else if (focusedChannelIndex < 0) {
+        focusedChannelIndex = 0;
+      }
     });
+  }
+
+  LiveTvChannel? get _focusedChannel =>
+      visibleChannels.isEmpty ? null : visibleChannels[focusedChannelIndex];
+
+  void _focusChannelByOffset(int delta) {
+    if (visibleChannels.isEmpty) {
+      return;
+    }
+    final next = (focusedChannelIndex + delta).clamp(
+      0,
+      visibleChannels.length - 1,
+    );
+    if (next == focusedChannelIndex) {
+      return;
+    }
+    _setState(() => focusedChannelIndex = next);
+    final targetOffset = (74.0 * next) - 148.0;
+    if (!channelScrollController.hasClients) {
+      return;
+    }
+    channelScrollController.animateTo(
+      targetOffset.clamp(0, channelScrollController.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 130),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _focusChannelByPage(int pages) {
+    if (visibleChannels.isEmpty) {
+      return;
+    }
+    _focusChannelByOffset(8 * pages);
   }
 
   void _pinCategorySelection(String group) {
@@ -434,7 +478,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     fullScreenControlsHide?.cancel();
     profileSyncDebounce?.cancel();
     playbackStatusTimer?.cancel();
+    screenFocusNode.dispose();
     fullScreenFocusNode.dispose();
+    channelScrollController.dispose();
     search.dispose();
     ViewingSessions.instance.remove(timerSessionKey);
     ViewingSessions.instance.remove(secondaryTimerSessionKey);
@@ -444,6 +490,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     unawaited(_disposeSecondaryPlayer());
     unawaited(_disposeTertiaryPlayer());
     unawaited(_disposeQuaternaryPlayer());
+    unawaited(_applyPlatformFullscreen(false));
     super.dispose();
   }
 
@@ -463,9 +510,8 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       if (!playbackTuningWarningShown) {
         playbackTuningWarningShown = true;
         _setState(
-          () =>
-              status =
-                  'Playback tuning is partially unavailable on this device: $error',
+          () => status =
+              'Playback tuning is partially unavailable on this device: $error',
         );
       }
     }
@@ -1494,6 +1540,14 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     if (channel == null || opening || reconnecting || !mounted) {
       return;
     }
+    if (reconnectAttempts >= 3) {
+      _setState(() {
+        error =
+            'Automatic reconnect paused to avoid restart loops. Open the channel again to retry.';
+        status = 'Reconnect paused';
+      });
+      return;
+    }
     reconnecting = true;
     reconnectAttempts++;
     lastReconnectAt = DateTime.now();
@@ -1941,6 +1995,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       fullScreenVideo = next;
       fullScreenControlsVisible = true;
     });
+    unawaited(_applyPlatformFullscreen(next));
     if (next) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) {
@@ -1952,6 +2007,28 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     } else {
       fullScreenControlsHide?.cancel();
       fullScreenControlsHide = null;
+    }
+  }
+
+  Future<void> _applyPlatformFullscreen(bool value) async {
+    if (!mounted) {
+      return;
+    }
+    if (Theme.of(context).platform == TargetPlatform.android) {
+      try {
+        if (value) {
+          await SystemChrome.setEnabledSystemUIMode(
+            SystemUiMode.immersiveSticky,
+          );
+          await SystemChrome.setPreferredOrientations([
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]);
+        } else {
+          await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+          await SystemChrome.setPreferredOrientations(const []);
+        }
+      } catch (_) {}
     }
   }
 
@@ -2038,9 +2115,19 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             decoration: BoxDecoration(
               color: Colors.black,
               border: Border.all(
-                color: focused ? Colors.lightBlueAccent : Colors.transparent,
-                width: 2,
+                color: focused ? const Color(0xFF6DF1EC) : Colors.transparent,
+                width: focused ? 3 : 2,
               ),
+              borderRadius: BorderRadius.circular(4),
+              boxShadow: focused
+                  ? const [
+                      BoxShadow(
+                        color: Color(0x5548D1CC),
+                        blurRadius: 16,
+                        spreadRadius: 1,
+                      ),
+                    ]
+                  : null,
             ),
             child: controller == null
                 ? Center(child: Text(_paneLabel(pane)))
@@ -2061,7 +2148,11 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                 channel == null
                     ? '${_paneLabel(pane)} · No channel'
                     : '${_paneLabel(pane)} · ${channel.title}\n${_sourceTag(channel)}${nowProgram == null ? '' : ' · ${nowProgram.title}'}',
-                style: const TextStyle(fontSize: 11),
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  height: 1.3,
+                  fontWeight: FontWeight.w600,
+                ),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -2080,7 +2171,11 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Text(
                 playbackEngineStatusByPane[pane] ?? 'GPU decode: checking...',
-                style: const TextStyle(fontSize: 11),
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.3,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ),
@@ -2223,504 +2318,1101 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (_, __) {
-        unawaited(_minimizeToPipAndGoHome());
-      },
-      child: Scaffold(
-      appBar: fullScreenVideo
-          ? null
-          : AppBar(
-              title: const Text('Live TV'),
-              leading: IconButton(
-                tooltip: 'Home (PiP)',
-                onPressed: () => unawaited(_minimizeToPipAndGoHome()),
-                icon: const Icon(Icons.arrow_back),
-              ),
-              actions: [
-                IconButton(
-                  tooltip: screenCount == 1
-                      ? 'Enable split screen'
-                      : screenCount == 2
-                      ? 'Enable 3-screen'
-                      : screenCount == 3
-                      ? 'Enable 4-screen'
-                      : 'Return to single screen',
-                  onPressed: loading || opening
-                      ? null
-                      : () => unawaited(_toggleSplitScreen()),
-                  icon: Icon(
-                    screenCount == 1 ? Icons.view_week : Icons.grid_view,
-                  ),
-                ),
-                IconButton(
-                  tooltip: fullScreenVideo ? 'Exit full screen' : 'Full screen',
-                  onPressed: _toggleFullScreenVideo,
-                  icon: Icon(
-                    fullScreenVideo ? Icons.fullscreen_exit : Icons.fullscreen,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Guide',
-                  onPressed:
-                      _channelForPane(splitScreen ? focusedPane : 0) == null
-                      ? null
-                      : _showEpgGuide,
-                  icon: const Icon(Icons.view_agenda_outlined),
-                ),
-                TextButton(
-                  onPressed: opening || loading
-                      ? null
-                      : () => Navigator.of(context).push<void>(
-                          MaterialPageRoute<void>(
-                            builder: (_) => LiveTvMediaScreen(
-                              profileId: widget.profileId,
-                              initialSourceId: source?.id,
-                            ),
-                          ),
-                        ),
-                  child: const Text('Movies & Series'),
-                ),
-                TextButton(
-                  onPressed: opening ? null : _manageSources,
-                  child: const Text('Manage Sources'),
-                ),
-                TextButton(
-                  onPressed: loading || opening || source == null
-                      ? null
-                      : _loadChannels,
-                  child: const Text('Reload'),
-                ),
-              ],
+  Future<void> _openFocusedChannelMenu() async {
+    final channel = _focusedChannel;
+    if (channel == null) {
+      return;
+    }
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(channel.title),
+        content: const Text('Remote actions'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'favorite'),
+            child: Text(
+              _favorite(channel) ? 'Remove favorite' : 'Add favorite',
             ),
-      body: Column(
-        children: [
-          if (!fullScreenVideo && (loading || opening))
-            const LinearProgressIndicator(),
-          if (!fullScreenVideo && status.isNotEmpty)
-            Padding(padding: const EdgeInsets.all(8), child: Text(status)),
-          if (!fullScreenVideo && syncStatus.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Text(
-                syncStatus,
-                style: const TextStyle(color: Colors.white70),
-              ),
-            ),
-          if (!fullScreenVideo && error.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Text(
-                error,
-                style: const TextStyle(color: Colors.orangeAccent),
-              ),
-            ),
-          if (!fullScreenVideo)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey(
-                        allSourcesSelected
-                            ? 'source-all'
-                            : (source?.id ?? 'no-source'),
-                      ),
-                      initialValue: allSourcesSelected ? 'all' : source?.id,
-                      decoration: const InputDecoration(
-                        labelText: 'Source',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: [
-                        const DropdownMenuItem<String>(
-                          value: 'all',
-                          child: Text('All Sources'),
-                        ),
-                        ...sources.map(
-                          (item) => DropdownMenuItem<String>(
-                            value: item.id,
-                            child: Text(
-                              '${item.name} (${item.isXtream ? 'Xtream' : 'M3U'})',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                      ],
-                      onChanged: loading || opening
-                          ? null
-                          : (value) async {
-                              if (value == 'all') {
-                                _setState(() {
-                                  allSourcesSelected = true;
-                                  selectedGroup =
-                                      selectedGroupByScope[_sourceId()] ??
-                                      'All';
-                                });
-                                await _scheduleProfileSync();
-                                await _loadChannels();
-                                return;
-                              }
-                              final next = sources.firstWhere(
-                                (item) => item.id == value,
-                                orElse: () => sources.first,
-                              );
-                              _setState(() {
-                                source = next;
-                                allSourcesSelected = false;
-                                selectedGroup =
-                                    selectedGroupByScope[_sourceId()] ?? 'All';
-                              });
-                              await _scheduleProfileSync();
-                              await _loadChannels();
-                            },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    flex: 3,
-                    child: TextField(
-                      controller: search,
-                      decoration: const InputDecoration(
-                        labelText: 'Search channels',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  IconButton.filledTonal(
-                    tooltip: 'Channel Scope',
-                    onPressed: loading || opening ? null : _manageChannelScope,
-                    icon: const Icon(Icons.tune),
-                  ),
-                ],
-              ),
-            ),
-          if (!fullScreenVideo)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: DropdownButtonFormField<_ChannelFilterMode>(
-                      initialValue: filterMode,
-                      decoration: const InputDecoration(
-                        labelText: 'Channel Filter',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: _ChannelFilterMode.all,
-                          child: Text('All Channels'),
-                        ),
-                        DropdownMenuItem(
-                          value: _ChannelFilterMode.favorites,
-                          child: Text('Favorites'),
-                        ),
-                        DropdownMenuItem(
-                          value: _ChannelFilterMode.recent,
-                          child: Text('Continue Watching'),
-                        ),
-                      ],
-                      onChanged: (value) {
-                        if (value == null) {
-                          return;
-                        }
-                        _setState(() => filterMode = value);
-                        _recomputeChannelViews();
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    flex: 3,
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey(
-                        'group-$selectedGroup-${groupOptions.length}',
-                      ),
-                      initialValue: groupOptions.contains(selectedGroup)
-                          ? selectedGroup
-                          : groupOptions.first,
-                      decoration: const InputDecoration(
-                        labelText: 'Category',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: groupOptions
-                          .map(
-                            (group) => DropdownMenuItem<String>(
-                              value: group,
-                              child: Text(
-                                group,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        if (value == null) {
-                          return;
-                        }
-                        _setState(() {
-                          selectedGroup = value;
-                          selectedGroupByScope[_sourceId()] = value;
-                        });
-                        _pinCategorySelection(value);
-                        _recomputeChannelViews();
-                        unawaited(_scheduleProfileSync());
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          Expanded(
-            child: Row(
-              children: [
-                if (!fullScreenVideo)
-                  SizedBox(
-                    width: 460,
-                    child: visibleChannels.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'No channels match the current filter.',
-                            ),
-                          )
-                        : ListView.builder(
-                            itemExtent: 74,
-                            itemCount: visibleChannels.length,
-                            itemBuilder: (context, index) {
-                              final channel = visibleChannels[index];
-                              final active =
-                                  selected == channel ||
-                                  selectedSecondary == channel ||
-                                  selectedTertiary == channel ||
-                                  selectedQuaternary == channel;
-                              final nowProgram = _currentProgram(channel);
-                              return ListTile(
-                                selected: active,
-                                leading: SizedBox(
-                                  width: 62,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text('${index + 1}'),
-                                      if (_favorite(channel))
-                                        const Padding(
-                                          padding: EdgeInsets.only(left: 4),
-                                          child: Icon(
-                                            Icons.star,
-                                            size: 14,
-                                            color: Colors.amber,
-                                          ),
-                                        ),
-                                      if (selectedSecondary == channel ||
-                                          selectedTertiary == channel ||
-                                          selectedQuaternary == channel)
-                                        const Padding(
-                                          padding: EdgeInsets.only(left: 4),
-                                          child: Icon(
-                                            Icons.splitscreen,
-                                            size: 14,
-                                            color: Colors.lightBlueAccent,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                                title: Text(
-                                  _displayTitle(channel),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(
-                                  [
-                                    if (nowProgram != null)
-                                      'Now: ${nowProgram.title}',
-                                    if (nowProgram == null &&
-                                        channel.group != null)
-                                      channel.group!,
-                                    if (channel.sourceName != null)
-                                      'Source: ${channel.sourceName!}',
-                                  ].join(' · '),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: Wrap(
-                                  spacing: 2,
-                                  crossAxisAlignment: WrapCrossAlignment.center,
-                                  children: [
-                                    if (channel.sourceName != null)
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 3,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0x3323D5C8),
-                                          borderRadius: BorderRadius.circular(
-                                            12,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          channel.sourceName!,
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                      ),
-                                    IconButton(
-                                      tooltip: _favorite(channel)
-                                          ? 'Remove favorite'
-                                          : 'Add favorite',
-                                      icon: Icon(
-                                        _favorite(channel)
-                                            ? Icons.star
-                                            : Icons.star_border,
-                                        color: _favorite(channel)
-                                            ? Colors.amber
-                                            : null,
-                                      ),
-                                      onPressed: () => _toggleFavorite(channel),
-                                    ),
-                                    if (splitScreen)
-                                      IconButton(
-                                        tooltip: 'Open on focused pane',
-                                        icon: const Icon(Icons.open_in_new),
-                                        onPressed: () => unawaited(
-                                          _openFocusedPane(channel),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                                onTap: () =>
-                                    unawaited(_openFocusedPane(channel)),
-                              );
-                            },
-                          ),
-                  ),
-                if (!fullScreenVideo) const VerticalDivider(width: 1),
-                Expanded(
-                  child: KeyboardListener(
-                    focusNode: fullScreenFocusNode,
-                    onKeyEvent: _onFullScreenKey,
-                    child: MouseRegion(
-                      onEnter: (_) => _showFullScreenControlsTemporarily(),
-                      onHover: (_) => _showFullScreenControlsTemporarily(),
-                      child: !splitScreen && video == null
-                          ? const Center(
-                              child: Text(
-                                'Choose a source and channel to begin playback.',
-                              ),
-                            )
-                          : splitScreen
-                          ? _buildSplitLayout()
-                          : Stack(
-                              children: [
-                                GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: _showOsd,
-                                  child: DecoratedBox(
-                                    decoration: const BoxDecoration(
-                                      color: Colors.black,
-                                    ),
-                                    child: Video(
-                                      controller: video!,
-                                      controls: NoVideoControls,
-                                    ),
-                                  ),
-                                ),
-                                if (osdVisible && selected != null)
-                                  (() {
-                                    final nowProgram = _currentProgram(
-                                      selected!,
-                                    );
-                                    final nextProgram = _nextProgram(selected!);
-                                    final hasGuideData =
-                                        nowProgram != null ||
-                                        nextProgram != null ||
-                                        _programsForChannel(
-                                          selected!,
-                                        ).isNotEmpty;
-                                    return _LiveTvOsd(
-                                      channelName: selected!.title,
-                                      nowProgram: nowProgram,
-                                      nextProgram: nextProgram,
-                                      epgProgress: _epgProgress(nowProgram),
-                                      isFavorite: _favorite(selected!),
-                                      recording: recording,
-                                      liveOnly: lastDuration <= Duration.zero,
-                                      splitScreen: splitScreen,
-                                      screenCount: screenCount,
-                                      hasEpg: hasGuideData,
-                                      onFavorite: () =>
-                                          unawaited(_toggleFavorite(selected!)),
-                                      onPlayPause: () =>
-                                          unawaited(_togglePlayPause()),
-                                      onStop: () =>
-                                          unawaited(_stopCurrentChannel()),
-                                      onChannelDown: () => unawaited(
-                                        _zapChannel(-1, secondary: false),
-                                      ),
-                                      onChannelUp: () => unawaited(
-                                        _zapChannel(1, secondary: false),
-                                      ),
-                                      onRewind: () => unawaited(
-                                        _seekRelative(
-                                          const Duration(seconds: -10),
-                                        ),
-                                      ),
-                                      onForward: () => unawaited(
-                                        _seekRelative(
-                                          const Duration(seconds: 10),
-                                        ),
-                                      ),
-                                      onRecord: () => unawaited(_toggleDvr()),
-                                      onSchedule: () =>
-                                          unawaited(_scheduleDvrFromGuide()),
-                                      onGuide: _showEpgGuide,
-                                      onSplit: () =>
-                                          unawaited(_toggleSplitScreen()),
-                                      onFullScreen: _toggleFullScreenVideo,
-                                    );
-                                  })(),
-                                if (fullScreenVideo)
-                                  Positioned(
-                                    top: 12,
-                                    right: 12,
-                                    child: AnimatedOpacity(
-                                      opacity: fullScreenControlsVisible
-                                          ? 1
-                                          : 0,
-                                      duration: const Duration(
-                                        milliseconds: 180,
-                                      ),
-                                      child: IgnorePointer(
-                                        ignoring: !fullScreenControlsVisible,
-                                        child: IconButton.filledTonal(
-                                          tooltip: 'Exit full screen',
-                                          onPressed: _toggleFullScreenVideo,
-                                          icon: const Icon(
-                                            Icons.fullscreen_exit,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'open'),
+            child: const Text('Play on focused pane'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'guide'),
+            child: const Text('Open guide'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'schedule'),
+            child: const Text('Schedule DVR'),
           ),
         ],
       ),
-    ),
+    );
+    switch (action) {
+      case 'favorite':
+        await _toggleFavorite(channel);
+        break;
+      case 'open':
+        await _openFocusedPane(channel);
+        break;
+      case 'guide':
+        _showEpgGuide();
+        break;
+      case 'schedule':
+        await _scheduleDvrFromGuide();
+        break;
+    }
+  }
+
+  Future<void> _openSearchKeyboard() async {
+    final controller = TextEditingController(text: search.text);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Channel search'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textInputAction: TextInputAction.search,
+          decoration: const InputDecoration(
+            labelText: 'Search channels',
+            hintText: 'Type channel, group, or program',
+          ),
+          onSubmitted: (text) => Navigator.pop(ctx, text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) {
+      return;
+    }
+    search.text = value;
+    _recomputeChannelViews();
+  }
+
+  Future<void> _openVoiceSearch() async {
+    final controller = TextEditingController(text: search.text);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Voice search'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Use your system keyboard microphone button to dictate a search query where supported by this device.',
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                labelText: 'Voice query',
+                hintText: 'Dictate or type',
+              ),
+              onSubmitted: (text) => Navigator.pop(ctx, text),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Search'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) {
+      return;
+    }
+    search.text = value;
+    _recomputeChannelViews();
+  }
+
+  Future<void> _handleBackIntent() async {
+    final now = DateTime.now();
+    final armed = backExitArmedUntil;
+    if (armed != null && armed.isAfter(now)) {
+      await _minimizeToPipAndGoHome();
+      return;
+    }
+    _setState(() {
+      backExitArmedUntil = now.add(const Duration(seconds: 2));
+      status = 'Press Back again to return home.';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeTokens = context.millitopTheme;
+    final preset = themeTokens.layoutPreset;
+    final channelRailOnRight =
+        preset == MillitopLayoutPreset.commandDeck ||
+        preset == MillitopLayoutPreset.haloSplit;
+    Widget premiumCard({
+      required Widget child,
+      EdgeInsetsGeometry padding = const EdgeInsets.all(12),
+      EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(12, 0, 12, 10),
+    }) => Container(
+      margin: margin,
+      padding: padding,
+      decoration: BoxDecoration(
+        color: themeTokens.panelColor.withAlpha(130),
+        borderRadius: BorderRadius.circular(themeTokens.cardRadius),
+        border: Border.all(color: themeTokens.panelBorder),
+      ),
+      child: child,
+    );
+    ButtonStyle tvButtonStyle({required bool prominent}) => ButtonStyle(
+      minimumSize: WidgetStateProperty.all(
+        Size(prominent ? 184 : 168, prominent ? 56 : 52),
+      ),
+      padding: WidgetStateProperty.all(
+        const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+      ),
+      textStyle: WidgetStateProperty.all(
+        const TextStyle(
+          fontSize: 16.5,
+          fontWeight: FontWeight.w600,
+          height: 1.2,
+        ),
+      ),
+      side: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.focused)) {
+          return BorderSide(color: themeTokens.accentColor, width: 2);
+        }
+        if (states.contains(WidgetState.hovered)) {
+          return BorderSide(
+            color: themeTokens.accentColor.withAlpha(200),
+            width: 1.4,
+          );
+        }
+        return BorderSide(
+          color: themeTokens.panelBorder.withAlpha(160),
+          width: 1,
+        );
+      }),
+    );
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (_, __) {
+        unawaited(_handleBackIntent());
+      },
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            unawaited(_handleBackIntent());
+          },
+          const SingleActivator(LogicalKeyboardKey.goBack): () {
+            unawaited(_handleBackIntent());
+          },
+          const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () {
+            unawaited(_togglePlayPause());
+          },
+          const SingleActivator(LogicalKeyboardKey.space): () {
+            unawaited(_togglePlayPause());
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+            if (fullScreenVideo) {
+              unawaited(_zapChannel(-1, secondary: splitScreen));
+            } else {
+              _focusChannelByOffset(-1);
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+            if (fullScreenVideo) {
+              unawaited(_zapChannel(1, secondary: splitScreen));
+            } else {
+              _focusChannelByOffset(1);
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.pageUp): () {
+            _focusChannelByPage(-1);
+          },
+          const SingleActivator(LogicalKeyboardKey.pageDown): () {
+            _focusChannelByPage(1);
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            unawaited(
+              _seekRelative(
+                const Duration(seconds: -30),
+                secondary: splitScreen,
+              ),
+            );
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+            unawaited(
+              _seekRelative(
+                const Duration(seconds: 30),
+                secondary: splitScreen,
+              ),
+            );
+          },
+          const SingleActivator(LogicalKeyboardKey.enter): () {
+            final channel = _focusedChannel;
+            if (channel != null) {
+              unawaited(_openFocusedPane(channel));
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.select): () {
+            final channel = _focusedChannel;
+            if (channel != null) {
+              unawaited(_openFocusedPane(channel));
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.keyF): () {
+            final channel = _focusedChannel;
+            if (channel != null) {
+              unawaited(_toggleFavorite(channel));
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.keyG): _showEpgGuide,
+          const SingleActivator(LogicalKeyboardKey.keyM): () {
+            unawaited(_openFocusedChannelMenu());
+          },
+          const SingleActivator(LogicalKeyboardKey.slash): () {
+            unawaited(_openSearchKeyboard());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyV): () {
+            unawaited(_openVoiceSearch());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyR): () {
+            unawaited(_scheduleDvrFromGuide());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyS): () {
+            unawaited(_toggleSplitScreen());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyL):
+              _toggleFullScreenVideo,
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+            screenFocusNode.requestFocus();
+            unawaited(_openSearchKeyboard());
+          },
+        },
+        child: Focus(
+          autofocus: true,
+          focusNode: screenFocusNode,
+          child: Theme(
+            data: Theme.of(context).copyWith(
+              filledButtonTheme: FilledButtonThemeData(
+                style: tvButtonStyle(prominent: true),
+              ),
+              outlinedButtonTheme: OutlinedButtonThemeData(
+                style: tvButtonStyle(prominent: false),
+              ),
+              textButtonTheme: TextButtonThemeData(
+                style: tvButtonStyle(prominent: false),
+              ),
+            ),
+            child: Scaffold(
+              appBar: fullScreenVideo
+                  ? null
+                  : AppBar(
+                      title: Text(switch (preset) {
+                        MillitopLayoutPreset.commandDeck => 'Live Command',
+                        MillitopLayoutPreset.haloSplit => 'Live Grid',
+                        MillitopLayoutPreset.emberStack => 'Live Lounge',
+                        _ => 'Live TV',
+                      }),
+                      leading: IconButton(
+                        tooltip: 'Home (PiP)',
+                        onPressed: () => unawaited(_handleBackIntent()),
+                        icon: const Icon(Icons.arrow_back),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: opening ? null : _manageSources,
+                          child: const Text('Manage Sources'),
+                        ),
+                        TextButton(
+                          onPressed: loading || opening || source == null
+                              ? null
+                              : _loadChannels,
+                          child: const Text('Reload'),
+                        ),
+                        IconButton(
+                          tooltip: 'Guide',
+                          onPressed:
+                              _channelForPane(splitScreen ? focusedPane : 0) ==
+                                  null
+                              ? null
+                              : _showEpgGuide,
+                          icon: const Icon(Icons.view_agenda_outlined),
+                        ),
+                        IconButton(
+                          tooltip: screenCount == 1
+                              ? 'Enable split screen'
+                              : screenCount == 2
+                              ? 'Enable 3-screen'
+                              : screenCount == 3
+                              ? 'Enable 4-screen'
+                              : 'Return to single screen',
+                          onPressed: loading || opening
+                              ? null
+                              : () => unawaited(_toggleSplitScreen()),
+                          icon: Icon(
+                            screenCount == 1
+                                ? Icons.view_week
+                                : Icons.grid_view,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: fullScreenVideo
+                              ? 'Exit full screen'
+                              : 'Full screen',
+                          onPressed: _toggleFullScreenVideo,
+                          icon: Icon(
+                            fullScreenVideo
+                                ? Icons.fullscreen_exit
+                                : Icons.fullscreen,
+                          ),
+                        ),
+                      ],
+                      bottom: preset == MillitopLayoutPreset.streamRail
+                          ? PreferredSize(
+                              preferredSize: const Size.fromHeight(42),
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  14,
+                                  0,
+                                  14,
+                                  8,
+                                ),
+                                child: Row(
+                                  children: [
+                                    IconButton(
+                                      tooltip: lastDuration <= Duration.zero
+                                          ? 'Previous channel'
+                                          : 'Rewind 10 seconds',
+                                      onPressed: () => unawaited(
+                                        _seekRelative(
+                                          const Duration(seconds: -10),
+                                          secondary: splitScreen,
+                                        ),
+                                      ),
+                                      icon: const Icon(Icons.fast_rewind),
+                                    ),
+                                    IconButton(
+                                      tooltip: 'Play or pause',
+                                      onPressed: () =>
+                                          unawaited(_togglePlayPause()),
+                                      icon: const Icon(Icons.play_arrow),
+                                    ),
+                                    IconButton(
+                                      tooltip: lastDuration <= Duration.zero
+                                          ? 'Next channel'
+                                          : 'Forward 10 seconds',
+                                      onPressed: () => unawaited(
+                                        _seekRelative(
+                                          const Duration(seconds: 10),
+                                          secondary: splitScreen,
+                                        ),
+                                      ),
+                                      icon: const Icon(Icons.fast_forward),
+                                    ),
+                                    IconButton(
+                                      tooltip: fullScreenVideo
+                                          ? 'Exit full screen'
+                                          : 'Full screen',
+                                      onPressed: _toggleFullScreenVideo,
+                                      icon: Icon(
+                                        fullScreenVideo
+                                            ? Icons.fullscreen_exit
+                                            : Icons.fullscreen,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      splitScreen
+                                          ? '$screenCount screens'
+                                          : 'Single screen',
+                                      style: TextStyle(
+                                        color: themeTokens.mutedColor,
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      '${visibleChannels.length} channels',
+                                      style: TextStyle(
+                                        color: themeTokens.mutedColor,
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            )
+                          : null,
+                    ),
+              body: SafeArea(
+                child: Column(
+                  children: [
+                    if (!fullScreenVideo && (loading || opening))
+                      const LinearProgressIndicator(),
+                    if (!fullScreenVideo &&
+                        (status.isNotEmpty ||
+                            syncStatus.isNotEmpty ||
+                            error.isNotEmpty))
+                      premiumCard(
+                        margin: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (status.isNotEmpty)
+                              Text(
+                                status,
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            if (syncStatus.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                syncStatus,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                            if (error.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                error,
+                                style: const TextStyle(
+                                  color: Colors.orangeAccent,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    if (!fullScreenVideo)
+                      premiumCard(
+                        margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Channel discovery',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: [
+                                Expanded(
+                                  flex: 2,
+                                  child: DropdownButtonFormField<String>(
+                                    key: ValueKey(
+                                      allSourcesSelected
+                                          ? 'source-all'
+                                          : (source?.id ?? 'no-source'),
+                                    ),
+                                    initialValue: allSourcesSelected
+                                        ? 'all'
+                                        : source?.id,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Source',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    items: [
+                                      const DropdownMenuItem<String>(
+                                        value: 'all',
+                                        child: Text('All Sources'),
+                                      ),
+                                      ...sources.map(
+                                        (item) => DropdownMenuItem<String>(
+                                          value: item.id,
+                                          child: Text(
+                                            '${item.name} (${item.isXtream ? 'Xtream' : 'M3U'})',
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                    onChanged: loading || opening
+                                        ? null
+                                        : (value) async {
+                                            if (value == 'all') {
+                                              _setState(() {
+                                                allSourcesSelected = true;
+                                                selectedGroup =
+                                                    selectedGroupByScope[_sourceId()] ??
+                                                    'All';
+                                              });
+                                              await _scheduleProfileSync();
+                                              await _loadChannels();
+                                              return;
+                                            }
+                                            final next = sources.firstWhere(
+                                              (item) => item.id == value,
+                                              orElse: () => sources.first,
+                                            );
+                                            _setState(() {
+                                              source = next;
+                                              allSourcesSelected = false;
+                                              selectedGroup =
+                                                  selectedGroupByScope[_sourceId()] ??
+                                                  'All';
+                                            });
+                                            await _scheduleProfileSync();
+                                            await _loadChannels();
+                                          },
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  flex: 3,
+                                  child: TextField(
+                                    controller: search,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Search channels',
+                                      border: OutlineInputBorder(),
+                                      prefixIcon: Icon(Icons.search),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                IconButton.filledTonal(
+                                  tooltip: 'Channel Scope',
+                                  onPressed: loading || opening
+                                      ? null
+                                      : _manageChannelScope,
+                                  icon: const Icon(Icons.tune),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (!fullScreenVideo)
+                      premiumCard(
+                        margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 2,
+                              child:
+                                  DropdownButtonFormField<_ChannelFilterMode>(
+                                    initialValue: filterMode,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Channel Filter',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    items: const [
+                                      DropdownMenuItem(
+                                        value: _ChannelFilterMode.all,
+                                        child: Text('All Channels'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: _ChannelFilterMode.favorites,
+                                        child: Text('Favorites'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: _ChannelFilterMode.recent,
+                                        child: Text('Continue Watching'),
+                                      ),
+                                    ],
+                                    onChanged: (value) {
+                                      if (value == null) {
+                                        return;
+                                      }
+                                      _setState(() => filterMode = value);
+                                      _recomputeChannelViews();
+                                    },
+                                  ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              flex: 3,
+                              child: DropdownButtonFormField<String>(
+                                key: ValueKey(
+                                  'group-$selectedGroup-${groupOptions.length}',
+                                ),
+                                initialValue:
+                                    groupOptions.contains(selectedGroup)
+                                    ? selectedGroup
+                                    : groupOptions.first,
+                                decoration: const InputDecoration(
+                                  labelText: 'Category',
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: groupOptions
+                                    .map(
+                                      (group) => DropdownMenuItem<String>(
+                                        value: group,
+                                        child: Text(
+                                          group,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: (value) {
+                                  if (value == null) {
+                                    return;
+                                  }
+                                  _setState(() {
+                                    selectedGroup = value;
+                                    selectedGroupByScope[_sourceId()] = value;
+                                  });
+                                  _pinCategorySelection(value);
+                                  _recomputeChannelViews();
+                                  unawaited(_scheduleProfileSync());
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    Expanded(
+                      child: Row(
+                        textDirection: channelRailOnRight
+                            ? TextDirection.rtl
+                            : TextDirection.ltr,
+                        children: [
+                          if (!fullScreenVideo)
+                            Directionality(
+                              textDirection: TextDirection.ltr,
+                              child: Container(
+                                width: 470,
+                                margin: const EdgeInsets.fromLTRB(
+                                  12,
+                                  0,
+                                  10,
+                                  12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: themeTokens.panelColor.withAlpha(130),
+                                  borderRadius: BorderRadius.circular(
+                                    themeTokens.cardRadius,
+                                  ),
+                                  border: Border.all(
+                                    color: themeTokens.panelBorder,
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Padding(
+                                      padding: EdgeInsets.fromLTRB(
+                                        14,
+                                        12,
+                                        14,
+                                        8,
+                                      ),
+                                      child: Text(
+                                        'Channels',
+                                        style: TextStyle(
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: visibleChannels.isEmpty
+                                          ? const Center(
+                                              child: Text(
+                                                'No channels match the current filter.',
+                                              ),
+                                            )
+                                          : ListView.builder(
+                                              controller:
+                                                  channelScrollController,
+                                              itemExtent: 74,
+                                              itemCount: visibleChannels.length,
+                                              itemBuilder: (context, index) {
+                                                final channel =
+                                                    visibleChannels[index];
+                                                final focused =
+                                                    index ==
+                                                    focusedChannelIndex;
+                                                final active =
+                                                    selected == channel ||
+                                                    selectedSecondary ==
+                                                        channel ||
+                                                    selectedTertiary ==
+                                                        channel ||
+                                                    selectedQuaternary ==
+                                                        channel;
+                                                final nowProgram =
+                                                    _currentProgram(channel);
+                                                return ListTile(
+                                                  minVerticalPadding: 9,
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                    side: BorderSide(
+                                                      color: focused
+                                                          ? themeTokens
+                                                                .accentColor
+                                                          : Colors.transparent,
+                                                      width: focused ? 1.4 : 1,
+                                                    ),
+                                                  ),
+                                                  selected: active,
+                                                  tileColor: focused
+                                                      ? themeTokens
+                                                            .selectedSurface
+                                                      : null,
+                                                  leading: SizedBox(
+                                                    width: 62,
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        if (active)
+                                                          const Padding(
+                                                            padding:
+                                                                EdgeInsets.only(
+                                                                  right: 4,
+                                                                ),
+                                                            child: Icon(
+                                                              Icons.play_arrow,
+                                                              size: 14,
+                                                              color: Colors
+                                                                  .greenAccent,
+                                                            ),
+                                                          ),
+                                                        Text('${index + 1}'),
+                                                        if (_favorite(channel))
+                                                          const Padding(
+                                                            padding:
+                                                                EdgeInsets.only(
+                                                                  left: 4,
+                                                                ),
+                                                            child: Icon(
+                                                              Icons.star,
+                                                              size: 14,
+                                                              color:
+                                                                  Colors.amber,
+                                                            ),
+                                                          ),
+                                                        if (selectedSecondary ==
+                                                                channel ||
+                                                            selectedTertiary ==
+                                                                channel ||
+                                                            selectedQuaternary ==
+                                                                channel)
+                                                          const Padding(
+                                                            padding:
+                                                                EdgeInsets.only(
+                                                                  left: 4,
+                                                                ),
+                                                            child: Icon(
+                                                              Icons.splitscreen,
+                                                              size: 14,
+                                                              color: Colors
+                                                                  .lightBlueAccent,
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  title: Text(
+                                                    _displayTitle(channel),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      fontSize: 17,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      height: 1.2,
+                                                    ),
+                                                  ),
+                                                  subtitle: Text(
+                                                    [
+                                                      if (nowProgram != null)
+                                                        'Now: ${nowProgram.title}',
+                                                      if (nowProgram == null &&
+                                                          channel.group != null)
+                                                        channel.group!,
+                                                      if (channel.sourceName !=
+                                                          null)
+                                                        'Source: ${channel.sourceName!}',
+                                                    ].join(' · '),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      fontSize: 13.5,
+                                                      color: Colors.white70,
+                                                      height: 1.35,
+                                                    ),
+                                                  ),
+                                                  trailing: Wrap(
+                                                    spacing: 2,
+                                                    crossAxisAlignment:
+                                                        WrapCrossAlignment
+                                                            .center,
+                                                    children: [
+                                                      if (channel.sourceName !=
+                                                          null)
+                                                        Container(
+                                                          padding:
+                                                              const EdgeInsets.symmetric(
+                                                                horizontal: 8,
+                                                                vertical: 3,
+                                                              ),
+                                                          decoration: BoxDecoration(
+                                                            color: const Color(
+                                                              0x3323D5C8,
+                                                            ),
+                                                            borderRadius:
+                                                                BorderRadius.circular(
+                                                                  12,
+                                                                ),
+                                                          ),
+                                                          child: Text(
+                                                            channel.sourceName!,
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                        ),
+                                                      IconButton(
+                                                        tooltip:
+                                                            _favorite(channel)
+                                                            ? 'Remove favorite'
+                                                            : 'Add favorite',
+                                                        icon: Icon(
+                                                          _favorite(channel)
+                                                              ? Icons.star
+                                                              : Icons
+                                                                    .star_border,
+                                                          color:
+                                                              _favorite(channel)
+                                                              ? Colors.amber
+                                                              : null,
+                                                        ),
+                                                        onPressed: () =>
+                                                            _toggleFavorite(
+                                                              channel,
+                                                            ),
+                                                      ),
+                                                      if (splitScreen)
+                                                        IconButton(
+                                                          tooltip:
+                                                              'Open on focused pane',
+                                                          icon: const Icon(
+                                                            Icons.open_in_new,
+                                                          ),
+                                                          onPressed: () =>
+                                                              unawaited(
+                                                                _openFocusedPane(
+                                                                  channel,
+                                                                ),
+                                                              ),
+                                                        ),
+                                                    ],
+                                                  ),
+                                                  onTap: () => unawaited(
+                                                    _openFocusedPane(channel),
+                                                  ),
+                                                  onFocusChange: (value) {
+                                                    if (value) {
+                                                      _setState(
+                                                        () =>
+                                                            focusedChannelIndex =
+                                                                index,
+                                                      );
+                                                    }
+                                                  },
+                                                );
+                                              },
+                                            ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          SizedBox(width: fullScreenVideo ? 0 : 2),
+                          Expanded(
+                            child: KeyboardListener(
+                              focusNode: fullScreenFocusNode,
+                              onKeyEvent: _onFullScreenKey,
+                              child: MouseRegion(
+                                onEnter: (_) =>
+                                    _showFullScreenControlsTemporarily(),
+                                onHover: (_) =>
+                                    _showFullScreenControlsTemporarily(),
+                                child: !splitScreen && video == null
+                                    ? const Center(
+                                        child: Text(
+                                          'Choose a source and channel to begin playback.',
+                                        ),
+                                      )
+                                    : splitScreen
+                                    ? _buildSplitLayout()
+                                    : Stack(
+                                        children: [
+                                          GestureDetector(
+                                            behavior: HitTestBehavior.opaque,
+                                            onTap: _showOsd,
+                                            child: DecoratedBox(
+                                              decoration: const BoxDecoration(
+                                                color: Colors.black,
+                                              ),
+                                              child: Video(
+                                                controller: video!,
+                                                controls: NoVideoControls,
+                                              ),
+                                            ),
+                                          ),
+                                          if (osdVisible && selected != null)
+                                            (() {
+                                              final nowProgram =
+                                                  _currentProgram(selected!);
+                                              final nextProgram = _nextProgram(
+                                                selected!,
+                                              );
+                                              final hasGuideData =
+                                                  nowProgram != null ||
+                                                  nextProgram != null ||
+                                                  _programsForChannel(
+                                                    selected!,
+                                                  ).isNotEmpty;
+                                              return _LiveTvOsd(
+                                                channelName: selected!.title,
+                                                nowProgram: nowProgram,
+                                                nextProgram: nextProgram,
+                                                epgProgress: _epgProgress(
+                                                  nowProgram,
+                                                ),
+                                                isFavorite: _favorite(
+                                                  selected!,
+                                                ),
+                                                recording: recording,
+                                                liveOnly:
+                                                    lastDuration <=
+                                                    Duration.zero,
+                                                splitScreen: splitScreen,
+                                                screenCount: screenCount,
+                                                hasEpg: hasGuideData,
+                                                onFavorite: () => unawaited(
+                                                  _toggleFavorite(selected!),
+                                                ),
+                                                onPlayPause: () => unawaited(
+                                                  _togglePlayPause(),
+                                                ),
+                                                onStop: () => unawaited(
+                                                  _stopCurrentChannel(),
+                                                ),
+                                                onChannelDown: () => unawaited(
+                                                  _zapChannel(
+                                                    -1,
+                                                    secondary: false,
+                                                  ),
+                                                ),
+                                                onChannelUp: () => unawaited(
+                                                  _zapChannel(
+                                                    1,
+                                                    secondary: false,
+                                                  ),
+                                                ),
+                                                onRewind: () => unawaited(
+                                                  _seekRelative(
+                                                    const Duration(
+                                                      seconds: -10,
+                                                    ),
+                                                  ),
+                                                ),
+                                                onForward: () => unawaited(
+                                                  _seekRelative(
+                                                    const Duration(seconds: 10),
+                                                  ),
+                                                ),
+                                                onRecord: () =>
+                                                    unawaited(_toggleDvr()),
+                                                onSchedule: () => unawaited(
+                                                  _scheduleDvrFromGuide(),
+                                                ),
+                                                onGuide: _showEpgGuide,
+                                                onSplit: () => unawaited(
+                                                  _toggleSplitScreen(),
+                                                ),
+                                                onFullScreen:
+                                                    _toggleFullScreenVideo,
+                                              );
+                                            })(),
+                                          if (fullScreenVideo)
+                                            Positioned(
+                                              top: 12,
+                                              right: 12,
+                                              child: AnimatedOpacity(
+                                                opacity:
+                                                    fullScreenControlsVisible
+                                                    ? 1
+                                                    : 0,
+                                                duration: const Duration(
+                                                  milliseconds: 180,
+                                                ),
+                                                child: IgnorePointer(
+                                                  ignoring:
+                                                      !fullScreenControlsVisible,
+                                                  child: IconButton.filledTonal(
+                                                    tooltip: 'Exit full screen',
+                                                    onPressed:
+                                                        _toggleFullScreenVideo,
+                                                    icon: const Icon(
+                                                      Icons.fullscreen_exit,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2748,18 +3440,29 @@ class _LiveTvGuideDialog extends StatefulWidget {
   State<_LiveTvGuideDialog> createState() => _LiveTvGuideDialogState();
 }
 
-class _LiveTvGuideDialogState extends State<_LiveTvGuideDialog> {
+class _LiveTvGuideDialogState extends State<_LiveTvGuideDialog>
+    with SingleTickerProviderStateMixin {
   static const _slotMinutes = 30;
   static const _hoursVisible = 4;
-  static const _rowHeight = 62.0;
-  static const _channelColumnWidth = 220.0;
-  static const _pxPerMinute = 3.2;
+  static const _rowHeight = 74.0;
+  static const _channelColumnWidth = 250.0;
+  static const _pxPerMinute = 3.6;
   late final DateTime windowStartUtc;
   late final DateTime windowEndUtc;
+  late final AnimationController _pulseController;
+  late final Animation<double> _pulse;
 
   @override
   void initState() {
     super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1450),
+    )..repeat(reverse: true);
+    _pulse = CurvedAnimation(
+      parent: _pulseController,
+      curve: Curves.easeInOutCubic,
+    );
     final nowUtc = DateTime.now().toUtc();
     final slotMs = const Duration(minutes: _slotMinutes).inMilliseconds;
     final roundedMs = (nowUtc.millisecondsSinceEpoch ~/ slotMs) * slotMs;
@@ -2768,6 +3471,42 @@ class _LiveTvGuideDialogState extends State<_LiveTvGuideDialog> {
       isUtc: true,
     );
     windowEndUtc = windowStartUtc.add(const Duration(hours: _hoursVisible));
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  Widget _buildNowMarker({required double left, required bool compact}) {
+    return Positioned(
+      left: left,
+      top: 0,
+      bottom: 0,
+      child: AnimatedBuilder(
+        animation: _pulse,
+        builder: (context, child) {
+          final width = compact
+              ? 2.0 + (_pulse.value * 0.6)
+              : 2.0 + (_pulse.value * 0.8);
+          final glow = 0.32 + (_pulse.value * 0.3);
+          return Container(
+            width: width,
+            decoration: BoxDecoration(
+              color: Colors.redAccent.withValues(alpha: 0.92),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.redAccent.withValues(alpha: glow),
+                  blurRadius: compact ? 7 : 10,
+                  spreadRadius: compact ? 0.2 : 0.5,
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   List<_GuideRow> get _rows {
@@ -2802,6 +3541,7 @@ class _LiveTvGuideDialogState extends State<_LiveTvGuideDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = context.millitopTheme;
     final rows = _rows;
     final totalMinutes = windowEndUtc.difference(windowStartUtc).inMinutes;
     final timelineWidth = totalMinutes * _pxPerMinute;
@@ -2811,136 +3551,205 @@ class _LiveTvGuideDialogState extends State<_LiveTvGuideDialog> {
         .clamp(0, timelineWidth)
         .toDouble();
     return AlertDialog(
-      title: const Text('EPG Guide'),
-      contentPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      titlePadding: const EdgeInsets.fromLTRB(18, 16, 18, 0),
+      contentPadding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
+      title: Row(
+        children: [
+          Icon(Icons.view_agenda_outlined, color: tokens.accentColor),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'EPG Guide',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: tokens.selectedSurface,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: tokens.panelBorder),
+            ),
+            child: Text(
+              '${rows.length} channels',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: tokens.accentColor,
+              ),
+            ),
+          ),
+        ],
+      ),
       content: SizedBox(
-        width: 1120,
-        height: 640,
+        width: 1160,
+        height: 680,
         child: rows.isEmpty
             ? const Center(
                 child: Text(
                   'No guide rows matched these channels.\n'
                   'For Xtream, confirm XMLTV is enabled and reload channels.',
                   textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, height: 1.4),
                 ),
               )
-            : Column(
-                children: [
-                  Row(
-                    children: [
-                      const SizedBox(
-                        width: _channelColumnWidth,
-                        child: Text(
-                          'Channels',
-                          style: TextStyle(fontWeight: FontWeight.w700),
+            : Container(
+                decoration: BoxDecoration(
+                  color: tokens.panelColor.withAlpha(120),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: tokens.panelBorder),
+                ),
+                child: Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                      decoration: BoxDecoration(
+                        border: Border(
+                          bottom: BorderSide(color: tokens.panelBorder),
                         ),
                       ),
-                      Expanded(
-                        child: SizedBox(
-                          height: 28,
-                          child: Stack(
-                            children: [
-                              for (
-                                var step = 0;
-                                step <= totalMinutes;
-                                step += _slotMinutes
-                              )
-                                Positioned(
-                                  left: step * _pxPerMinute,
-                                  child: Text(
-                                    _clockText(
-                                      windowStartUtc.add(
-                                        Duration(minutes: step),
-                                      ),
-                                    ),
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                              Positioned(
-                                left: nowOffset,
-                                top: 0,
-                                bottom: 0,
-                                child: Container(
-                                  width: 2,
-                                  color: Colors.redAccent,
-                                ),
+                      child: Row(
+                        children: [
+                          const SizedBox(
+                            width: _channelColumnWidth,
+                            child: Text(
+                              'Channels',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white70,
                               ),
-                            ],
+                            ),
                           ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Divider(height: 12),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: rows.length,
-                      itemBuilder: (context, index) {
-                        final row = rows[index];
-                        final highlighted = row.channel == widget.selected;
-                        return SizedBox(
-                          height: _rowHeight,
-                          child: Row(
-                            children: [
-                              Container(
-                                width: _channelColumnWidth,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                alignment: Alignment.centerLeft,
-                                color: highlighted
-                                    ? const Color(0x3348D1CC)
-                                    : const Color(0x22161F33),
-                                child: Text(
-                                  row.channel.title,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontWeight: highlighted
-                                        ? FontWeight.w700
-                                        : FontWeight.w500,
-                                  ),
-                                ),
-                              ),
-                              Expanded(
-                                child: ClipRect(
-                                  child: Stack(
-                                    children: [
-                                      Positioned.fill(
-                                        child: CustomPaint(
-                                          painter: _GuideGridPainter(
-                                            slotMinutes: _slotMinutes,
-                                            pxPerMinute: _pxPerMinute,
+                          Expanded(
+                            child: SizedBox(
+                              height: 34,
+                              child: Stack(
+                                children: [
+                                  for (
+                                    var step = 0;
+                                    step <= totalMinutes;
+                                    step += _slotMinutes
+                                  )
+                                    Positioned(
+                                      left: step * _pxPerMinute,
+                                      child: Text(
+                                        _clockText(
+                                          windowStartUtc.add(
+                                            Duration(minutes: step),
                                           ),
                                         ),
-                                      ),
-                                      for (final item in row.programs)
-                                        _GuideProgramTile(
-                                          program: item,
-                                          windowStartUtc: windowStartUtc,
-                                          windowEndUtc: windowEndUtc,
-                                          pxPerMinute: _pxPerMinute,
-                                        ),
-                                      Positioned(
-                                        left: nowOffset,
-                                        top: 0,
-                                        bottom: 0,
-                                        child: Container(
-                                          width: 2,
-                                          color: Colors.redAccent,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          height: 1.2,
+                                          color: Colors.white70,
+                                          fontWeight: FontWeight.w600,
                                         ),
                                       ),
-                                    ],
+                                    ),
+                                  _buildNowMarker(
+                                    left: nowOffset,
+                                    compact: true,
                                   ),
-                                ),
+                                ],
                               ),
-                            ],
+                            ),
                           ),
-                        );
-                      },
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                    Expanded(
+                      child: Scrollbar(
+                        thumbVisibility: true,
+                        child: ListView.builder(
+                          itemCount: rows.length,
+                          itemBuilder: (context, index) {
+                            final row = rows[index];
+                            final highlighted = row.channel == widget.selected;
+                            return SizedBox(
+                              height: _rowHeight,
+                              child: Row(
+                                children: [
+                                  AnimatedContainer(
+                                    duration: const Duration(milliseconds: 200),
+                                    curve: Curves.easeOutCubic,
+                                    width: _channelColumnWidth,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    alignment: Alignment.centerLeft,
+                                    decoration: BoxDecoration(
+                                      color: highlighted
+                                          ? const Color(0x3A48D1CC)
+                                          : const Color(0x1A1B273D),
+                                      border: const Border(
+                                        bottom: BorderSide(
+                                          color: Color(0x223D5C8E),
+                                        ),
+                                      ),
+                                    ),
+                                    child: AnimatedDefaultTextStyle(
+                                      duration: const Duration(
+                                        milliseconds: 200,
+                                      ),
+                                      curve: Curves.easeOutCubic,
+                                      style: TextStyle(
+                                        fontSize: 15.5,
+                                        height: 1.3,
+                                        color: highlighted
+                                            ? const Color(0xFFE7FFFF)
+                                            : Colors.white,
+                                        fontWeight: highlighted
+                                            ? FontWeight.w800
+                                            : FontWeight.w600,
+                                      ),
+                                      child: Text(
+                                        row.channel.title,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: ClipRect(
+                                      child: Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: CustomPaint(
+                                              painter: _GuideGridPainter(
+                                                slotMinutes: _slotMinutes,
+                                                pxPerMinute: _pxPerMinute,
+                                              ),
+                                            ),
+                                          ),
+                                          for (final item in row.programs)
+                                            _GuideProgramTile(
+                                              program: item,
+                                              windowStartUtc: windowStartUtc,
+                                              windowEndUtc: windowEndUtc,
+                                              pxPerMinute: _pxPerMinute,
+                                              rowHighlighted: highlighted,
+                                            ),
+                                          _buildNowMarker(
+                                            left: nowOffset,
+                                            compact: false,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
       ),
       actions: [
@@ -2984,50 +3793,116 @@ class _GuideGridPainter extends CustomPainter {
       oldDelegate.pxPerMinute != pxPerMinute;
 }
 
-class _GuideProgramTile extends StatelessWidget {
+class _GuideProgramTile extends StatefulWidget {
   final LiveTvProgram program;
   final DateTime windowStartUtc;
   final DateTime windowEndUtc;
   final double pxPerMinute;
+  final bool rowHighlighted;
   const _GuideProgramTile({
     required this.program,
     required this.windowStartUtc,
     required this.windowEndUtc,
     required this.pxPerMinute,
+    required this.rowHighlighted,
   });
 
   @override
+  State<_GuideProgramTile> createState() => _GuideProgramTileState();
+}
+
+class _GuideProgramTileState extends State<_GuideProgramTile> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
-    final start = program.start.isBefore(windowStartUtc)
-        ? windowStartUtc
-        : program.start;
-    final end = program.end.isAfter(windowEndUtc) ? windowEndUtc : program.end;
-    final offsetMinutes = start.difference(windowStartUtc).inMinutes;
+    final start = widget.program.start.isBefore(widget.windowStartUtc)
+        ? widget.windowStartUtc
+        : widget.program.start;
+    final end = widget.program.end.isAfter(widget.windowEndUtc)
+        ? widget.windowEndUtc
+        : widget.program.end;
+    final offsetMinutes = start.difference(widget.windowStartUtc).inMinutes;
     final widthMinutes = end
         .difference(start)
         .inMinutes
         .clamp(6, 10000)
         .toDouble();
+    final nowUtc = DateTime.now().toUtc();
+    final isLiveNow =
+        !nowUtc.isBefore(widget.program.start) &&
+        nowUtc.isBefore(widget.program.end);
+    final emphasized = _hovered || _focused || widget.rowHighlighted;
+    final scale = emphasized ? 1.02 : 1.0;
+    final borderWidth = isLiveNow ? 1.4 : (emphasized ? 1.3 : 1.0);
     return Positioned(
-      left: offsetMinutes * pxPerMinute,
+      left: offsetMinutes * widget.pxPerMinute,
       top: 6,
       bottom: 6,
-      width: widthMinutes * pxPerMinute,
+      width: widthMinutes * widget.pxPerMinute,
       child: Tooltip(
         message:
-            '${program.title}\n${_clockText(program.start)} - ${_clockText(program.end)}',
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xFF243C63),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFF3D5C8E)),
-          ),
-          child: Text(
-            program.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            '${widget.program.title}\n${_clockText(widget.program.start)} - ${_clockText(widget.program.end)}',
+        child: FocusableActionDetector(
+          onShowFocusHighlight: (value) => setState(() => _focused = value),
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _hovered = true),
+            onExit: (_) => setState(() => _hovered = false),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 1, end: scale),
+              duration: const Duration(milliseconds: 170),
+              curve: Curves.easeOutCubic,
+              builder: (context, value, child) => Transform.scale(
+                scale: value,
+                alignment: Alignment.centerLeft,
+                child: child,
+              ),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 190),
+                curve: Curves.easeOutCubic,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: isLiveNow
+                        ? const [Color(0xFF256B63), Color(0xFF1D4D7A)]
+                        : emphasized
+                        ? const [Color(0xFF2B4A78), Color(0xFF26426A)]
+                        : const [Color(0xFF243C63), Color(0xFF223553)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isLiveNow
+                        ? const Color(0xFF82F8EC)
+                        : emphasized
+                        ? const Color(0xFF7EDAEF)
+                        : const Color(0xFF3D5C8E),
+                    width: borderWidth,
+                  ),
+                  boxShadow: emphasized
+                      ? const [
+                          BoxShadow(
+                            color: Color(0x3348D1CC),
+                            blurRadius: 12,
+                            spreadRadius: 0.5,
+                          ),
+                        ]
+                      : null,
+                ),
+                child: Text(
+                  widget.program.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.3,
+                    fontWeight: emphasized ? FontWeight.w800 : FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -3089,126 +3964,162 @@ class _LiveTvOsd extends StatelessWidget {
     left: 20,
     right: 20,
     bottom: 20,
-    child: DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xCC000000),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              channelName,
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+    child: Theme(
+      data: Theme.of(context).copyWith(
+        filledButtonTheme: FilledButtonThemeData(
+          style: ButtonStyle(
+            minimumSize: WidgetStateProperty.all(const Size(168, 50)),
+            padding: WidgetStateProperty.all(
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             ),
-            if (nowProgram != null)
+            textStyle: WidgetStateProperty.all(
+              const TextStyle(
+                fontSize: 15.5,
+                fontWeight: FontWeight.w600,
+                height: 1.2,
+              ),
+            ),
+            side: WidgetStateProperty.resolveWith((states) {
+              if (states.contains(WidgetState.focused)) {
+                return BorderSide(
+                  color: context.millitopTheme.accentColor,
+                  width: 2,
+                );
+              }
+              return BorderSide(
+                color: context.millitopTheme.panelBorder,
+                width: 1,
+              );
+            }),
+          ),
+        ),
+      ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface.withAlpha(210),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: context.millitopTheme.panelBorder),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
               Text(
-                'Now · ${_clockText(nowProgram!.start)} - ${_clockText(nowProgram!.end)} · ${nowProgram!.title}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            if (nextProgram != null)
-              Text(
-                'Next · ${_clockText(nextProgram!.start)} - ${_clockText(nextProgram!.end)} · ${nextProgram!.title}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white70),
-              ),
-            if (epgProgress != null) ...[
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LinearProgressIndicator(
-                  value: epgProgress,
-                  minHeight: 8,
-                  color: Colors.lightBlueAccent,
-                  backgroundColor: Colors.white12,
+                channelName,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-            ],
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: [
-                FilledButton.tonalIcon(
-                  onPressed: onGuide,
-                  icon: const Icon(Icons.view_agenda_outlined),
-                  label: Text(hasEpg ? 'EPG Guide' : 'EPG Missing'),
+              if (nowProgram != null)
+                Text(
+                  'Now · ${_clockText(nowProgram!.start)} - ${_clockText(nowProgram!.end)} · ${nowProgram!.title}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(height: 1.35),
                 ),
-                FilledButton.tonalIcon(
-                  onPressed: onFavorite,
-                  icon: Icon(isFavorite ? Icons.star : Icons.star_border),
-                  label: Text(isFavorite ? 'Favorite' : 'Add Favorite'),
+              if (nextProgram != null)
+                Text(
+                  'Next · ${_clockText(nextProgram!.start)} - ${_clockText(nextProgram!.end)} · ${nextProgram!.title}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white70, height: 1.35),
                 ),
-                FilledButton.tonalIcon(
-                  onPressed: onRecord,
-                  icon: Icon(
-                    recording ? Icons.stop : Icons.fiber_manual_record,
+              if (epgProgress != null) ...[
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(
+                    value: epgProgress,
+                    minHeight: 8,
+                    color: Colors.lightBlueAccent,
+                    backgroundColor: Colors.white12,
                   ),
-                  label: Text(recording ? 'Stop DVR' : 'Start DVR'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onSchedule,
-                  icon: const Icon(Icons.event_note),
-                  label: const Text('Schedule DVR'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onRewind,
-                  icon: const Icon(Icons.fast_rewind),
-                  label: Text(liveOnly ? 'Prev Channel' : 'Rewind 10s'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onChannelDown,
-                  icon: const Icon(Icons.keyboard_arrow_down),
-                  label: const Text('Channel -'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onPlayPause,
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Play/Pause'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onStop,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('Stop Channel'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onChannelUp,
-                  icon: const Icon(Icons.keyboard_arrow_up),
-                  label: const Text('Channel +'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onForward,
-                  icon: const Icon(Icons.fast_forward),
-                  label: Text(liveOnly ? 'Next Channel' : 'Forward 10s'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onSplit,
-                  icon: Icon(
-                    screenCount == 1 ? Icons.view_week : Icons.grid_view,
-                  ),
-                  label: Text(
-                    screenCount == 1
-                        ? 'Split (2)'
-                        : screenCount == 2
-                        ? 'Split (3)'
-                        : screenCount == 3
-                        ? 'Split (4)'
-                        : 'Single Screen',
-                  ),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onFullScreen,
-                  icon: const Icon(Icons.fullscreen),
-                  label: const Text('Full Screen'),
                 ),
               ],
-            ),
-          ],
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: onGuide,
+                    icon: const Icon(Icons.view_agenda_outlined),
+                    label: Text(hasEpg ? 'EPG Guide' : 'EPG Missing'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onFavorite,
+                    icon: Icon(isFavorite ? Icons.star : Icons.star_border),
+                    label: Text(isFavorite ? 'Favorite' : 'Add Favorite'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onRecord,
+                    icon: Icon(
+                      recording ? Icons.stop : Icons.fiber_manual_record,
+                    ),
+                    label: Text(recording ? 'Stop DVR' : 'Start DVR'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onSchedule,
+                    icon: const Icon(Icons.event_note),
+                    label: const Text('Schedule DVR'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onRewind,
+                    icon: const Icon(Icons.fast_rewind),
+                    label: Text(liveOnly ? 'Prev Channel' : 'Rewind 10s'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onChannelDown,
+                    icon: const Icon(Icons.keyboard_arrow_down),
+                    label: const Text('Channel -'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onPlayPause,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Play/Pause'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onStop,
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Stop Channel'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onChannelUp,
+                    icon: const Icon(Icons.keyboard_arrow_up),
+                    label: const Text('Channel +'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onForward,
+                    icon: const Icon(Icons.fast_forward),
+                    label: Text(liveOnly ? 'Next Channel' : 'Forward 10s'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onSplit,
+                    icon: Icon(
+                      screenCount == 1 ? Icons.view_week : Icons.grid_view,
+                    ),
+                    label: Text(
+                      screenCount == 1
+                          ? 'Split (2)'
+                          : screenCount == 2
+                          ? 'Split (3)'
+                          : screenCount == 3
+                          ? 'Split (4)'
+                          : 'Single Screen',
+                    ),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: onFullScreen,
+                    icon: const Icon(Icons.fullscreen),
+                    label: const Text('Full Screen'),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     ),

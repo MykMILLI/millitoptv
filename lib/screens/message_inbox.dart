@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/remote_inbox.dart';
+import '../theme/millitop_visual_theme.dart';
 
 class MessageInbox extends StatelessWidget {
   final int profileId;
@@ -172,9 +173,9 @@ class _MessageDetailsState extends State<MessageDetails> {
                         message.ackSynced
                             ? 'Acknowledgement confirmed by the server.'
                             : 'Acknowledged on this PC. It will be sent when connected.',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 21,
-                          color: Color(0xFF63DFCB),
+                          color: context.millitopTheme.accentColor,
                         ),
                       )
                     else

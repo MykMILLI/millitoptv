@@ -67,7 +67,10 @@ class LauncherFooter extends StatelessWidget {
         'Profile: $profileName\nArrow keys: move    Enter: open    Esc: back',
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 13, color: Color(0xFFA4B3C8)),
+        style: TextStyle(
+          fontSize: 13,
+          color: Theme.of(context).colorScheme.onSurface.withAlpha(170),
+        ),
       );
       if (constraints.maxWidth >= 1050) {
         return Row(

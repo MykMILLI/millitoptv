@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_source.dart';
+import '../theme/millitop_visual_theme.dart';
 import 'household_store.dart';
 
 class ProfileGate extends StatefulWidget {
@@ -51,6 +53,14 @@ class _ProfileGateState extends State<ProfileGate> {
     try {
       await HouseholdStore.instance.initialize();
       await connection.start();
+      final prefs = HomePreferences();
+      final lastProfileId = await prefs.lastActiveProfileId();
+      if (lastProfileId != null) {
+        final themeId = MillitopThemeController.fromStorage(
+          await prefs.visualTheme(lastProfileId),
+        );
+        MillitopThemeController.instance.setTheme(themeId);
+      }
       if (connection.isEnrolled && !connection.isSuspended) {
         await connection.checkNow();
       }
@@ -65,6 +75,12 @@ class _ProfileGateState extends State<ProfileGate> {
       }
       if (connection.isConnected) {
         await _pullProfileConfig(values);
+        if (lastProfileId != null) {
+          final themeId = MillitopThemeController.fromStorage(
+            await prefs.visualTheme(lastProfileId),
+          );
+          MillitopThemeController.instance.setTheme(themeId);
+        }
         final refreshed = await HouseholdStore.instance.profiles();
         if (mounted) {
           setState(() => profiles = refreshed);
@@ -348,6 +364,18 @@ class _ProfileGateState extends State<ProfileGate> {
     }
   }
 
+  Future<void> _selectProfile(HouseholdProfile profile) async {
+    final prefs = HomePreferences();
+    final themeId = MillitopThemeController.fromStorage(
+      await prefs.visualTheme(profile.id),
+    );
+    MillitopThemeController.instance.setTheme(themeId);
+    if (mounted) {
+      setState(() => selected = profile);
+    }
+    unawaited(prefs.setLastActiveProfileId(profile.id));
+  }
+
   void showError(Object exception) {
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -357,21 +385,22 @@ class _ProfileGateState extends State<ProfileGate> {
 
   Widget avatar(HouseholdProfile profile) {
     final path = profile.avatarPath;
+    final tokens = context.millitopTheme;
 
     return ClipOval(
       child: SizedBox(
         width: 110,
         height: 110,
         child: path == null
-            ? const ColoredBox(
-                color: Color(0xFF28445A),
+            ? ColoredBox(
+                color: tokens.panelColor,
                 child: Icon(Icons.person, size: 70),
               )
             : Image.file(
                 File(path),
                 fit: BoxFit.cover,
-                errorBuilder: (_, error, stack) => const ColoredBox(
-                  color: Color(0xFF28445A),
+                errorBuilder: (_, error, stack) => ColoredBox(
+                  color: tokens.panelColor,
                   child: Icon(Icons.person, size: 70),
                 ),
               ),
@@ -382,6 +411,7 @@ class _ProfileGateState extends State<ProfileGate> {
   Widget _pairingView() {
     final width = MediaQuery.sizeOf(context).width;
     final compact = width < 700;
+    final tokens = context.millitopTheme;
 
     return Center(
       child: SingleChildScrollView(
@@ -406,7 +436,7 @@ class _ProfileGateState extends State<ProfileGate> {
                     status,
                     style: TextStyle(
                       fontSize: compact ? 18 : 23,
-                      color: Color(0xFF63DFCB),
+                      color: tokens.accentColor,
                     ),
                   ),
                   const SizedBox(height: 24),
@@ -466,7 +496,7 @@ class _ProfileGateState extends State<ProfileGate> {
                     Text(
                       pairingError!,
                       style: TextStyle(
-                        color: Colors.orangeAccent,
+                        color: Theme.of(context).colorScheme.secondary,
                         fontSize: compact ? 15 : 19,
                       ),
                     ),
@@ -485,6 +515,7 @@ class _ProfileGateState extends State<ProfileGate> {
     final width = MediaQuery.sizeOf(context).width;
     final compact = width < 900;
     final tileWidth = compact ? ((width - 64) / 2).clamp(150.0, 210.0) : 210.0;
+    final tokens = context.millitopTheme;
     final current = selected;
 
     if (current != null) {
@@ -496,7 +527,7 @@ class _ProfileGateState extends State<ProfileGate> {
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0B1425),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: FutureBuilder<void>(
         future: initialization,
         builder: (context, snapshot) {
@@ -524,12 +555,12 @@ class _ProfileGateState extends State<ProfileGate> {
               padding: EdgeInsets.all(compact ? 16 : 40),
               child: Column(
                 children: [
-                  const Text(
+                  Text(
                     'MILLITOP TV',
                     style: TextStyle(
                       fontSize: 20,
                       letterSpacing: 3,
-                      color: Color(0xFF63DFCB),
+                      color: Theme.of(context).colorScheme.primary,
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -537,14 +568,16 @@ class _ProfileGateState extends State<ProfileGate> {
                     valueListenable: connection.status,
                     builder: (context, status, _) => Text(
                       status,
-                      style: const TextStyle(color: Colors.white70),
+                      style: TextStyle(color: tokens.mutedColor),
                     ),
                   ),
                   if (syncError != null) ...[
                     const SizedBox(height: 8),
                     Text(
                       syncError!,
-                      style: const TextStyle(color: Colors.orangeAccent),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.secondary,
+                      ),
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -561,7 +594,7 @@ class _ProfileGateState extends State<ProfileGate> {
                     'Choose your space',
                     style: TextStyle(
                       fontSize: compact ? 18 : 22,
-                      color: Colors.white60,
+                      color: tokens.mutedColor,
                     ),
                   ),
                   SizedBox(height: compact ? 24 : 42),
@@ -584,7 +617,7 @@ class _ProfileGateState extends State<ProfileGate> {
                                   ),
                                 ),
                                 onPressed: () {
-                                  setState(() => selected = profile);
+                                  unawaited(_selectProfile(profile));
                                 },
                                 child: Column(
                                   children: [

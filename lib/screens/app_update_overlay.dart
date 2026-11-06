@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import '../services/app_updates.dart';
+import '../theme/millitop_visual_theme.dart';
 
 class AppUpdateOverlay extends StatelessWidget {
   final Widget child;
@@ -23,7 +24,7 @@ class AppUpdateOverlay extends StatelessWidget {
             child: SafeArea(
               child: Material(
                 elevation: 16,
-                color: const Color(0xFF16342F),
+                color: context.millitopTheme.panelColor,
                 borderRadius: BorderRadius.circular(16),
                 child: Container(
                   width: maxWidth < 520 ? maxWidth - 24 : 430,

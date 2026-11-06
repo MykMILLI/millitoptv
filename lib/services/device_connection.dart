@@ -61,6 +61,7 @@ class DeviceConnection {
       '/api/device/live-tv/dvr/schedule',
       '/api/device/live-tv/dvr/recordings',
       '/api/device/service/access',
+      '/api/device/media-library/catalog',
     }.contains(route)) {
       throw ArgumentError('Unsupported device route.');
     }
@@ -68,12 +69,16 @@ class DeviceConnection {
       throw StateError('Device connection is unavailable or changed.');
     }
     final saved = _record!;
+    final requestTimeout = route == '/api/device/media-library/catalog'
+        ? const Duration(seconds: 90)
+        : const Duration(seconds: 15);
     try {
       return await _post(
         validateServer(saved['serverUrl'] as String),
         route,
         body,
         token: saved['deviceToken'] as String,
+        requestTimeout: requestTimeout,
       );
     } on DeviceRequestFailure catch (error) {
       if (error.statusCode == 401 && connectionKey == expectedConnection) {
@@ -380,6 +385,7 @@ class DeviceConnection {
     String route,
     Map<String, dynamic> body, {
     String? token,
+    Duration requestTimeout = const Duration(seconds: 15),
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 12);
@@ -387,7 +393,7 @@ class DeviceConnection {
     try {
       final request = await client
           .postUrl(server.resolve(route))
-          .timeout(const Duration(seconds: 15));
+          .timeout(requestTimeout);
 
       // Never redirect a request containing a device credential.
       request.followRedirects = false;
@@ -400,13 +406,13 @@ class DeviceConnection {
       request.write(jsonEncode(body));
 
       final response = await request.close().timeout(
-        const Duration(seconds: 15),
+        requestTimeout,
       );
 
       final text = await response
           .transform(utf8.decoder)
           .join()
-          .timeout(const Duration(seconds: 15));
+          .timeout(requestTimeout);
 
       Map<String, dynamic> data = {};
 

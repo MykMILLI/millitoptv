@@ -1,10 +1,15 @@
+// ignore_for_file: deprecated_member_use, use_build_context_synchronously, prefer_collection_literals, unnecessary_brace_in_string_interps, unnecessary_string_interpolations
+
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/device_connection.dart';
 import '../services/firefox_browser.dart';
@@ -14,8 +19,59 @@ import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/live_tv_source.dart';
+import '../services/subtitle_provider_service.dart';
+import '../services/video_playback_memory.dart';
+import '../theme/millitop_visual_theme.dart';
 
 enum _MediaTab { movies, series }
+enum _MediaSortMode { relevance, title, source }
+
+const String _managedSourcePrefix = 'managed:';
+
+class _ManagedCatalogLibrary {
+  final String id;
+  final String name;
+  final List<LiveTvMediaItem> movies;
+  final List<LiveTvMediaItem> series;
+  final Map<String, LiveTvSeriesDetails> seriesDetailsById;
+  const _ManagedCatalogLibrary({
+    required this.id,
+    required this.name,
+    required this.movies,
+    required this.series,
+    required this.seriesDetailsById,
+  });
+}
+
+class _MediaItemSourceOrigin {
+  final String sourceId;
+  final String sourceName;
+  final LiveTvSource? source;
+  const _MediaItemSourceOrigin({
+    required this.sourceId,
+    required this.sourceName,
+    this.source,
+  });
+}
+
+class _LiveTvMediaPaint {
+  static MillitopThemeSpec get _spec => MillitopThemeController.instance.current;
+  static ColorScheme get _scheme =>
+      MillitopThemeController.instance.materialTheme.colorScheme;
+  static Color get accent => _spec.accent;
+  static Color get panel => _spec.surfaceVariant;
+  static Color get onSurface => _scheme.onSurface;
+  static Color get onSurface70 => onSurface.withAlpha(179);
+  static Color get onSurface60 => onSurface.withAlpha(153);
+  static Color get onSurface54 => onSurface.withAlpha(138);
+  static Color get onSurface24 => onSurface.withAlpha(61);
+  static Color get warning => _scheme.secondary;
+  static Color get error => _scheme.error;
+  static Color get overlayMuted => _scheme.surface.withAlpha(170);
+  static Color get overlayStrong => _scheme.surface.withAlpha(204);
+  static Color get overlayOpaque => _scheme.surface.withAlpha(208);
+  static Color get transparent => onSurface.withAlpha(0);
+}
 
 class LiveTvMediaScreen extends StatefulWidget {
   final int profileId;
@@ -39,9 +95,12 @@ class LiveTvMediaScreen extends StatefulWidget {
 class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   final service = const LiveTvPlaylistService();
   final liveTvControl = LiveTvControlService();
+  final playbackMemory = VideoPlaybackMemory();
   final search = TextEditingController();
-  final Map<LiveTvMediaItem, LiveTvSource> mediaItemSources = {};
+  final searchFocus = FocusNode();
+  final Map<LiveTvMediaItem, _MediaItemSourceOrigin> mediaItemOrigins = {};
   List<LiveTvSource> sources = [];
+  final Map<String, _ManagedCatalogLibrary> managedCatalogBySourceId = {};
   LiveTvSource? source;
   List<LiveTvMediaItem> movies = [];
   List<LiveTvMediaItem> series = [];
@@ -49,13 +108,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvLibraryItem> favorites = [];
   List<LiveTvUserPlaylist> playlists = [];
   _MediaTab tab = _MediaTab.movies;
+  _MediaSortMode sortMode = _MediaSortMode.relevance;
   String groupFilter = 'All';
+  bool versionAwareOnly = false;
   bool loading = true;
   bool resumedInitial = false;
   bool allSourcesSelected = false;
   int catalogLoadGeneration = 0;
   String status = '';
   String error = '';
+  String? focusedMediaId;
   Timer? profileSyncDebounce;
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
@@ -70,8 +132,253 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   @override
   void dispose() {
     profileSyncDebounce?.cancel();
+    searchFocus.dispose();
     search.dispose();
     super.dispose();
+  }
+
+  bool _isManagedSource(LiveTvSource item) =>
+      item.id.startsWith(_managedSourcePrefix) || item.type == 'managed';
+
+  bool _isManagedSourceId(String value) => value.startsWith(_managedSourcePrefix);
+
+  String _managedSourceId(String libraryId) => '$_managedSourcePrefix$libraryId';
+
+  String _managedPathToStreamUrl(String value) {
+    final path = value.trim();
+    if (path.isEmpty) {
+      return path;
+    }
+    if (path.startsWith(r'\\')) {
+      return Uri.file(path, windows: true).toString();
+    }
+    final uri = Uri.tryParse(path);
+    if (uri != null && uri.hasScheme) {
+      if (uri.scheme.toLowerCase() == 'smb' &&
+          Platform.isWindows &&
+          uri.host.trim().isNotEmpty) {
+        final sharePath = uri.pathSegments
+            .where((item) => item.trim().isNotEmpty)
+            .map((item) => item.trim())
+            .join(r'\');
+        if (sharePath.isNotEmpty) {
+          final uncPath = r'\\' + uri.host + r'\' + sharePath;
+          return Uri.file(uncPath, windows: true).toString();
+        }
+      }
+      return uri.toString();
+    }
+    return Uri.file(path, windows: true).toString();
+  }
+
+  String _seriesSlug(String value) {
+    final normalized = value.toLowerCase().trim();
+    if (normalized.isEmpty) {
+      return 'series';
+    }
+    return normalized.replaceAll(RegExp(r'[^a-z0-9]+'), '-');
+  }
+
+  LiveTvSeriesDetails? _managedSeriesDetails({
+    required String sourceId,
+    required String seriesId,
+  }) {
+    return managedCatalogBySourceId[sourceId]?.seriesDetailsById[seriesId];
+  }
+
+  Future<List<LiveTvSource>> _managedSources(int profileId) async {
+    final connection = DeviceConnection.instance.connectionKey;
+    if (connection.isEmpty ||
+        !DeviceConnection.instance.isEnrolled ||
+        DeviceConnection.instance.isSuspended) {
+      managedCatalogBySourceId.clear();
+      return const [];
+    }
+    try {
+      final response = await liveTvControl.mediaLibraryCatalog(
+        expectedConnection: connection,
+        profileId: profileId,
+      );
+      final libraries = response['libraries'];
+      if (libraries is! List) {
+        managedCatalogBySourceId.clear();
+        return const [];
+      }
+      final parsedSources = <LiveTvSource>[];
+      final seenSourceIds = <String>{};
+      final parsedCatalogs = <String, _ManagedCatalogLibrary>{};
+      for (final entry in libraries) {
+        if (entry is! Map) {
+          continue;
+        }
+        final value = Map<String, dynamic>.from(entry);
+        final libraryId = value['id']?.toString().trim() ?? '';
+        final libraryName = value['name']?.toString().trim() ?? '';
+        if (libraryId.isEmpty || libraryName.isEmpty) {
+          continue;
+        }
+        final sourceId = _managedSourceId(libraryId);
+        final movies = <LiveTvMediaItem>[];
+        final series = <LiveTvMediaItem>[];
+        final seriesDetailsById = <String, LiveTvSeriesDetails>{};
+        final rawItems = value['items'];
+        if (rawItems is List) {
+          for (final rawItem in rawItems) {
+            if (rawItem is! Map) {
+              continue;
+            }
+            final item = Map<String, dynamic>.from(rawItem);
+            final mediaKind = item['mediaKind']?.toString().trim().toLowerCase();
+            if (mediaKind == 'series') {
+              continue;
+            }
+            final itemId = item['id']?.toString().trim() ?? '';
+            final title = item['title']?.toString().trim() ?? '';
+            final path = item['path']?.toString().trim() ?? '';
+            if (itemId.isEmpty || title.isEmpty || path.isEmpty) {
+              continue;
+            }
+            movies.add(
+              LiveTvMediaItem(
+                id: '$sourceId:movie:$itemId',
+                title: title,
+                streamUrl: _managedPathToStreamUrl(path),
+                posterUrl: item['posterUrl']?.toString(),
+                description: item['overview']?.toString(),
+                backdropUrl: item['backdropUrl']?.toString(),
+                group: libraryName,
+                series: false,
+              ),
+            );
+          }
+        }
+        final rawSeries = value['series'];
+        if (rawSeries is List) {
+          for (final rawSeriesItem in rawSeries) {
+            if (rawSeriesItem is! Map) {
+              continue;
+            }
+            final seriesItem = Map<String, dynamic>.from(rawSeriesItem);
+            final seriesTitle = seriesItem['title']?.toString().trim() ?? '';
+            if (seriesTitle.isEmpty) {
+              continue;
+            }
+            final seriesId = '$sourceId:series:${_seriesSlug(seriesTitle)}';
+            final episodes = <LiveTvSeriesEpisode>[];
+            final seasons = seriesItem['seasons'];
+            if (seasons is List) {
+              for (final rawSeason in seasons) {
+                if (rawSeason is! Map) {
+                  continue;
+                }
+                final seasonMap = Map<String, dynamic>.from(rawSeason);
+                final seasonNumber =
+                    int.tryParse(seasonMap['season']?.toString() ?? '') ?? 0;
+                final episodesRaw = seasonMap['episodes'];
+                if (episodesRaw is! List) {
+                  continue;
+                }
+                for (final rawEpisode in episodesRaw) {
+                  if (rawEpisode is! Map) {
+                    continue;
+                  }
+                  final episodeMap = Map<String, dynamic>.from(rawEpisode);
+                  final episodeId = episodeMap['id']?.toString().trim() ?? '';
+                  final episodeTitle =
+                      episodeMap['title']?.toString().trim() ?? '';
+                  final path = episodeMap['path']?.toString().trim() ?? '';
+                  if (episodeId.isEmpty ||
+                      episodeTitle.isEmpty ||
+                      path.isEmpty) {
+                    continue;
+                  }
+                  episodes.add(
+                    LiveTvSeriesEpisode(
+                      id: '$seriesId:$episodeId',
+                      title: episodeTitle,
+                      streamUrl: _managedPathToStreamUrl(path),
+                      season: seasonNumber,
+                      episode:
+                          int.tryParse(episodeMap['episode']?.toString() ?? '') ??
+                          0,
+                      posterUrl: episodeMap['posterUrl']?.toString(),
+                      description: episodeMap['overview']?.toString(),
+                    ),
+                  );
+                }
+              }
+            }
+            if (episodes.isEmpty) {
+              continue;
+            }
+            episodes.sort((a, b) {
+              final bySeason = a.season.compareTo(b.season);
+              if (bySeason != 0) {
+                return bySeason;
+              }
+              final byEpisode = a.episode.compareTo(b.episode);
+              if (byEpisode != 0) {
+                return byEpisode;
+              }
+              return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+            });
+            final details = LiveTvSeriesDetails(
+              seriesId: seriesId,
+              title: seriesTitle,
+              description: null,
+              posterUrl: episodes.first.posterUrl,
+              backdropUrl: null,
+              episodes: episodes,
+            );
+            seriesDetailsById[seriesId] = details;
+            series.add(
+              LiveTvMediaItem(
+                id: seriesId,
+                title: seriesTitle,
+                streamUrl: episodes.first.streamUrl,
+                posterUrl: details.posterUrl,
+                description: details.description,
+                backdropUrl: details.backdropUrl,
+                group: libraryName,
+                series: true,
+                seriesId: seriesId,
+              ),
+            );
+          }
+        }
+        parsedCatalogs[sourceId] = _ManagedCatalogLibrary(
+          id: sourceId,
+          name: libraryName,
+          movies: movies,
+          series: series,
+          seriesDetailsById: seriesDetailsById,
+        );
+        if (!seenSourceIds.contains(sourceId)) {
+          seenSourceIds.add(sourceId);
+          parsedSources.add(
+            LiveTvSource(
+              id: sourceId,
+              name: '$libraryName (SMB)',
+              type: 'managed',
+            ),
+          );
+        }
+      }
+      managedCatalogBySourceId
+        ..clear()
+        ..addAll(parsedCatalogs);
+      return parsedSources;
+    } catch (_) {
+      return managedCatalogBySourceId.keys
+          .map(
+            (sourceId) => LiveTvSource(
+              id: sourceId,
+              name: '${managedCatalogBySourceId[sourceId]!.name} (SMB)',
+              type: 'managed',
+            ),
+          )
+          .toList();
+    }
   }
 
   Future<void> _pullRemoteProfileSnapshot() async {
@@ -125,7 +432,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       playbackPerformance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
-      sources = await HomePreferences().liveTvSources(widget.profileId);
+      final configuredSources = await HomePreferences().liveTvSources(
+        widget.profileId,
+      );
+      final managedSources = await _managedSources(widget.profileId);
+      sources = [...configuredSources, ...managedSources];
       history = await HomePreferences().liveTvRecentMedia(widget.profileId);
       favorites = await HomePreferences().liveTvFavorites(widget.profileId);
       playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
@@ -135,7 +446,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       if (sources.isEmpty) {
         setState(() {
           loading = false;
-          error = 'Add a source first in Live TV > Manage Sources.';
+          error =
+              'Add a source in Live TV > Manage Sources or enable SMB libraries in the dashboard.';
         });
         return;
       }
@@ -162,10 +474,32 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _loadCatalog() async {
+    final configuredSources = await HomePreferences().liveTvSources(
+      widget.profileId,
+    );
+    final managedSources = await _managedSources(widget.profileId);
+    final previousSourceId = source?.id;
+    sources = [...configuredSources, ...managedSources];
     if (sources.isEmpty) {
+      if (mounted) {
+        setState(() {
+          loading = false;
+          movies = const [];
+          series = const [];
+          error =
+              'No VOD sources are available. Add Live TV sources or enable SMB libraries in the dashboard.';
+        });
+      }
       return;
     }
-    final selected = source ?? sources.first;
+    final selected =
+        previousSourceId == null
+            ? (source ?? sources.first)
+            : sources.firstWhere(
+                (item) => item.id == previousSourceId,
+                orElse: () => sources.first,
+              );
+    source = selected;
     final activeSources = allSourcesSelected
         ? List<LiveTvSource>.from(sources)
         : <LiveTvSource>[selected];
@@ -178,26 +512,48 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           : 'Loading movies and series from ${selected.name}...';
     });
     try {
-      final loadedMoviesBySource = await Future.wait(
-        activeSources.map((item) => service.loadMovies(item)),
-      );
-      final loadedSeriesBySource = await Future.wait(
-        activeSources.map((item) => service.loadSeries(item)),
-      );
+      final loadedMoviesBySource = <List<LiveTvMediaItem>>[];
+      final loadedSeriesBySource = <List<LiveTvMediaItem>>[];
+      for (final activeSource in activeSources) {
+        if (_isManagedSource(activeSource)) {
+          final managed = managedCatalogBySourceId[activeSource.id];
+          loadedMoviesBySource.add(
+            managed == null
+                ? const <LiveTvMediaItem>[]
+                : List<LiveTvMediaItem>.from(managed.movies),
+          );
+          loadedSeriesBySource.add(
+            managed == null
+                ? const <LiveTvMediaItem>[]
+                : List<LiveTvMediaItem>.from(managed.series),
+          );
+          continue;
+        }
+        loadedMoviesBySource.add(await service.loadMovies(activeSource));
+        loadedSeriesBySource.add(await service.loadSeries(activeSource));
+      }
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
       final mergedMovies = <LiveTvMediaItem>[];
       final mergedSeries = <LiveTvMediaItem>[];
-      mediaItemSources.clear();
+      mediaItemOrigins.clear();
       for (var i = 0; i < activeSources.length; i++) {
         final sourceItem = activeSources[i];
         for (final item in loadedMoviesBySource[i]) {
-          mediaItemSources[item] = sourceItem;
+          mediaItemOrigins[item] = _MediaItemSourceOrigin(
+            sourceId: sourceItem.id,
+            sourceName: sourceItem.name,
+            source: _isManagedSource(sourceItem) ? null : sourceItem,
+          );
           mergedMovies.add(item);
         }
         for (final item in loadedSeriesBySource[i]) {
-          mediaItemSources[item] = sourceItem;
+          mediaItemOrigins[item] = _MediaItemSourceOrigin(
+            sourceId: sourceItem.id,
+            sourceName: sourceItem.name,
+            source: _isManagedSource(sourceItem) ? null : sourceItem,
+          );
           mergedSeries.add(item);
         }
       }
@@ -243,32 +599,43 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     setState(() => status = 'Enhancing metadata from TMDB...');
     final mergedMovies = <LiveTvMediaItem>[];
     final mergedSeries = <LiveTvMediaItem>[];
-    mediaItemSources.clear();
+    mediaItemOrigins.clear();
     for (var i = 0; i < activeSources.length; i++) {
       final sourceItem = activeSources[i];
       var sourceMovies = loadedMoviesBySource[i];
       var sourceSeries = loadedSeriesBySource[i];
-      if (sourceItem.isM3u) {
+      if (sourceItem.isM3u || _isManagedSource(sourceItem)) {
+        final maxMetadataItems = _isManagedSource(sourceItem) ? 1400 : 320;
         sourceMovies = await service.enrichM3uMetadata(
           items: sourceMovies,
           series: false,
           tmdbApiKey: tmdbApiKey,
+          maxItems: maxMetadataItems,
         );
         sourceSeries = await service.enrichM3uMetadata(
           items: sourceSeries,
           series: true,
           tmdbApiKey: tmdbApiKey,
+          maxItems: maxMetadataItems,
         );
       }
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
       for (final item in sourceMovies) {
-        mediaItemSources[item] = sourceItem;
+        mediaItemOrigins[item] = _MediaItemSourceOrigin(
+          sourceId: sourceItem.id,
+          sourceName: sourceItem.name,
+          source: _isManagedSource(sourceItem) ? null : sourceItem,
+        );
         mergedMovies.add(item);
       }
       for (final item in sourceSeries) {
-        mediaItemSources[item] = sourceItem;
+        mediaItemOrigins[item] = _MediaItemSourceOrigin(
+          sourceId: sourceItem.id,
+          sourceName: sourceItem.name,
+          source: _isManagedSource(sourceItem) ? null : sourceItem,
+        );
         mergedSeries.add(item);
       }
     }
@@ -320,10 +687,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvMediaItem> get visibleItems {
     final input = tab == _MediaTab.movies ? movies : series;
     final query = search.text.trim().toLowerCase();
-    return input.where((item) {
+    final filtered = input.where((item) {
       if (groupFilter != 'All' &&
           groups.contains(groupFilter) &&
           (item.group ?? '') != groupFilter) {
+        return false;
+      }
+      if (versionAwareOnly && (_versionCountFor(item) < 2)) {
         return false;
       }
       if (query.isEmpty) {
@@ -332,6 +702,117 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return item.title.toLowerCase().contains(query) ||
           (item.group ?? '').toLowerCase().contains(query);
     }).toList();
+    if (sortMode == _MediaSortMode.title) {
+      filtered.sort(
+        (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
+      );
+    } else if (sortMode == _MediaSortMode.source) {
+      filtered.sort((a, b) {
+        final sourceA = (mediaItemOrigins[a]?.sourceName ?? source?.name ?? '')
+            .toLowerCase();
+        final sourceB = (mediaItemOrigins[b]?.sourceName ?? source?.name ?? '')
+            .toLowerCase();
+        final bySource = sourceA.compareTo(sourceB);
+        if (bySource != 0) {
+          return bySource;
+        }
+        return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      });
+    }
+    return filtered;
+  }
+
+  String _versionTitleKey(LiveTvMediaItem item) {
+    final cleaned = item.title.toLowerCase().trim();
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  int _versionCountFor(LiveTvMediaItem item) {
+    final input = tab == _MediaTab.movies ? movies : series;
+    final target = _versionTitleKey(item);
+    return input.where((entry) => _versionTitleKey(entry) == target).length;
+  }
+
+  int get _multiVersionCount {
+    final input = tab == _MediaTab.movies ? movies : series;
+    final buckets = <String, int>{};
+    for (final item in input) {
+      final key = _versionTitleKey(item);
+      buckets.update(key, (value) => value + 1, ifAbsent: () => 1);
+    }
+    return buckets.values.where((value) => value > 1).length;
+  }
+
+  int? _yearFromTitle(String title) {
+    final match = RegExp(r'(19|20)\d{2}').firstMatch(title);
+    if (match == null) {
+      return null;
+    }
+    return int.tryParse(match.group(0)!);
+  }
+
+  String _normalizeEditionKey(String title) {
+    var value = title.toLowerCase();
+    value = value.replaceAll(RegExp(r'\((19|20)\d{2}\)'), ' ');
+    value = value.replaceAll(
+      RegExp(
+        r'\b(4k|2160p|1080p|720p|remux|extended|director.?s cut|hdr|uhd|hevc|x26[45]|dubbed|multi)\b',
+      ),
+      ' ',
+    );
+    value = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return value;
+  }
+
+  List<LiveTvMediaItem> _editionsFor(LiveTvMediaItem item) {
+    final key = _normalizeEditionKey(item.title);
+    final pool = item.series ? series : movies;
+    return pool.where((entry) => _normalizeEditionKey(entry.title) == key).toList();
+  }
+
+  List<LiveTvMediaItem> _relatedLocalTitlesFor(LiveTvMediaItem item) {
+    final pool = item.series ? series : movies;
+    final group = (item.group ?? '').trim();
+    if (group.isEmpty) {
+      return const [];
+    }
+    return pool
+        .where((entry) => entry.id != item.id && (entry.group ?? '').trim() == group)
+        .take(8)
+        .toList();
+  }
+
+  String _qualityHint(LiveTvMediaItem item) {
+    final source = '${item.title} ${item.group ?? ''}'.toLowerCase();
+    if (source.contains('2160') || source.contains('4k') || source.contains('uhd')) {
+      return '4K / UHD';
+    }
+    if (source.contains('1080')) {
+      return '1080p';
+    }
+    if (source.contains('720')) {
+      return '720p';
+    }
+    return 'Adaptive / source-defined';
+  }
+
+  String _audioHint(LiveTvMediaItem item) {
+    final source = '${item.title} ${item.group ?? ''}'.toLowerCase();
+    if (source.contains('dual') || source.contains('multi-audio')) {
+      return 'Multiple audio tracks likely';
+    }
+    if (source.contains('commentary')) {
+      return 'Commentary track likely';
+    }
+    return 'Audio track picker available in player';
+  }
+
+  String _subtitleHint(LiveTvMediaItem item) {
+    final source = '${item.title} ${item.group ?? ''}'.toLowerCase();
+    if (source.contains('sub') || source.contains('cc') || source.contains('sdh')) {
+      return 'Subtitles likely included';
+    }
+    return 'Subtitle picker and search available in player';
   }
 
   String _favoriteKey(String sourceId, String mediaType, String mediaId) =>
@@ -343,13 +824,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       );
 
   LiveTvLibraryItem? _libraryItemFromMedia(LiveTvMediaItem item) {
-    final selected = mediaItemSources[item] ?? source;
-    if (selected == null) {
+    final origin = mediaItemOrigins[item];
+    if (origin == null) {
       return null;
     }
     return LiveTvLibraryItem(
-      sourceId: selected.id,
-      sourceName: selected.name,
+      sourceId: origin.sourceId,
+      sourceName: origin.sourceName,
       mediaType: item.series ? 'series' : 'movie',
       mediaId: item.id,
       title: item.title,
@@ -360,18 +841,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
-  LiveTvLibraryItem? _libraryItemFromEpisode(
+  LiveTvLibraryItem _libraryItemFromEpisode(
     LiveTvSeriesEpisode episode, {
     required String seriesTitle,
     required String seriesPosterUrl,
+    required String sourceId,
+    required String sourceName,
   }) {
-    final selected = source;
-    if (selected == null) {
-      return null;
-    }
     return LiveTvLibraryItem(
-      sourceId: selected.id,
-      sourceName: selected.name,
+      sourceId: sourceId,
+      sourceName: sourceName,
       mediaType: 'episode',
       mediaId: 'episode:${episode.id}',
       title: seriesTitle,
@@ -523,17 +1002,22 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return;
     }
     unawaited(_reportMediaPlayback(item, active: true));
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => _MediaPlayerScreen(
-          title: item.title,
-          subtitle: item.subtitle ?? item.sourceName,
-          streamUrl: stream,
-          posterUrl: item.posterUrl,
-          playbackPerformance: playbackPerformance,
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => _MediaPlayerScreen(
+            profileKey: 'profile-${widget.profileId}',
+            title: item.title,
+            subtitle: item.subtitle ?? item.sourceName,
+            streamUrl: stream,
+            posterUrl: item.posterUrl,
+            playbackPerformance: playbackPerformance,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      unawaited(_reportMediaPlayback(item, active: false));
+    }
   }
 
   Future<void> _reportMediaPlayback(
@@ -572,7 +1056,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     var candidates = series;
     if (switchedSource || series.isEmpty) {
-      candidates = await service.loadSeries(selectedSource);
+      if (_isManagedSource(selectedSource)) {
+        final managed = managedCatalogBySourceId[selectedSource.id];
+        candidates =
+            managed == null
+                ? const <LiveTvMediaItem>[]
+                : List<LiveTvMediaItem>.from(managed.series);
+      } else {
+        candidates = await service.loadSeries(selectedSource);
+      }
     }
     final match = candidates
         .where((entry) => entry.id == item.mediaId)
@@ -658,71 +1150,119 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               : 'No synopsis available for this item.');
     final trailerUrl = metadata?.trailerUrl;
     final cast = metadata?.cast ?? const <String>[];
+    final crew = metadata?.crew ?? const <String>[];
+    final genres = metadata?.genres ?? const <String>[];
+    final advisories = metadata?.advisories ?? const <String>[];
+    final relatedTmdb = metadata?.relatedTitles ?? const <String>[];
+    final extras = metadata?.extras ?? const <LiveTvMediaExtraLink>[];
+    final year = metadata?.year ?? _yearFromTitle(item.title);
+    final runtime = metadata?.runtimeMinutes;
+    final watchedState = await playbackMemory.loadProgress(item.streamUrl);
+    final watched = watchedState['complete'] == true;
+    final resumeMs = int.tryParse(watchedState['positionMs']?.toString() ?? '') ?? 0;
+    final editions = _editionsFor(item);
+    final relatedLocal = _relatedLocalTitlesFor(item);
+    final quality = _qualityHint(item);
+    final audioHint = _audioHint(item);
+    final subtitleHint = _subtitleHint(item);
+    final watchlisted = _isFavorite(
+      libraryItem.sourceId,
+      libraryItem.mediaType,
+      libraryItem.mediaId,
+    );
+    Widget section(String title, List<Widget> children) => Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.millitopTheme.panelColor.withAlpha(130),
+        borderRadius: BorderRadius.circular(context.millitopTheme.cardRadius),
+        border: Border.all(color: context.millitopTheme.panelBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+          ),
+          const SizedBox(height: 8),
+          ...children,
+        ],
+      ),
+    );
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.of(ctx).size.height * .88,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1120),
+            child: SizedBox(
+              height: MediaQuery.of(ctx).size.height * .9,
+              child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
             children: [
               if (backdrop != null && backdrop.trim().isNotEmpty)
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(16),
                   child: Image.network(
                     backdrop,
-                    height: 200,
+                    height: 260,
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                   ),
                 ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(12),
                     child: poster == null || poster.trim().isEmpty
                         ? Container(
-                            width: 132,
-                            height: 186,
-                            color: const Color(0xFF1F2B3F),
+                            width: 170,
+                            height: 240,
+                            color: context.millitopTheme.panelColor,
                             alignment: Alignment.center,
-                            child: const Icon(Icons.movie, size: 42),
+                            child: const Icon(Icons.movie, size: 52),
                           )
                         : Image.network(
                             poster,
-                            width: 132,
-                            height: 186,
+                            width: 170,
+                            height: 240,
                             fit: BoxFit.cover,
                             errorBuilder: (_, __, ___) => Container(
-                              width: 132,
-                              height: 186,
-                              color: const Color(0xFF1F2B3F),
+                              width: 170,
+                              height: 240,
+                              color: context.millitopTheme.panelColor,
                               alignment: Alignment.center,
-                              child: const Icon(Icons.movie, size: 42),
+                              child: const Icon(Icons.movie, size: 52),
                             ),
                           ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          item.title,
+                          year == null ? item.title : '${item.title} ($year)',
                           style: const TextStyle(
-                            fontSize: 24,
+                            fontSize: 34,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                         if (item.group?.trim().isNotEmpty == true)
                           Text(
                             item.group!,
-                            style: const TextStyle(color: Colors.white70),
+                            style: TextStyle(
+                              color: _LiveTvMediaPaint.onSurface70,
+                              fontSize: 16,
+                            ),
                           ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 14),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
@@ -751,15 +1291,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                 unawaited(_toggleFavorite(libraryItem));
                               },
                               icon: Icon(
-                                _isFavorite(
-                                      libraryItem.sourceId,
-                                      libraryItem.mediaType,
-                                      libraryItem.mediaId,
-                                    )
+                                watchlisted
                                     ? Icons.favorite
                                     : Icons.favorite_border,
                               ),
-                              label: const Text('Favorite'),
+                              label: Text(watchlisted ? 'In Watchlist' : 'Watchlist'),
                             ),
                             OutlinedButton.icon(
                               onPressed: () {
@@ -769,6 +1305,33 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               icon: const Icon(Icons.playlist_add),
                               label: const Text('Add to Playlist'),
                             ),
+                            if (!item.series && resumeMs > 15000)
+                              OutlinedButton.icon(
+                                onPressed: () {
+                                  Navigator.pop(ctx);
+                                  unawaited(
+                                    playbackMemory
+                                        .saveProgress(
+                                          item.streamUrl,
+                                          positionMs: 0,
+                                          durationMs: 0,
+                                          complete: false,
+                                        )
+                                        .then((_) => _openMovie(item)),
+                                  );
+                                },
+                                icon: const Icon(Icons.replay),
+                                label: const Text('Restart'),
+                              ),
+                            if (!item.series && resumeMs > 15000)
+                              OutlinedButton.icon(
+                                onPressed: () {
+                                  Navigator.pop(ctx);
+                                  unawaited(_openMovie(item));
+                                },
+                                icon: const Icon(Icons.play_arrow),
+                                label: const Text('Resume'),
+                              ),
                             if (trailerUrl != null && trailerUrl.isNotEmpty)
                               TextButton.icon(
                                 onPressed: () => FirefoxBrowser.open(
@@ -781,35 +1344,166 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               ),
                           ],
                         ),
+                        const SizedBox(height: 14),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            if (runtime != null)
+                              Chip(label: Text('Runtime ${runtime}m')),
+                            Chip(
+                              label: Text(
+                                watched ? 'Watched' : 'Not watched',
+                              ),
+                            ),
+                            Chip(label: Text('Quality $quality')),
+                            if (metadata?.contentRating != null)
+                              Chip(
+                                label: Text(
+                                  '${metadata!.ratingSystem ?? 'Rating'} ${metadata.contentRating}',
+                                ),
+                              ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
-              Text(
-                description,
-                style: const TextStyle(color: Colors.white70, height: 1.35),
-              ),
-              if (cast.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                const Text(
-                  'Cast',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+              section('Synopsis', [
+                Text(
+                  description,
+                  style: TextStyle(
+                    color: _LiveTvMediaPaint.onSurface70,
+                    height: 1.45,
+                    fontSize: 16,
+                  ),
                 ),
-                const SizedBox(height: 6),
+              ]),
+              section('Playback capabilities', [
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
-                  children: cast
-                      .map((name) => Chip(label: Text(name)))
+                  children: [
+                    Chip(label: Text('Audio: $audioHint')),
+                    Chip(label: Text('Subtitles: $subtitleHint')),
+                  ],
+                ),
+              ]),
+              if (genres.isNotEmpty) ...[
+                section('Genres', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: genres.map((value) => Chip(label: Text(value))).toList(),
+                  ),
+                ]),
+              ],
+              if (advisories.isNotEmpty) ...[
+                section(
+                  'Content advisories',
+                  advisories
+                      .map(
+                        (value) => Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Text(
+                              '• $value',
+                              style: const TextStyle(fontSize: 15),
+                          ),
+                        ),
+                      )
                       .toList(),
                 ),
+              ],
+              if (cast.isNotEmpty) ...[
+                section('Cast', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: cast
+                        .map((name) => Chip(label: Text(name)))
+                        .toList(),
+                  ),
+                ]),
+              ],
+              if (crew.isNotEmpty) ...[
+                section('Crew', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: crew.map((name) => Chip(label: Text(name))).toList(),
+                  ),
+                ]),
+              ],
+              if (editions.length > 1) ...[
+                section('Available editions', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: editions
+                        .map((entry) => ActionChip(
+                                label: Text(entry.title),
+                                onPressed: () {
+                                  Navigator.pop(ctx);
+                                  unawaited(_showMediaDetails(entry));
+                                },
+                              ))
+                        .toList(),
+                  ),
+                ]),
+              ],
+              if (extras.isNotEmpty) ...[
+                section('Extras', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: extras
+                        .map(
+                          (entry) => ActionChip(
+                              label: Text(entry.label),
+                              onPressed: () => FirefoxBrowser.open(
+                                context,
+                                profileId: widget.profileId,
+                                url: entry.url,
+                              ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ]),
+              ],
+              if (relatedTmdb.isNotEmpty || relatedLocal.isNotEmpty) ...[
+                section('Related titles', [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ...relatedLocal.map(
+                        (entry) => ActionChip(
+                          label: Text(entry.title),
+                          onPressed: () {
+                              Navigator.pop(ctx);
+                              unawaited(_showMediaDetails(entry));
+                          },
+                        ),
+                      ),
+                      ...relatedTmdb
+                          .where(
+                              (title) => !relatedLocal
+                                  .map((entry) => entry.title.toLowerCase())
+                                  .contains(title.toLowerCase()),
+                          )
+                          .map((title) => Chip(label: Text(title))),
+                    ],
+                  ),
+                ]),
               ],
             ],
           ),
         ),
       ),
+          ),
+        ),
     );
   }
 
@@ -817,15 +1511,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     LiveTvSeriesEpisode episode, {
     required String seriesTitle,
     required String seriesPoster,
+    required String sourceId,
+    required String sourceName,
   }) async {
     final item = _libraryItemFromEpisode(
       episode,
       seriesTitle: seriesTitle,
       seriesPosterUrl: seriesPoster,
+      sourceId: sourceId,
+      sourceName: sourceName,
     );
-    if (item == null) {
-      return;
-    }
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -847,7 +1542,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 episode.description?.trim().isNotEmpty == true
                     ? episode.description!
                     : 'No episode synopsis available from source.',
-                style: const TextStyle(color: Colors.white70),
+                style: TextStyle(color: _LiveTvMediaPaint.onSurface70),
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -900,25 +1595,33 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (!mounted) {
       return;
     }
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => _MediaPlayerScreen(
-          title: item.title,
-          subtitle: item.group,
-          streamUrl: item.streamUrl,
-          posterUrl: item.posterUrl,
-          playbackPerformance: playbackPerformance,
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => _MediaPlayerScreen(
+            profileKey: 'profile-${widget.profileId}',
+            title: item.title,
+            subtitle: item.group,
+            streamUrl: item.streamUrl,
+            posterUrl: item.posterUrl,
+            playbackPerformance: playbackPerformance,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      if (libraryItem != null) {
+        unawaited(_reportMediaPlayback(libraryItem, active: false));
+      }
+    }
   }
 
   Future<void> _openSeries(LiveTvMediaItem item) async {
-    final selected = mediaItemSources[item] ?? source;
-    if (selected == null) {
+    final origin = mediaItemOrigins[item];
+    if (origin == null) {
       return;
     }
-    if (source?.id != selected.id && mounted) {
+    final selected = origin.source;
+    if (selected != null && source?.id != selected.id && mounted) {
       setState(() => source = selected);
     }
     if (item.seriesId == null || item.seriesId!.trim().isEmpty) {
@@ -930,24 +1633,44 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       if (!mounted) {
         return;
       }
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(
-          builder: (_) => _MediaPlayerScreen(
-            title: item.title,
-            subtitle: item.group ?? 'Series',
-            streamUrl: item.streamUrl,
-            posterUrl: item.posterUrl,
-            playbackPerformance: playbackPerformance,
+      try {
+        await Navigator.of(context).push<void>(
+          MaterialPageRoute<void>(
+            builder: (_) => _MediaPlayerScreen(
+              profileKey: 'profile-${widget.profileId}',
+              title: item.title,
+              subtitle: item.group ?? 'Series',
+              streamUrl: item.streamUrl,
+              posterUrl: item.posterUrl,
+              playbackPerformance: playbackPerformance,
+            ),
           ),
-        ),
-      );
+        );
+      } finally {
+        if (libraryItem != null) {
+          unawaited(_reportMediaPlayback(libraryItem, active: false));
+        }
+      }
       return;
     }
-    final details = await service.loadSeriesDetails(
-      selected,
-      item.seriesId!,
-      item.title,
-    );
+    final details = _isManagedSourceId(origin.sourceId)
+        ? _managedSeriesDetails(
+            sourceId: origin.sourceId,
+            seriesId: item.seriesId!,
+          )
+        : await service.loadSeriesDetails(
+            selected!,
+            item.seriesId!,
+            item.title,
+          );
+    final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
+    final metadata = tmdbApiKey.trim().isEmpty
+        ? null
+        : await service.loadTmdbMetadataDetails(
+            title: item.title,
+            series: true,
+            tmdbApiKey: tmdbApiKey,
+          );
     if (!mounted) {
       return;
     }
@@ -972,15 +1695,96 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           backdropUrl: item.backdropUrl,
           episodes: episodes,
         );
+    final followed = _isFavorite(origin.sourceId, 'series', item.id);
+    final recent = history
+        .where((entry) => entry.mediaType == 'series' && entry.mediaId == item.id)
+        .toList();
+    final nextUpLabel = () {
+      if (recent.isEmpty) {
+        return null;
+      }
+      final text = recent.first.subtitle ?? '';
+      final match = RegExp(r'S(\d+)E(\d+)').firstMatch(text.toUpperCase());
+      if (match == null) {
+        return null;
+      }
+      final season = int.tryParse(match.group(1) ?? '');
+      final episode = int.tryParse(match.group(2) ?? '');
+      if (season == null || episode == null) {
+        return null;
+      }
+      final ordered = [...seriesDetails.episodes]
+        ..sort((a, b) {
+          final bySeason = a.season.compareTo(b.season);
+          if (bySeason != 0) {
+            return bySeason;
+          }
+          return a.episode.compareTo(b.episode);
+        });
+      final index = ordered.indexWhere(
+        (entry) => entry.season == season && entry.episode == episode,
+      );
+      if (index < 0 || index + 1 >= ordered.length) {
+        return null;
+      }
+      final next = ordered[index + 1];
+      return 'S${next.season}E${next.episode} · ${next.title}';
+    }();
+    final progress = () {
+      if (seriesDetails.episodes.isEmpty || recent.isEmpty) {
+        return 0.0;
+      }
+      final text = recent.first.subtitle ?? '';
+      final match = RegExp(r'S(\d+)E(\d+)').firstMatch(text.toUpperCase());
+      if (match == null) {
+        return 0.0;
+      }
+      final season = int.tryParse(match.group(1) ?? '');
+      final episode = int.tryParse(match.group(2) ?? '');
+      if (season == null || episode == null) {
+        return 0.0;
+      }
+      final ordered = [...seriesDetails.episodes]
+        ..sort((a, b) {
+          final bySeason = a.season.compareTo(b.season);
+          if (bySeason != 0) {
+            return bySeason;
+          }
+          return a.episode.compareTo(b.episode);
+        });
+      final index = ordered.indexWhere(
+        (entry) => entry.season == season && entry.episode == episode,
+      );
+      if (index < 0) {
+        return 0.0;
+      }
+      return ((index + 1) / ordered.length).clamp(0.0, 1.0);
+    }();
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => _SeriesDetailsScreen(
           details: seriesDetails,
+          status: metadata?.status,
+          contentRating: metadata?.contentRating,
+          genres: metadata?.genres ?? const [],
+          followed: followed,
+          nextUpLabel: nextUpLabel,
+          seriesProgress: progress,
+          hasNewEpisode: nextUpLabel != null,
           onEpisodeDetails: (episode) => _showEpisodeDetails(
             episode,
             seriesTitle: seriesDetails.title,
             seriesPoster: seriesDetails.posterUrl ?? item.posterUrl ?? '',
+            sourceId: origin.sourceId,
+            sourceName: origin.sourceName,
           ),
+          onToggleFollow: () async {
+            final seriesLibrary = _libraryItemFromMedia(item);
+            if (seriesLibrary == null) {
+              return;
+            }
+            await _toggleFavorite(seriesLibrary);
+          },
           onPlay: (episode) async {
             await _saveHistory(
               item,
@@ -991,25 +1795,71 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               episode,
               seriesTitle: seriesDetails.title,
               seriesPosterUrl: seriesDetails.posterUrl ?? item.posterUrl ?? '',
+              sourceId: origin.sourceId,
+              sourceName: origin.sourceName,
             );
-            if (libraryEpisode != null) {
-              unawaited(_reportMediaPlayback(libraryEpisode, active: true));
-            }
+            unawaited(_reportMediaPlayback(libraryEpisode, active: true));
             if (!mounted) {
               return;
             }
-            await Navigator.of(context).push<void>(
-              MaterialPageRoute<void>(
-                builder: (_) => _MediaPlayerScreen(
-                  title: seriesDetails.title,
-                  subtitle:
-                      'S${episode.season}E${episode.episode} · ${episode.title}',
-                  streamUrl: episode.streamUrl,
-                  posterUrl: episode.posterUrl ?? seriesDetails.posterUrl,
-                  playbackPerformance: playbackPerformance,
+            try {
+              await Navigator.of(context).push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => _MediaPlayerScreen(
+                    profileKey: 'profile-${widget.profileId}',
+                    title: seriesDetails.title,
+                    subtitle:
+                        'S${episode.season}E${episode.episode} · ${episode.title}',
+                    streamUrl: episode.streamUrl,
+                    posterUrl: episode.posterUrl ?? seriesDetails.posterUrl,
+                    playbackPerformance: playbackPerformance,
+                    nextEpisodeStreamUrl: () {
+                      final episodes = [...seriesDetails.episodes]
+                        ..sort((a, b) {
+                          final bySeason = a.season.compareTo(b.season);
+                          if (bySeason != 0) {
+                            return bySeason;
+                          }
+                          return a.episode.compareTo(b.episode);
+                        });
+                      final index = episodes.indexWhere(
+                        (item) =>
+                            item.streamUrl == episode.streamUrl &&
+                            item.season == episode.season &&
+                            item.episode == episode.episode,
+                      );
+                      if (index < 0 || index + 1 >= episodes.length) {
+                        return null;
+                      }
+                      return episodes[index + 1].streamUrl;
+                    }(),
+                    nextEpisodeTitle: () {
+                      final episodes = [...seriesDetails.episodes]
+                        ..sort((a, b) {
+                          final bySeason = a.season.compareTo(b.season);
+                          if (bySeason != 0) {
+                            return bySeason;
+                          }
+                          return a.episode.compareTo(b.episode);
+                        });
+                      final index = episodes.indexWhere(
+                        (item) =>
+                            item.streamUrl == episode.streamUrl &&
+                            item.season == episode.season &&
+                            item.episode == episode.episode,
+                      );
+                      if (index < 0 || index + 1 >= episodes.length) {
+                        return null;
+                      }
+                      final next = episodes[index + 1];
+                      return 'S${next.season}E${next.episode} · ${next.title}';
+                    }(),
+                  ),
                 ),
-              ),
-            );
+              );
+            } finally {
+              unawaited(_reportMediaPlayback(libraryEpisode, active: false));
+            }
           },
         ),
       ),
@@ -1017,16 +1867,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _saveHistory(LiveTvMediaItem item, {String? subtitle}) async {
-    final selected = mediaItemSources[item] ?? source;
-    if (selected == null) {
+    final origin = mediaItemOrigins[item];
+    if (origin == null) {
       return;
     }
     try {
       await HomePreferences().upsertLiveTvRecentMedia(
         widget.profileId,
         LiveTvRecentMedia(
-          sourceId: selected.id,
-          sourceName: selected.name,
+          sourceId: origin.sourceId,
+          sourceName: origin.sourceName,
           mediaType: tab == _MediaTab.movies ? 'movie' : 'series',
           mediaId: item.id,
           title: item.title,
@@ -1044,8 +1894,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _resumeRecentMedia(LiveTvRecentMedia recent) async {
-    final targetSource = source;
-    if (targetSource == null) {
+    if (sources.where((item) => item.id == recent.sourceId).isEmpty) {
       return;
     }
     if (recent.mediaType == 'movie') {
@@ -1125,10 +1974,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       children: [
         for (final item in filtered)
           InputChip(
-            avatar: const Icon(
+            avatar: Icon(
               Icons.favorite,
               size: 16,
-              color: Colors.redAccent,
+              color: _LiveTvMediaPaint.error,
             ),
             label: Text(
               item.subtitle == null
@@ -1184,7 +2033,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                   ? Container(
                       width: 96,
                       height: 128,
-                      color: const Color(0xFF1F2B3F),
+                      color: _LiveTvMediaPaint.panel,
                       alignment: Alignment.center,
                       child: const Icon(Icons.movie, size: 34),
                     )
@@ -1196,7 +2045,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       errorBuilder: (_, __, ___) => Container(
                         width: 96,
                         height: 128,
-                        color: const Color(0xFF1F2B3F),
+                        color: _LiveTvMediaPaint.panel,
                         alignment: Alignment.center,
                         child: const Icon(Icons.movie, size: 34),
                       ),
@@ -1237,13 +2086,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       recent.subtitle!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white70),
+                      style: TextStyle(color: _LiveTvMediaPaint.onSurface70),
                     ),
                   Text(
                     recent.sourceName ?? recent.sourceId,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                    style: TextStyle(
+                      color: _LiveTvMediaPaint.onSurface60,
+                      fontSize: 12,
+                    ),
                   ),
                 ],
               ),
@@ -1259,10 +2111,143 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
+  Future<void> _openSearchKeyboard() async {
+    final controller = TextEditingController(text: search.text);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Media search'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textInputAction: TextInputAction.search,
+          decoration: const InputDecoration(
+            labelText: 'Search movies or series',
+          ),
+          onSubmitted: (text) => Navigator.pop(ctx, text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) {
+      return;
+    }
+    search.text = value;
+  }
+
+  Future<void> _openVoiceSearch() async {
+    final controller = TextEditingController(text: search.text);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Voice search'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Use your platform keyboard microphone button to dictate where supported.',
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                labelText: 'Voice query',
+              ),
+              onSubmitted: (text) => Navigator.pop(ctx, text),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Search'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) {
+      return;
+    }
+    search.text = value;
+  }
+
+  Future<void> _requestExitToHome() async {
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).maybePop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final items = visibleItems;
-    return Scaffold(
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          unawaited(_requestExitToHome());
+        },
+        const SingleActivator(LogicalKeyboardKey.goBack): () {
+          unawaited(_requestExitToHome());
+        },
+        const SingleActivator(LogicalKeyboardKey.f5): () {
+          unawaited(_loadCatalog());
+        },
+        const SingleActivator(LogicalKeyboardKey.enter): () {
+          final focused = focusedMediaId;
+          if (focused == null) {
+            return;
+          }
+          final match = items.where((item) => item.id == focused).toList();
+          if (match.isNotEmpty) {
+            unawaited(_showMediaDetails(match.first));
+          }
+        },
+        const SingleActivator(LogicalKeyboardKey.select): () {
+          final focused = focusedMediaId;
+          if (focused == null) {
+            return;
+          }
+          final match = items.where((item) => item.id == focused).toList();
+          if (match.isNotEmpty) {
+            unawaited(_showMediaDetails(match.first));
+          }
+        },
+        const SingleActivator(LogicalKeyboardKey.slash): () {
+          unawaited(_openSearchKeyboard());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyV): () {
+          unawaited(_openVoiceSearch());
+        },
+        const SingleActivator(
+          LogicalKeyboardKey.keyF,
+          control: true,
+        ): () {
+          searchFocus.requestFocus();
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: PopScope(
+          canPop: true,
+          child: Scaffold(
       appBar: AppBar(
         title: const Text('Movies & Series'),
         actions: [
@@ -1279,7 +2264,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     top: -6,
                     child: CircleAvatar(
                       radius: 8,
-                      backgroundColor: Colors.blueAccent,
+                      backgroundColor: _LiveTvMediaPaint.accent,
                       child: Text(
                         '${playlists.length}',
                         style: const TextStyle(fontSize: 10),
@@ -1292,7 +2277,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           IconButton(onPressed: _loadCatalog, icon: const Icon(Icons.refresh)),
         ],
       ),
-      body: Column(
+      body: SafeArea(
+        child: Column(
         children: [
           if (loading) const LinearProgressIndicator(),
           if (status.isNotEmpty)
@@ -1302,7 +2288,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Text(
                 error,
-                style: const TextStyle(color: Colors.orangeAccent),
+                style: TextStyle(color: _LiveTvMediaPaint.warning),
               ),
             ),
           Padding(
@@ -1357,12 +2343,25 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                   flex: 3,
                   child: TextField(
                     controller: search,
+                    focusNode: searchFocus,
                     decoration: const InputDecoration(
                       labelText: 'Search movies or series',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.search),
                     ),
                   ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  tooltip: 'On-screen keyboard search',
+                  onPressed: () => unawaited(_openSearchKeyboard()),
+                  icon: const Icon(Icons.keyboard),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  tooltip: 'Voice search',
+                  onPressed: () => unawaited(_openVoiceSearch()),
+                  icon: const Icon(Icons.mic),
                 ),
               ],
             ),
@@ -1433,6 +2432,63 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           ),
           const SizedBox(height: 8),
           Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 2,
+                  child: DropdownButtonFormField<_MediaSortMode>(
+                    initialValue: sortMode,
+                    decoration: const InputDecoration(
+                      labelText: 'Sort',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: _MediaSortMode.relevance,
+                        child: Text('Relevance'),
+                      ),
+                      DropdownMenuItem(
+                        value: _MediaSortMode.title,
+                        child: Text('Title'),
+                      ),
+                      DropdownMenuItem(
+                        value: _MediaSortMode.source,
+                        child: Text('Source'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      setState(() => sortMode = value);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 3,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: FilterChip(
+                      selected: versionAwareOnly,
+                      onSelected: (selected) {
+                        setState(() => versionAwareOnly = selected);
+                      },
+                      avatar: const Icon(Icons.collections_bookmark_outlined),
+                      label: Text(
+                        _multiVersionCount == 0
+                            ? 'Multiple versions only'
+                            : 'Multiple versions only ($_multiVersionCount titles)',
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             child: _continueWatchingCard(),
           ),
@@ -1471,27 +2527,46 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                         itemCount: items.length,
                         itemBuilder: (context, index) {
                           final item = items[index];
-                          final selected = mediaItemSources[item] ?? source;
-                          final favorite = selected == null
+                          final origin = mediaItemOrigins[item];
+                          final favorite = origin == null
                               ? false
                               : _isFavorite(
-                                  selected.id,
+                                  origin.sourceId,
                                   item.series ? 'series' : 'movie',
                                   item.id,
                                 );
+                          final focused = focusedMediaId == item.id;
                           return InkWell(
-                            onTap: () => unawaited(_showMediaDetails(item)),
-                            child: Card(
-                              clipBehavior: Clip.antiAlias,
-                              child: Column(
+                            onTap: () {
+                              setState(() => focusedMediaId = item.id);
+                              unawaited(_showMediaDetails(item));
+                            },
+                            child: FocusableActionDetector(
+                              onFocusChange: (value) {
+                                if (value) {
+                                  setState(() => focusedMediaId = item.id);
+                                }
+                              },
+                              child: Card(
+                                clipBehavior: Clip.antiAlias,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  side: BorderSide(
+                                    color: focused
+                                        ? _LiveTvMediaPaint.accent
+                                        : _LiveTvMediaPaint.transparent,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Expanded(
                                     child:
                                         item.posterUrl == null ||
                                             item.posterUrl!.trim().isEmpty
-                                        ? const ColoredBox(
-                                            color: Color(0xFF1F2B3F),
+                                        ? ColoredBox(
+                                            color: _LiveTvMediaPaint.panel,
                                             child: Center(
                                               child: Icon(
                                                 Icons.live_tv,
@@ -1504,8 +2579,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                             fit: BoxFit.cover,
                                             width: double.infinity,
                                             errorBuilder: (_, __, ___) =>
-                                                const ColoredBox(
-                                                  color: Color(0xFF1F2B3F),
+                                                ColoredBox(
+                                                  color: _LiveTvMediaPaint.panel,
                                                   child: Center(
                                                     child: Icon(
                                                       Icons.movie_outlined,
@@ -1534,14 +2609,41 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                                 ),
                                               ),
                                             ),
+                                            if (_versionCountFor(item) > 1) ...[
+                                              const SizedBox(width: 6),
+                                              DecoratedBox(
+                                                decoration: BoxDecoration(
+                                                  color: _LiveTvMediaPaint
+                                                      .onSurface
+                                                      .withAlpha(42),
+                                                  borderRadius:
+                                                      BorderRadius.circular(999),
+                                                ),
+                                                child: Padding(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                    horizontal: 6,
+                                                    vertical: 2,
+                                                  ),
+                                                  child: Text(
+                                                    'x${_versionCountFor(item)}',
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: _LiveTvMediaPaint
+                                                          .onSurface70,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                             Icon(
                                               favorite
                                                   ? Icons.favorite
                                                   : Icons.favorite_border,
                                               size: 16,
                                               color: favorite
-                                                  ? Colors.redAccent
-                                                  : Colors.white54,
+                                                  ? _LiveTvMediaPaint.error
+                                                  : _LiveTvMediaPaint.onSurface54,
                                             ),
                                           ],
                                         ),
@@ -1551,18 +2653,18 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                             item.group!,
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              color: Colors.white70,
+                                            style: TextStyle(
+                                              color: _LiveTvMediaPaint.onSurface70,
                                               fontSize: 12,
                                             ),
                                           ),
-                                        if (selected != null)
+                                        if (origin != null)
                                           Text(
-                                            selected.name,
+                                            origin.sourceName,
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              color: Colors.white54,
+                                            style: TextStyle(
+                                              color: _LiveTvMediaPaint.onSurface54,
                                               fontSize: 11,
                                             ),
                                           ),
@@ -1572,6 +2674,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                 ],
                               ),
                             ),
+                            ),
                           );
                         },
                       );
@@ -1580,29 +2683,42 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           ),
         ],
       ),
+      ),
+    ),
+        ),
+      ),
     );
   }
 }
 
 class _MediaPlayerScreen extends StatefulWidget {
+  final String profileKey;
   final String title;
   final String? subtitle;
   final String streamUrl;
   final String? posterUrl;
   final PlaybackPerformanceSettings playbackPerformance;
+  final String? nextEpisodeStreamUrl;
+  final String? nextEpisodeTitle;
   const _MediaPlayerScreen({
+    required this.profileKey,
     required this.title,
     this.subtitle,
     required this.streamUrl,
     this.posterUrl,
     required this.playbackPerformance,
+    this.nextEpisodeStreamUrl,
+    this.nextEpisodeTitle,
   });
 
   @override
   State<_MediaPlayerScreen> createState() => _MediaPlayerScreenState();
 }
 
-class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
+class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
+    with WidgetsBindingObserver {
+  final memory = VideoPlaybackMemory();
+  final subtitleProviders = const SubtitleProviderService();
   Player? player;
   VideoController? video;
   Track selectedTrack = const Track();
@@ -1611,23 +2727,78 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
   bool playing = false;
+  bool buffering = false;
   String error = '';
+  String statusMessage = '';
   String playbackEngineStatus = 'GPU decode: checking...';
   Timer? playbackStatusTimer;
+  Timer? controlsHideTimer;
   bool fullscreen = false;
+  bool controlsVisible = true;
+  bool autoplayNext = true;
+  bool muted = false;
+  double volume = 100;
+  double preMuteVolume = 100;
+  double playbackSpeed = 1.0;
+  int seekIncrementSeconds = 10;
+  String aspectMode = 'contain';
+  String audioOutputProfile = 'auto';
+  List<int> bookmarksMs = const <int>[];
+  bool pauseHistory = false;
+  bool qualityAdaptive = true;
+  bool attemptedRecovery = false;
+  int? resumePositionMs;
+  bool showingResumePrompt = false;
+  bool creditsVisible = false;
+  bool nextEpisodePrompted = false;
+  double? scrubPreviewMs;
+  int recoveryAttempts = 0;
+  bool forceCompatiblePlayback = false;
+  bool attemptedCompatibleFallback = false;
+  int maxBandwidthKbpsRemote = 4500;
+  int maxBandwidthKbpsLocal = 18000;
+  String playbackRoute = 'unknown';
+  String qualityRoute = 'original';
+  String transcodeReason = 'None';
+  String outputEnvironment = 'Unknown';
+  bool compatibilityProfileApplied = false;
+  bool didAutoSelectTracks = false;
+  String preferredAudioLanguage = 'en';
+  String preferredSubtitleLanguage = 'en';
+  bool preferSdh = false;
+  bool preferForcedSubtitles = true;
+  bool preferAudioDescription = false;
+  bool subtitlesEnabled = true;
+  bool highContrastInterface = false;
+  bool reducedMotion = false;
+  double subtitleFontSize = 46;
+  double subtitleOpacity = 1.0;
+  double subtitlePosition = 92;
+  double subtitleDelaySeconds = 0.0;
+  double playerTextScale = 1.0;
+  Color subtitleForeground = _LiveTvMediaPaint.onSurface;
+  Color subtitleBackground = _LiveTvMediaPaint.overlayStrong;
+  Color subtitleOutline = _LiveTvMediaPaint.overlayStrong;
+  bool spoilerSafeEpisodes = false;
+  bool screenReaderHints = true;
+  DateTime lastProgressWrite = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (fullscreen) {
       unawaited(_setFullscreen(false));
     }
+    unawaited(_saveFinalProgress());
     playbackStatusTimer?.cancel();
+    controlsHideTimer?.cancel();
     for (final subscription in subscriptions) {
       unawaited(subscription.cancel());
     }
@@ -1635,12 +2806,96 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
     final current = player;
     player = null;
     video = null;
+    unawaited(WakelockPlus.disable());
     unawaited(current?.dispose() ?? Future<void>.value());
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      final current = player;
+      if (current != null && playing) {
+        unawaited(current.pause());
+      }
+      unawaited(_saveProgressSnapshot());
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      unawaited(WakelockPlus.enable());
+      if (error.isNotEmpty) {
+        unawaited(_attemptStreamRecovery());
+      }
+      return;
+    }
+    if (state == AppLifecycleState.detached) {
+      unawaited(_saveFinalProgress());
+    }
+  }
+
+  Future<void> _openWithPolicy(Player created, {required bool compatibleMode}) async {
+    await created.open(Media(widget.streamUrl), play: true);
+    if (qualityAdaptive) {
+      try {
+        await created.setVideoTrack(VideoTrack.auto());
+      } catch (_) {}
+    }
+    if (compatibleMode) {
+      try {
+        final platform = created.platform;
+        if (platform is NativePlayer) {
+          await platform.setProperty('hwdec', 'no');
+        }
+      } catch (_) {}
+      await created.setRate(1.0);
+    } else {
+      await created.setRate(playbackSpeed);
+    }
+    await created.setVolume(muted ? 0 : volume.clamp(0, 100));
+  }
+
+  Future<void> _tryCompatiblePlayback() async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    setState(() {
+      statusMessage = 'Trying compatible playback profile...';
+      error = '';
+    });
+    try {
+      await _openWithPolicy(current, compatibleMode: true);
+      forceCompatiblePlayback = true;
+      compatibilityProfileApplied = true;
+      await _rememberProvenLimitation('Manual compatible playback recovery');
+      await _savePlayerPreferences();
+      if (mounted) {
+        setState(() {
+          playbackSpeed = 1.0;
+          qualityRoute = 'compatibility-constrained';
+          transcodeReason = 'Compatible playback profile requested manually.';
+          statusMessage = 'Compatible playback active.';
+        });
+      }
+      await _applyBandwidthPolicy();
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => error =
+              'Compatible playback could not start: ${e.toString().replaceFirst('Bad state: ', '')}',
+        );
+      }
+    }
+  }
+
   Future<void> _initialize() async {
     try {
+      await _loadPlayerPreferences();
+      final prior = await memory.loadProgress(widget.streamUrl);
+      final priorPosition = int.tryParse(prior['positionMs']?.toString() ?? '');
+      if (priorPosition != null && priorPosition > 0) {
+        resumePositionMs = priorPosition;
+      }
       MediaKit.ensureInitialized();
       final created = Player(
         configuration: playerConfigurationFor(widget.playbackPerformance),
@@ -1659,6 +2914,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
         }
       }
       final controller = VideoController(created);
+      outputEnvironment = _detectOutputEnvironment();
       subscriptions.add(
         created.stream.track.listen((value) {
           if (mounted) {
@@ -1676,7 +2932,24 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
       subscriptions.add(
         created.stream.position.listen((value) {
           if (mounted) {
-            setState(() => position = value);
+            setState(() {
+              position = value;
+              final totalMs = duration.inMilliseconds;
+              if (totalMs > 0) {
+                final creditsThreshold = max(
+                  0,
+                  totalMs - const Duration(seconds: 45).inMilliseconds,
+                );
+                creditsVisible = value.inMilliseconds >= creditsThreshold;
+              } else {
+                creditsVisible = false;
+              }
+            });
+          }
+          final now = DateTime.now().toUtc();
+          if (now.difference(lastProgressWrite) >= const Duration(seconds: 5)) {
+            lastProgressWrite = now;
+            unawaited(_saveProgressSnapshot());
           }
         }),
       );
@@ -1684,6 +2957,28 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
         created.stream.playing.listen((value) {
           if (mounted) {
             setState(() => playing = value);
+            _scheduleControlsAutoHide();
+          }
+        }),
+      );
+      subscriptions.add(
+        created.stream.buffering.listen((value) {
+          if (mounted) {
+            setState(() => buffering = value);
+            _scheduleControlsAutoHide();
+          }
+        }),
+      );
+      subscriptions.add(
+        created.stream.volume.listen((value) {
+          if (mounted) {
+            setState(() {
+              volume = value;
+              muted = value <= 0.0001;
+            });
+          } else {
+            volume = value;
+            muted = value <= 0.0001;
           }
         }),
       );
@@ -1691,10 +2986,43 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
         created.stream.tracks.listen((value) {
           if (mounted) {
             setState(() => tracks = value);
+            if (!compatibilityProfileApplied) {
+              compatibilityProfileApplied = true;
+              unawaited(_applyBandwidthPolicy());
+            }
+            unawaited(_autoSelectCompatibleTracks());
           }
         }),
       );
-      await created.open(Media(widget.streamUrl), play: true);
+      subscriptions.add(
+        created.stream.error.listen((_) {
+          if (mounted) {
+            setState(
+              () => error =
+                  'Playback encountered an error. Attempting recovery with current profile...',
+            );
+          }
+          unawaited(_attemptStreamRecovery());
+        }),
+      );
+      subscriptions.add(
+        created.stream.completed.listen((done) {
+          if (!done) {
+            return;
+          }
+          unawaited(_handlePlaybackCompleted());
+        }),
+      );
+      await _openWithPolicy(created, compatibleMode: forceCompatiblePlayback);
+      compatibilityProfileApplied = forceCompatiblePlayback;
+      if (forceCompatiblePlayback) {
+        qualityRoute = 'compatibility-constrained';
+        transcodeReason = 'Proven device limitation for this stream host.';
+      } else {
+        qualityRoute = 'original';
+      }
+      await WakelockPlus.enable();
+      await _applySubtitleRenderingPreferences();
       if (!mounted) {
         await created.dispose();
         return;
@@ -1712,9 +3040,24 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
         player = created;
         video = controller;
       });
+      _scheduleControlsAutoHide();
+      unawaited(_offerResumeIfAvailable());
     } catch (e) {
+      if (!attemptedCompatibleFallback) {
+        attemptedCompatibleFallback = true;
+        forceCompatiblePlayback = true;
+        await _rememberProvenLimitation('Automatic compatible fallback');
+        await _initialize();
+        return;
+      }
       if (mounted) {
-        setState(() => error = e.toString().replaceFirst('Bad state: ', ''));
+        final detail = e.toString().replaceFirst('Bad state: ', '');
+        setState(
+          () => error =
+              'Playback could not start. $detail\n'
+              'Reason: unsupported codec/container, network denial, or provider restrictions.\n'
+              'Use "Try compatible playback" to force safe decode.',
+        );
       }
     }
   }
@@ -1728,6 +3071,962 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
       return;
     }
     setState(() => playbackEngineStatus = label);
+  }
+
+  bool _isLocalAddress(String host) {
+    final lower = host.toLowerCase();
+    if (lower == 'localhost' || lower == '127.0.0.1' || lower == '::1') {
+      return true;
+    }
+    if (lower.startsWith('10.') || lower.startsWith('192.168.')) {
+      return true;
+    }
+    final octets = lower.split('.');
+    final secondOctet = octets.length > 1 ? int.tryParse(octets[1]) : null;
+    if (lower.startsWith('172.') && secondOctet != null && secondOctet >= 16 && secondOctet <= 31) {
+      return true;
+    }
+    return false;
+  }
+
+  String _streamHost() {
+    final uri = Uri.tryParse(widget.streamUrl);
+    return uri?.host.toLowerCase() ?? '';
+  }
+
+  int _maxBandwidthKbpsForCurrentRoute() {
+    final uri = Uri.tryParse(widget.streamUrl);
+    final host = uri?.host ?? '';
+    final local = host.isNotEmpty && _isLocalAddress(host);
+    playbackRoute = local ? 'local-network' : 'remote-streaming';
+    return local ? maxBandwidthKbpsLocal : maxBandwidthKbpsRemote;
+  }
+
+  String _detectOutputEnvironment() {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return fullscreen ? 'Android fullscreen output' : 'Android embedded output';
+    }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return 'iOS output';
+    }
+    if (defaultTargetPlatform == TargetPlatform.windows) {
+      return fullscreen ? 'Windows fullscreen output' : 'Windows windowed output';
+    }
+    if (defaultTargetPlatform == TargetPlatform.linux) {
+      return fullscreen ? 'Linux fullscreen output' : 'Linux windowed output';
+    }
+    if (defaultTargetPlatform == TargetPlatform.macOS) {
+      return fullscreen ? 'macOS fullscreen output' : 'macOS windowed output';
+    }
+    return 'Generic output';
+  }
+
+  String _promisedSubtitleFormats() {
+    if (defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux ||
+        defaultTargetPlatform == TargetPlatform.macOS) {
+      return 'SRT, ASS/SSA, WebVTT (backend/decoder dependent)';
+    }
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      return 'SRT, WebVTT (ASS/SSA depends on decoder build)';
+    }
+    return 'SRT, WebVTT';
+  }
+
+  Future<void> _rememberProvenLimitation(String reason) async {
+    final prefs = await memory.loadPrefs(widget.profileKey);
+    final host = _streamHost();
+    if (host.isEmpty) {
+      return;
+    }
+    final prior = prefs['provenCompatibleHosts'];
+    final values = <String>{
+      if (prior is List) ...prior.map((item) => item.toString().trim()).where((item) => item.isNotEmpty),
+      host,
+    };
+    prefs['provenCompatibleHosts'] = values.toList();
+    prefs['lastCompatibilityReason'] = reason;
+    await memory.savePrefs(widget.profileKey, prefs);
+  }
+
+  String _langLabel(String? value) {
+    final code = (value ?? '').trim().toLowerCase();
+    if (code.isEmpty || code == 'und' || code == 'unknown') {
+      return 'Unknown';
+    }
+    switch (code) {
+      case 'en':
+      case 'eng':
+        return 'English';
+      case 'es':
+      case 'spa':
+        return 'Spanish';
+      case 'fr':
+      case 'fra':
+        return 'French';
+      case 'de':
+      case 'ger':
+      case 'deu':
+        return 'German';
+      default:
+        return code.toUpperCase();
+    }
+  }
+
+  String _trackKindLabel(String title) {
+    final lower = title.toLowerCase();
+    final flags = <String>[];
+    if (lower.contains('forced')) {
+      flags.add('Forced');
+    }
+    if (lower.contains('sdh') ||
+        lower.contains('cc') ||
+        lower.contains('closed caption')) {
+      flags.add('SDH/CC');
+    }
+    if (lower.contains('commentary')) {
+      flags.add('Commentary');
+    }
+    if (lower.contains('descriptive') || lower.contains('audio description')) {
+      flags.add('Audio description');
+    }
+    if (flags.isEmpty) {
+      return 'Standard';
+    }
+    return flags.join(' · ');
+  }
+
+  String _toMpvHex(Color color, {double opacity = 1.0}) {
+    final a = (opacity.clamp(0.0, 1.0) * 255).round().clamp(0, 255);
+    final r = color.red;
+    final g = color.green;
+    final b = color.blue;
+    String hex(int value) => value.toRadixString(16).padLeft(2, '0');
+    return '#${hex(r)}${hex(g)}${hex(b)}${hex(a)}';
+  }
+
+  Future<void> _applySubtitleRenderingPreferences() async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    final platform = current.platform;
+    if (platform is! NativePlayer) {
+      return;
+    }
+    try {
+      await platform.setProperty('sub-font-size', subtitleFontSize.toStringAsFixed(0));
+      await platform.setProperty('sub-color', _toMpvHex(subtitleForeground, opacity: subtitleOpacity));
+      await platform.setProperty('sub-back-color', _toMpvHex(subtitleBackground, opacity: subtitleOpacity));
+      await platform.setProperty('sub-border-color', _toMpvHex(subtitleOutline, opacity: subtitleOpacity));
+      await platform.setProperty('sub-pos', subtitlePosition.toStringAsFixed(0));
+      await platform.setProperty('sub-delay', subtitleDelaySeconds.toStringAsFixed(2));
+      await platform.setProperty('sub-shadow-offset', reducedMotion ? '0' : '1');
+      await platform.setProperty('sub-ass-override', 'force');
+    } catch (_) {}
+  }
+
+  Future<void> _toggleSubtitles(bool value) async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    try {
+      if (!value) {
+        await current.setSubtitleTrack(SubtitleTrack.no());
+      } else if (tracks.subtitle.isNotEmpty) {
+        await _selectSubtitleByPolicy();
+      }
+      if (mounted) {
+        setState(() => subtitlesEnabled = value);
+      } else {
+        subtitlesEnabled = value;
+      }
+      await _savePlayerPreferences();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          error = 'Subtitles could not be changed for this stream.';
+        });
+      }
+    }
+  }
+
+  Future<void> _applyBandwidthPolicy() async {
+    final current = player;
+    if (current == null || tracks.video.isEmpty) {
+      return;
+    }
+    final limitKbps = _maxBandwidthKbpsForCurrentRoute();
+    if (!qualityAdaptive) {
+      qualityRoute = 'manual';
+      return;
+    }
+    VideoTrack? best;
+    var bestScore = -1;
+    final widthPattern = RegExp(r'(\d{3,4})p', caseSensitive: false);
+    final kbpsPattern = RegExp(r'(\d{3,6})\s?kbps', caseSensitive: false);
+    for (final track in tracks.video) {
+      final label = '${track.title ?? ''} ${track.language ?? ''}'.toLowerCase();
+      final width = int.tryParse(widthPattern.firstMatch(label)?.group(1) ?? '');
+      final kbps = int.tryParse(kbpsPattern.firstMatch(label)?.group(1) ?? '');
+      final score = kbps ?? ((width ?? 0) * 8);
+      if (score <= limitKbps && score > bestScore) {
+        bestScore = score;
+        best = track;
+      }
+    }
+    if (best != null) {
+      await current.setVideoTrack(best);
+      qualityRoute = best == selectedTrack.video ? 'original' : 'compatibility-constrained';
+      if (qualityRoute == 'compatibility-constrained') {
+        transcodeReason =
+            'Bandwidth policy ($playbackRoute <= ${limitKbps}kbps) selected a lower compatible quality.';
+      }
+    } else {
+      qualityRoute = 'original';
+      transcodeReason = 'No constrained profile matched; original stream used.';
+    }
+  }
+
+  Future<void> _autoSelectCompatibleTracks() async {
+    if (didAutoSelectTracks) {
+      return;
+    }
+    didAutoSelectTracks = true;
+    await _selectAudioByPolicy();
+    if (subtitlesEnabled) {
+      await _selectSubtitleByPolicy();
+    }
+  }
+
+  Future<void> _selectAudioByPolicy() async {
+    final current = player;
+    if (current == null || tracks.audio.isEmpty) {
+      return;
+    }
+    final byLanguage = tracks.audio.where((track) {
+      final lang = (track.language ?? '').toLowerCase();
+      return lang.contains(preferredAudioLanguage.toLowerCase());
+    }).toList();
+    AudioTrack chosen = byLanguage.isNotEmpty ? byLanguage.first : tracks.audio.first;
+    if (preferAudioDescription) {
+      for (final track in byLanguage.isNotEmpty ? byLanguage : tracks.audio) {
+        if (_trackKindLabel(track.title ?? '').toLowerCase().contains(
+          'audio description',
+        )) {
+          chosen = track;
+          break;
+        }
+      }
+    }
+    await current.setAudioTrack(chosen);
+    if (mounted) {
+      setState(
+        () => statusMessage =
+            'Audio selected: ${_langLabel(chosen.language)} · ${_trackKindLabel(chosen.title ?? '')}',
+      );
+    }
+  }
+
+  Future<void> _selectSubtitleByPolicy() async {
+    final current = player;
+    if (current == null || tracks.subtitle.isEmpty) {
+      return;
+    }
+    SubtitleTrack? forced;
+    SubtitleTrack? sdh;
+    SubtitleTrack? language;
+    for (final track in tracks.subtitle) {
+      final title = track.title ?? '';
+      final lower = title.toLowerCase();
+      final lang = (track.language ?? '').toLowerCase();
+      if (forced == null && lower.contains('forced')) {
+        forced = track;
+      }
+      if (sdh == null &&
+          (lower.contains('sdh') ||
+              lower.contains('cc') ||
+              lower.contains('closed caption'))) {
+        sdh = track;
+      }
+      if (language == null && lang.contains(preferredSubtitleLanguage.toLowerCase())) {
+        language = track;
+      }
+    }
+    SubtitleTrack? chosen;
+    if (preferForcedSubtitles) {
+      chosen = forced;
+    }
+    if (chosen == null && preferSdh) {
+      chosen = sdh;
+    }
+    chosen ??= language;
+    if (chosen == null) {
+      chosen = tracks.subtitle.first;
+      if (mounted) {
+        setState(
+          () => statusMessage =
+              'No subtitle matched your policy; safe default selected.',
+        );
+      }
+    }
+    final chosenTrack = chosen;
+    await current.setSubtitleTrack(chosenTrack);
+    if (mounted) {
+      setState(
+        () => statusMessage =
+            'Subtitle selected: ${_langLabel(chosenTrack.language)} · ${_trackKindLabel(chosenTrack.title ?? '')}',
+      );
+    }
+  }
+
+  Future<void> _loadPlayerPreferences() async {
+    final prefs = await memory.loadPrefs(widget.profileKey);
+    seekIncrementSeconds = int.tryParse(
+          prefs['seekIncrementSeconds']?.toString() ?? '',
+        ) ??
+        10;
+    if (seekIncrementSeconds < 5) {
+      seekIncrementSeconds = 5;
+    }
+    if (seekIncrementSeconds > 60) {
+      seekIncrementSeconds = 60;
+    }
+    autoplayNext = prefs['autoplayNext'] != false;
+    qualityAdaptive = prefs['qualityAdaptive'] != false;
+    pauseHistory = prefs['pauseHistory'] == true;
+    aspectMode = prefs['aspectMode']?.toString() ?? 'contain';
+    audioOutputProfile = prefs['audioOutputProfile']?.toString() ?? 'auto';
+    preferredAudioLanguage = prefs['preferredAudioLanguage']?.toString() ?? 'en';
+    preferredSubtitleLanguage =
+        prefs['preferredSubtitleLanguage']?.toString() ?? 'en';
+    preferSdh = prefs['preferSdh'] == true;
+    preferForcedSubtitles = prefs['preferForcedSubtitles'] != false;
+    preferAudioDescription = prefs['preferAudioDescription'] == true;
+    subtitlesEnabled = prefs['subtitlesEnabled'] != false;
+    highContrastInterface = prefs['highContrastInterface'] == true;
+    reducedMotion = prefs['reducedMotion'] == true;
+    spoilerSafeEpisodes = prefs['spoilerSafeEpisodes'] == true;
+    screenReaderHints = prefs['screenReaderHints'] != false;
+    subtitleFontSize =
+        double.tryParse(prefs['subtitleFontSize']?.toString() ?? '') ?? 46;
+    subtitleOpacity =
+        double.tryParse(prefs['subtitleOpacity']?.toString() ?? '') ?? 1.0;
+    subtitlePosition =
+        double.tryParse(prefs['subtitlePosition']?.toString() ?? '') ?? 92;
+    subtitleDelaySeconds =
+        double.tryParse(prefs['subtitleDelaySeconds']?.toString() ?? '') ?? 0.0;
+    playerTextScale =
+        double.tryParse(prefs['playerTextScale']?.toString() ?? '') ?? 1.0;
+    subtitleForeground = Color(
+      int.tryParse(prefs['subtitleForeground']?.toString() ?? '') ??
+          _LiveTvMediaPaint.onSurface.value,
+    );
+    subtitleBackground = Color(
+      int.tryParse(prefs['subtitleBackground']?.toString() ?? '') ??
+          _LiveTvMediaPaint.overlayStrong.value,
+    );
+    subtitleOutline = Color(
+      int.tryParse(prefs['subtitleOutline']?.toString() ?? '') ??
+          _LiveTvMediaPaint.overlayStrong.value,
+    );
+    maxBandwidthKbpsRemote =
+        int.tryParse(prefs['maxBandwidthKbpsRemote']?.toString() ?? '') ?? 4500;
+    maxBandwidthKbpsLocal =
+        int.tryParse(prefs['maxBandwidthKbpsLocal']?.toString() ?? '') ?? 18000;
+    if (maxBandwidthKbpsRemote < 1200) {
+      maxBandwidthKbpsRemote = 1200;
+    }
+    if (maxBandwidthKbpsLocal < maxBandwidthKbpsRemote) {
+      maxBandwidthKbpsLocal = maxBandwidthKbpsRemote;
+    }
+    final provenHosts = prefs['provenCompatibleHosts'];
+    final host = _streamHost();
+    forceCompatiblePlayback =
+        provenHosts is List &&
+        host.isNotEmpty &&
+        provenHosts.map((item) => item.toString().toLowerCase()).contains(host);
+    final speed = double.tryParse(prefs['playbackSpeed']?.toString() ?? '');
+    if (speed != null && speed >= 0.5 && speed <= 2.0) {
+      playbackSpeed = speed;
+    }
+    bookmarksMs = await memory.loadBookmarks(widget.streamUrl);
+  }
+
+  Future<void> _savePlayerPreferences() async {
+    await memory.savePrefs(widget.profileKey, {
+      'seekIncrementSeconds': seekIncrementSeconds,
+      'autoplayNext': autoplayNext,
+      'qualityAdaptive': qualityAdaptive,
+      'pauseHistory': pauseHistory,
+      'aspectMode': aspectMode,
+      'audioOutputProfile': audioOutputProfile,
+      'preferredAudioLanguage': preferredAudioLanguage,
+      'preferredSubtitleLanguage': preferredSubtitleLanguage,
+      'preferSdh': preferSdh,
+      'preferForcedSubtitles': preferForcedSubtitles,
+      'preferAudioDescription': preferAudioDescription,
+      'subtitlesEnabled': subtitlesEnabled,
+      'highContrastInterface': highContrastInterface,
+      'reducedMotion': reducedMotion,
+      'spoilerSafeEpisodes': spoilerSafeEpisodes,
+      'screenReaderHints': screenReaderHints,
+      'subtitleFontSize': subtitleFontSize,
+      'subtitleOpacity': subtitleOpacity,
+      'subtitlePosition': subtitlePosition,
+      'subtitleDelaySeconds': subtitleDelaySeconds,
+      'playerTextScale': playerTextScale,
+      'subtitleForeground': subtitleForeground.value,
+      'subtitleBackground': subtitleBackground.value,
+      'subtitleOutline': subtitleOutline.value,
+      'maxBandwidthKbpsRemote': maxBandwidthKbpsRemote,
+      'maxBandwidthKbpsLocal': maxBandwidthKbpsLocal,
+      'playbackSpeed': playbackSpeed,
+    });
+  }
+
+  Future<void> _saveProgressSnapshot() async {
+    if (pauseHistory) {
+      return;
+    }
+    final durationMs = duration.inMilliseconds;
+    final positionMs = position.inMilliseconds;
+    final complete =
+        durationMs > 0 && positionMs >= (durationMs - const Duration(seconds: 8).inMilliseconds);
+    await memory.saveProgress(
+      widget.streamUrl,
+      positionMs: positionMs,
+      durationMs: durationMs,
+      complete: complete,
+    );
+    await memory.appendStatsEvent(
+      widget.profileKey,
+      type: 'progress',
+      payload: {
+        'streamUrl': widget.streamUrl,
+        'positionMs': positionMs,
+        'durationMs': durationMs,
+        'buffering': buffering,
+      },
+    );
+  }
+
+  Future<void> _saveFinalProgress() async {
+    try {
+      await _saveProgressSnapshot();
+      await memory.appendStatsEvent(
+        widget.profileKey,
+        type: 'final_progress',
+        payload: {
+          'streamUrl': widget.streamUrl,
+          'positionMs': position.inMilliseconds,
+          'durationMs': duration.inMilliseconds,
+          'title': widget.title,
+        },
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _offerResumeIfAvailable() async {
+    if (showingResumePrompt) {
+      return;
+    }
+    final current = player;
+    if (!mounted || current == null) {
+      return;
+    }
+    final resumeMs = resumePositionMs;
+    if (resumeMs == null || resumeMs <= 15000) {
+      return;
+    }
+    if (duration.inMilliseconds > 0 &&
+        resumeMs >= duration.inMilliseconds - const Duration(seconds: 12).inMilliseconds) {
+      return;
+    }
+    showingResumePrompt = true;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Resume playback'),
+        content: Text(
+          'Resume from ${_clockText(Duration(milliseconds: resumeMs))} or restart from beginning?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'restart'),
+            child: const Text('Restart'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'resume'),
+            child: const Text('Resume'),
+          ),
+        ],
+      ),
+    );
+    showingResumePrompt = false;
+    if (!mounted || action == null) {
+      return;
+    }
+    if (action == 'resume') {
+      await current.seek(Duration(milliseconds: resumeMs));
+    } else {
+      await current.seek(Duration.zero);
+    }
+  }
+
+  Future<void> _attemptStreamRecovery() async {
+    if (attemptedRecovery) {
+      return;
+    }
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    attemptedRecovery = true;
+    recoveryAttempts += 1;
+    if (recoveryAttempts > 3) {
+      attemptedRecovery = false;
+      if (mounted) {
+        setState(
+          () => error =
+              'Automatic recovery stopped to avoid restart loops. Use "Try compatible playback" or Retry.',
+        );
+      }
+      await _rememberProvenLimitation('Recovery loop guard engaged');
+      return;
+    }
+    final resumeMs = position.inMilliseconds;
+    try {
+      await _openWithPolicy(current, compatibleMode: forceCompatiblePlayback);
+      if (resumeMs > 0) {
+        await current.seek(Duration(milliseconds: resumeMs));
+      }
+      recoveryAttempts = 0;
+      if (mounted) {
+        setState(() => error = '');
+      } else {
+        error = '';
+      }
+    } catch (_) {
+      if (recoveryAttempts < 3) {
+        Future<void>.delayed(const Duration(seconds: 2), () async {
+          if (!mounted || player == null) {
+            return;
+          }
+          await _attemptStreamRecovery();
+        });
+      }
+      if (mounted) {
+        setState(
+          () => error =
+              'Playback could not recover automatically. Please retry.',
+        );
+      } else {
+        error = 'Playback could not recover automatically. Please retry.';
+      }
+    } finally {
+      attemptedRecovery = false;
+    }
+  }
+
+  Future<void> _handlePlaybackCompleted() async {
+    await _saveFinalProgress();
+    if (!autoplayNext) {
+      return;
+    }
+    final nextStream = widget.nextEpisodeStreamUrl?.trim();
+    if (nextStream == null || nextStream.isEmpty) {
+      return;
+    }
+    if (nextEpisodePrompted) {
+      return;
+    }
+    nextEpisodePrompted = true;
+    if (mounted) {
+      setState(() {
+        statusMessage = widget.nextEpisodeTitle == null
+            ? 'Starting next episode...'
+            : 'Starting ${widget.nextEpisodeTitle}...';
+      });
+    }
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    await current.open(Media(nextStream), play: true);
+    resumePositionMs = 0;
+    nextEpisodePrompted = false;
+    if (mounted) {
+      setState(() {
+        error = '';
+        creditsVisible = false;
+      });
+    }
+    await memory.saveProgress(
+      nextStream,
+      positionMs: 0,
+      durationMs: 0,
+      complete: false,
+    );
+  }
+
+  Future<void> _pickAudioTrack() async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    final options = tracks.audio;
+    if (options.isEmpty) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            const ListTile(
+              title: Text(
+                'Audio Tracks',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final track in options)
+              ListTile(
+                leading: Icon(
+                  selectedTrack.audio == track
+                      ? Icons.check_circle
+                      : Icons.audiotrack_outlined,
+                ),
+                title: Text(track.title ?? '(Unnamed audio track)'),
+                subtitle: Text(
+                  '${_langLabel(track.language)} • ${_trackKindLabel(track.title ?? '')}',
+                ),
+                onTap: () async {
+                  await current.setAudioTrack(track);
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickVideoTrackQuality() async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    final options = tracks.video;
+    if (options.isEmpty) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            SwitchListTile(
+              value: qualityAdaptive,
+              title: const Text('Adaptive quality'),
+              onChanged: (value) async {
+                if (mounted) {
+                  setState(() {
+                    qualityAdaptive = value;
+                    statusMessage = value
+                        ? 'Adaptive quality enabled.'
+                        : 'Manual quality mode enabled.';
+                  });
+                } else {
+                  qualityAdaptive = value;
+                }
+                await _savePlayerPreferences();
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                }
+              },
+            ),
+            const ListTile(
+              title: Text(
+                'Manual quality',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final track in options)
+              ListTile(
+                leading: Icon(
+                  selectedTrack.video == track
+                      ? Icons.check_circle
+                      : Icons.high_quality_outlined,
+                ),
+                title: Text(track.title ?? '(Quality ${track.id})'),
+                subtitle: Text(track.language ?? 'unknown'),
+                onTap: () async {
+                  await current.setVideoTrack(track);
+                  if (mounted) {
+                    setState(() => qualityAdaptive = false);
+                  } else {
+                    qualityAdaptive = false;
+                  }
+                  await _savePlayerPreferences();
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setPlaybackSpeed(double speed) async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    await current.setRate(speed);
+    if (mounted) {
+      setState(() => playbackSpeed = speed);
+    } else {
+      playbackSpeed = speed;
+    }
+    await _savePlayerPreferences();
+  }
+
+  Future<void> _toggleMute() async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    if (muted || volume <= 0.0001) {
+      final target = preMuteVolume <= 0.0001 ? 100.0 : preMuteVolume;
+      await current.setVolume(target.clamp(0, 100));
+      if (mounted) {
+        setState(() {
+          muted = false;
+          volume = target;
+        });
+      }
+      return;
+    }
+    preMuteVolume = volume;
+    await current.setVolume(0);
+    if (mounted) {
+      setState(() => muted = true);
+    }
+  }
+
+  Future<void> _setVolume(double value) async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    await current.setVolume(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      volume = value;
+      if (value > 0) {
+        muted = false;
+      } else {
+        muted = true;
+      }
+    });
+  }
+
+  Future<void> _addBookmark() async {
+    final value = position.inMilliseconds.clamp(
+      0,
+      max(0, duration.inMilliseconds),
+    );
+    final next = [...bookmarksMs, value.toInt()].toSet().toList()..sort();
+    bookmarksMs = next;
+    await memory.saveBookmarks(widget.streamUrl, bookmarksMs);
+    if (mounted) {
+      setState(
+        () => statusMessage =
+            'Bookmark added at ${_clockText(Duration(milliseconds: value.toInt()))}.',
+      );
+    }
+  }
+
+  Future<void> _openBookmarks() async {
+    if (bookmarksMs.isEmpty) {
+      return;
+    }
+    final target = await showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            const ListTile(
+              title: Text(
+                'Bookmarks',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final mark in bookmarksMs)
+              ListTile(
+                title: Text(_clockText(Duration(milliseconds: mark))),
+                onTap: () => Navigator.pop(ctx, mark),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (target != null) {
+      await player?.seek(Duration(milliseconds: target));
+    }
+  }
+
+  List<int> _chapters() {
+    final total = duration.inMilliseconds;
+    if (total <= 0) {
+      return const <int>[];
+    }
+    final result = <int>[];
+    for (var i = 1; i < 10; i++) {
+      result.add((total * (i / 10)).round());
+    }
+    return result;
+  }
+
+  Future<void> _openChapters() async {
+    final chapters = _chapters();
+    if (chapters.isEmpty) {
+      return;
+    }
+    final target = await showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            const ListTile(
+              title: Text(
+                'Chapters',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (var i = 0; i < chapters.length; i++)
+              ListTile(
+                title: Text('Chapter ${i + 1}'),
+                subtitle: Text(_clockText(Duration(milliseconds: chapters[i]))),
+                onTap: () => Navigator.pop(ctx, chapters[i]),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (target != null) {
+      await player?.seek(Duration(milliseconds: target));
+    }
+  }
+
+  Future<void> _createSessionHandoff() async {
+    final code = await memory.createSessionHandoff(
+      title: widget.title,
+      streamUrl: widget.streamUrl,
+      positionMs: position.inMilliseconds,
+      durationMs: duration.inMilliseconds,
+    );
+    if (!mounted) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Session handoff'),
+        content: SelectableText('Use this code on another device: $code'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _consumeSessionHandoff() async {
+    final controller = TextEditingController();
+    final code = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Continue from handoff'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Handoff code'),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    if (code == null || code.trim().isEmpty) {
+      return;
+    }
+    final payload = await memory.consumeSessionHandoff(code);
+    if (payload == null) {
+      if (mounted) {
+        setState(() => error = 'Handoff code not found or expired.');
+      }
+      return;
+    }
+    final stream = payload['streamUrl']?.toString().trim() ?? '';
+    final seekMs = int.tryParse(payload['positionMs']?.toString() ?? '') ?? 0;
+    if (stream.isEmpty || player == null) {
+      return;
+    }
+    await player!.open(Media(stream), play: true);
+    if (seekMs > 0) {
+      await player!.seek(Duration(milliseconds: seekMs));
+    }
+  }
+
+  Future<void> _openExternalPlayer() async {
+    await Clipboard.setData(ClipboardData(text: widget.streamUrl));
+    if (mounted) {
+      setState(() => statusMessage = 'Stream URL copied for external player.');
+    }
+  }
+
+  Future<void> _stepFrame(int direction) async {
+    if (playing) {
+      return;
+    }
+    await _seekRelative(Duration(milliseconds: 33 * direction));
+  }
+
+  Future<void> _restartPlayback() async {
+    await player?.seek(Duration.zero);
+    if (mounted) {
+      setState(() => statusMessage = 'Restarted from the beginning.');
+    }
+  }
+
+  Future<void> _resumeSavedPosition() async {
+    final saved = resumePositionMs ?? 0;
+    if (saved <= 0) {
+      return;
+    }
+    await player?.seek(Duration(milliseconds: saved));
+    if (mounted) {
+      setState(() => statusMessage = 'Resumed from saved progress.');
+    }
   }
 
   Future<void> _setFullscreen(bool value) async {
@@ -1748,13 +4047,913 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
           defaultTargetPlatform == TargetPlatform.linux ||
           defaultTargetPlatform == TargetPlatform.macOS) {
         await windowManager.setFullScreen(value);
+        if (!value) {
+          await windowManager.show();
+          await windowManager.focus();
+        }
       }
     } catch (_) {}
     if (mounted) {
-      setState(() => fullscreen = value);
+      setState(() {
+        fullscreen = value;
+        controlsVisible = true;
+        outputEnvironment = _detectOutputEnvironment();
+      });
     } else {
       fullscreen = value;
+      controlsVisible = true;
+      outputEnvironment = _detectOutputEnvironment();
     }
+    _scheduleControlsAutoHide();
+  }
+
+  void _registerControlsInteraction() {
+    if (!mounted) {
+      return;
+    }
+    if (fullscreen && !controlsVisible) {
+      setState(() => controlsVisible = true);
+    }
+    _scheduleControlsAutoHide();
+  }
+
+  void _scheduleControlsAutoHide() {
+    controlsHideTimer?.cancel();
+    final shouldAutoHide =
+        fullscreen &&
+        playing &&
+        !buffering &&
+        error.isEmpty &&
+        statusMessage.isEmpty &&
+        !creditsVisible;
+    if (!shouldAutoHide) {
+      if (mounted && !controlsVisible) {
+        setState(() => controlsVisible = true);
+      } else {
+        controlsVisible = true;
+      }
+      return;
+    }
+    controlsHideTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted || !fullscreen || !playing || buffering) {
+        return;
+      }
+      setState(() => controlsVisible = false);
+    });
+  }
+
+  BoxFit _aspectFit() {
+    switch (aspectMode) {
+      case 'cover':
+        return BoxFit.cover;
+      case 'fill':
+        return BoxFit.fill;
+      case 'fitWidth':
+        return BoxFit.fitWidth;
+      case 'fitHeight':
+        return BoxFit.fitHeight;
+      default:
+        return BoxFit.contain;
+    }
+  }
+
+  Future<void> _setAspectMode(String value) async {
+    aspectMode = value;
+    if (mounted) {
+      setState(() => statusMessage = 'Aspect mode: $value');
+    }
+    await _savePlayerPreferences();
+  }
+
+  Future<void> _setAudioOutputProfile(String value) async {
+    audioOutputProfile = value;
+    final current = player;
+    if (current != null) {
+      if (value == 'night') {
+        await current.setVolume(min(volume, 70));
+      } else if (value == 'theater') {
+        await current.setVolume(max(volume, 80));
+      }
+    }
+    if (mounted) {
+      setState(() => statusMessage = 'Output profile: $value');
+    }
+    await _savePlayerPreferences();
+  }
+
+  Future<void> _showPlaybackStats() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Playback statistics'),
+        content: SelectableText(
+          'Position: ${_clockText(position)}\n'
+          'Duration: ${_runtimeText(duration)}\n'
+          'Buffering: ${buffering ? 'yes' : 'no'}\n'
+          'Engine: $playbackEngineStatus\n'
+          'Output env: $outputEnvironment\n'
+          'Route: $playbackRoute\n'
+          'Quality route: $qualityRoute\n'
+          'Reason: $transcodeReason\n'
+          'Volume: ${volume.toStringAsFixed(0)}%\n'
+          'Speed: ${playbackSpeed.toStringAsFixed(2)}x\n'
+          'Aspect: $aspectMode\n'
+          'Output: $audioOutputProfile',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showCapabilitiesReport() async {
+    final sourceScheme = Uri.tryParse(widget.streamUrl)?.scheme.toLowerCase() ?? 'unknown';
+    final canSelectAudio = tracks.audio.isNotEmpty;
+    final canSelectSubtitle = tracks.subtitle.isNotEmpty;
+    final canSelectQuality = tracks.video.isNotEmpty;
+    final canUseFallback = player != null;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Client capability report'),
+        content: SelectableText(
+          'Scheme: $sourceScheme\n'
+          'Output environment: $outputEnvironment\n'
+          'Route policy: $playbackRoute\n'
+          'Audio track selection: ${canSelectAudio ? 'supported' : 'not exposed by source'}\n'
+          'Subtitle selection: ${canSelectSubtitle ? 'supported' : 'not exposed by source'}\n'
+          'Quality selection: ${canSelectQuality ? 'supported' : 'not exposed by source'}\n'
+          'Promised subtitle formats: ${_promisedSubtitleFormats()}\n'
+          'Bandwidth policy: local <= ${maxBandwidthKbpsLocal} kbps, remote <= ${maxBandwidthKbpsRemote} kbps\n'
+          'Fallback profile: ${canUseFallback ? 'available (compatible playback)' : 'unavailable'}\n'
+          'Avoid restart loops: automatic recovery capped at 3 attempts\n'
+          '\nTrack policy:\n'
+          'Preferred audio language -> Preferred subtitle language -> Forced-subtitle rules -> SDH preference -> Remembered host/device limitation -> Safe default',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openSubtitleAccessibilitySettings() async {
+    final audioLang = TextEditingController(text: preferredAudioLanguage);
+    final subLang = TextEditingController(text: preferredSubtitleLanguage);
+    final colorOptions = <MapEntry<String, Color>>[
+      MapEntry('Primary', _LiveTvMediaPaint.onSurface),
+      MapEntry('Accent', _LiveTvMediaPaint.accent),
+      MapEntry('Muted', _LiveTvMediaPaint.onSurface70),
+      MapEntry('Panel', _LiveTvMediaPaint.panel),
+      MapEntry('Backdrop', _LiveTvMediaPaint.overlayStrong),
+    ];
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: StatefulBuilder(
+          builder: (context, setLocalState) => SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Subtitle & accessibility',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+                const SizedBox(height: 10),
+                SwitchListTile(
+                  value: subtitlesEnabled,
+                  title: const Text('Subtitles on/off'),
+                  onChanged: (value) async {
+                    setLocalState(() => subtitlesEnabled = value);
+                    await _toggleSubtitles(value);
+                  },
+                ),
+                SwitchListTile(
+                  value: preferForcedSubtitles,
+                  title: const Text('Prefer forced subtitles'),
+                  onChanged: (value) => setLocalState(() => preferForcedSubtitles = value),
+                ),
+                SwitchListTile(
+                  value: preferSdh,
+                  title: const Text('Prefer SDH/closed captions'),
+                  onChanged: (value) => setLocalState(() => preferSdh = value),
+                ),
+                SwitchListTile(
+                  value: preferAudioDescription,
+                  title: const Text('Prefer audio description'),
+                  onChanged: (value) => setLocalState(() => preferAudioDescription = value),
+                ),
+                SwitchListTile(
+                  value: highContrastInterface,
+                  title: const Text('High-contrast interface'),
+                  onChanged: (value) => setLocalState(() => highContrastInterface = value),
+                ),
+                SwitchListTile(
+                  value: reducedMotion,
+                  title: const Text('Reduced motion'),
+                  onChanged: (value) => setLocalState(() => reducedMotion = value),
+                ),
+                SwitchListTile(
+                  value: screenReaderHints,
+                  title: const Text('Screen-reader hints'),
+                  onChanged: (value) => setLocalState(() => screenReaderHints = value),
+                ),
+                ListTile(
+                  title: const Text('Preferred audio language'),
+                  subtitle: TextField(
+                    controller: audioLang,
+                    decoration: const InputDecoration(hintText: 'en'),
+                  ),
+                ),
+                ListTile(
+                  title: const Text('Preferred subtitle language'),
+                  subtitle: TextField(
+                    controller: subLang,
+                    decoration: const InputDecoration(hintText: 'en'),
+                  ),
+                ),
+                ListTile(
+                  title: const Text('Subtitle foreground color'),
+                  subtitle: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final option in colorOptions)
+                        ChoiceChip(
+                          label: Text(option.key),
+                          selected: subtitleForeground.value == option.value.value,
+                          onSelected: (_) => setLocalState(
+                            () => subtitleForeground = option.value,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                ListTile(
+                  title: const Text('Subtitle background color'),
+                  subtitle: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final option in colorOptions)
+                        ChoiceChip(
+                          label: Text(option.key),
+                          selected: subtitleBackground.value == option.value.value,
+                          onSelected: (_) => setLocalState(
+                            () => subtitleBackground = option.value,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                ListTile(
+                  title: const Text('Subtitle outline/shadow color'),
+                  subtitle: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final option in colorOptions)
+                        ChoiceChip(
+                          label: Text(option.key),
+                          selected: subtitleOutline.value == option.value.value,
+                          onSelected: (_) => setLocalState(
+                            () => subtitleOutline = option.value,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                ListTile(
+                  title: Text('Subtitle font size: ${subtitleFontSize.toStringAsFixed(0)}'),
+                  subtitle: Slider(
+                    value: subtitleFontSize.clamp(26, 82),
+                    min: 26,
+                    max: 82,
+                    onChanged: (value) => setLocalState(() => subtitleFontSize = value),
+                  ),
+                ),
+                ListTile(
+                  title: Text('Subtitle opacity: ${(subtitleOpacity * 100).round()}%'),
+                  subtitle: Slider(
+                    value: subtitleOpacity.clamp(0.2, 1.0),
+                    min: 0.2,
+                    max: 1.0,
+                    onChanged: (value) => setLocalState(() => subtitleOpacity = value),
+                  ),
+                ),
+                ListTile(
+                  title: Text('Subtitle position: ${subtitlePosition.toStringAsFixed(0)}'),
+                  subtitle: Slider(
+                    value: subtitlePosition.clamp(10, 100),
+                    min: 10,
+                    max: 100,
+                    onChanged: (value) => setLocalState(() => subtitlePosition = value),
+                  ),
+                ),
+                ListTile(
+                  title: Text('Subtitle timing offset: ${subtitleDelaySeconds.toStringAsFixed(2)}s'),
+                  subtitle: Slider(
+                    value: subtitleDelaySeconds.clamp(-5, 5),
+                    min: -5,
+                    max: 5,
+                    onChanged: (value) => setLocalState(() => subtitleDelaySeconds = value),
+                  ),
+                ),
+                ListTile(
+                  title: Text('Text scaling: ${playerTextScale.toStringAsFixed(2)}x'),
+                  subtitle: Slider(
+                    value: playerTextScale.clamp(0.8, 1.8),
+                    min: 0.8,
+                    max: 1.8,
+                    onChanged: (value) => setLocalState(() => playerTextScale = value),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton(
+                    onPressed: () async {
+                      preferredAudioLanguage = audioLang.text.trim().isEmpty
+                          ? 'en'
+                          : audioLang.text.trim().toLowerCase();
+                      preferredSubtitleLanguage = subLang.text.trim().isEmpty
+                          ? 'en'
+                          : subLang.text.trim().toLowerCase();
+                      await _savePlayerPreferences();
+                      await _applySubtitleRenderingPreferences();
+                      await _selectAudioByPolicy();
+                      if (subtitlesEnabled) {
+                        await _selectSubtitleByPolicy();
+                      }
+                      if (ctx.mounted) {
+                        Navigator.pop(ctx);
+                      }
+                    },
+                    child: const Text('Apply'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _importSubtitleFile() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+          label: 'Subtitle files',
+          extensions: ['srt', 'ass', 'ssa', 'vtt', 'sub'],
+        ),
+      ],
+    );
+    if (file == null) {
+      return;
+    }
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    final platform = current.platform;
+    if (platform is! NativePlayer) {
+      if (mounted) {
+        setState(() {
+          error = 'User-provided subtitle files are not supported on this platform.';
+        });
+      }
+      return;
+    }
+    try {
+      await platform.setProperty('sub-files-append', file.path);
+      if (mounted) {
+        setState(() => statusMessage = 'Subtitle file loaded: ${file.name}');
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => error = 'Could not load subtitle file.');
+      }
+    }
+  }
+
+  Future<void> _subtitleQualityReport() async {
+    final items = tracks.subtitle;
+    final summary = <String>[];
+    if (items.isEmpty) {
+      summary.add('No subtitle tracks were exposed by this source.');
+    } else {
+      for (final track in items) {
+        final title = track.title ?? '(untitled)';
+        final kind = _trackKindLabel(title);
+        final lang = _langLabel(track.language);
+        summary.add('$lang · $kind · $title');
+      }
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Subtitle quality report'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Text(summary.join('\n')),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> _loadSubtitleProviderPrefs() async {
+    final legacy = await memory.loadPrefs(widget.profileKey);
+    final profileId = int.tryParse(widget.profileKey);
+    if (profileId == null) {
+      return legacy;
+    }
+    final home = await HomePreferences().subtitleProviderSettings(profileId);
+    final merged = <String, dynamic>{...legacy, ...home};
+    return merged;
+  }
+
+  Future<void> _saveSubtitleProviderPrefs(Map<String, dynamic> next) async {
+    final profileId = int.tryParse(widget.profileKey);
+    if (profileId != null) {
+      await HomePreferences().saveSubtitleProviderSettings(profileId, next);
+    }
+    final merged = await memory.loadPrefs(widget.profileKey);
+    merged.addAll(next);
+    await memory.savePrefs(widget.profileKey, merged);
+  }
+
+  Future<void> _subtitleSearchAuthorizedWorkflow() async {
+    final prefs = await _loadSubtitleProviderPrefs();
+    final query = TextEditingController(text: widget.title);
+    final openApiKey = TextEditingController(
+      text: prefs['openSubtitlesApiKey']?.toString() ?? '',
+    );
+    final openUser = TextEditingController(
+      text: prefs['openSubtitlesUsername']?.toString() ?? '',
+    );
+    final openPass = TextEditingController(
+      text: prefs['openSubtitlesPassword']?.toString() ?? '',
+    );
+    final subdlKey = TextEditingController(
+      text: prefs['subdlApiKey']?.toString() ?? '',
+    );
+    var busy = false;
+    var localError = '';
+    var results = <SubtitleSearchResult>[];
+
+    String providerName(SubtitleProvider provider) {
+      switch (provider) {
+        case SubtitleProvider.openSubtitles:
+          return 'OpenSubtitles';
+        case SubtitleProvider.subdl:
+          return 'SubDL';
+      }
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocalState) => AlertDialog(
+          title: const Text('Subtitle search providers'),
+          content: SizedBox(
+            width: 720,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: query,
+                    decoration: const InputDecoration(
+                      labelText: 'Search query',
+                      hintText: 'Movie or episode title',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: openApiKey,
+                    decoration: const InputDecoration(
+                      labelText: 'OpenSubtitles API key',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: openUser,
+                    decoration: const InputDecoration(
+                      labelText: 'OpenSubtitles username',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: openPass,
+                    decoration: const InputDecoration(
+                      labelText: 'OpenSubtitles password',
+                    ),
+                    obscureText: true,
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: subdlKey,
+                    decoration: const InputDecoration(
+                      labelText: 'SubDL API key (optional second provider)',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                setLocalState(() {
+                                  busy = true;
+                                  localError = '';
+                                });
+                                final config = {
+                                  'openSubtitlesApiKey': openApiKey.text.trim(),
+                                  'openSubtitlesUsername': openUser.text.trim(),
+                                  'openSubtitlesPassword': openPass.text.trim(),
+                                  'subdlApiKey': subdlKey.text.trim(),
+                                };
+                                try {
+                                  results = await subtitleProviders.search(
+                                    query: query.text.trim(),
+                                    language: preferredSubtitleLanguage,
+                                    providerConfig: config,
+                                  );
+                                  await _saveSubtitleProviderPrefs(config);
+                                } catch (e) {
+                                  localError = e.toString().replaceFirst(
+                                    'Bad state: ',
+                                    '',
+                                  );
+                                } finally {
+                                  setLocalState(() => busy = false);
+                                }
+                              },
+                        icon: const Icon(Icons.search),
+                        label: const Text('Search providers'),
+                      ),
+                      const SizedBox(width: 10),
+                      if (busy) const CircularProgressIndicator(strokeWidth: 2),
+                    ],
+                  ),
+                  if (localError.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Text(
+                        localError,
+                        style: TextStyle(color: _LiveTvMediaPaint.warning),
+                      ),
+                    ),
+                  const SizedBox(height: 10),
+                  if (results.isNotEmpty)
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: results.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final item = results[index];
+                          return ListTile(
+                            title: Text(item.title),
+                            subtitle: Text(
+                              '${providerName(item.provider)} · ${item.language}'
+                              '${item.release == null ? '' : ' · ${item.release}'}'
+                              '${item.forced ? ' · Forced' : ''}'
+                              '${item.hearingImpaired == null ? '' : ' · SDH ${item.hearingImpaired}'}',
+                            ),
+                            trailing: FilledButton(
+                              onPressed: () async {
+                                final current = player;
+                                if (current == null) {
+                                  return;
+                                }
+                                final platform = current.platform;
+                                if (platform is! NativePlayer) {
+                                  if (mounted) {
+                                    setState(
+                                      () => error =
+                                          'Subtitle injection is unavailable on this platform.',
+                                    );
+                                  }
+                                  return;
+                                }
+                                try {
+                                  final path = await subtitleProviders
+                                      .downloadSubtitleToTemp(
+                                        item,
+                                        baseName: widget.title,
+                                      );
+                                  await platform.setProperty(
+                                    'sub-files-append',
+                                    path,
+                                  );
+                                  if (mounted) {
+                                    setState(
+                                      () => statusMessage =
+                                          'Loaded subtitle from ${providerName(item.provider)}.',
+                                    );
+                                  }
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                  }
+                                } catch (e) {
+                                  setLocalState(
+                                    () => localError = e.toString().replaceFirst(
+                                      'Bad state: ',
+                                      '',
+                                    ),
+                                  );
+                                }
+                              },
+                              child: const Text('Use'),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _translationAuthorizedWorkflow() async {
+    final prefs = await _loadSubtitleProviderPrefs();
+    final textInput = TextEditingController();
+    final source = TextEditingController(text: preferredSubtitleLanguage);
+    final target = TextEditingController(text: preferredAudioLanguage);
+    final endpoint = TextEditingController(
+      text: prefs['translateEndpoint']?.toString() ?? 'https://libretranslate.com/translate',
+    );
+    final apiKey = TextEditingController(
+      text: prefs['translateApiKey']?.toString() ?? '',
+    );
+    var translated = '';
+    var localError = '';
+    var busy = false;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocalState) => AlertDialog(
+          title: const Text('Subtitle translation'),
+          content: SizedBox(
+            width: 680,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: textInput,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: 'Text to translate',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: source,
+                          decoration: const InputDecoration(labelText: 'From (lang code)'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: target,
+                          decoration: const InputDecoration(labelText: 'To (lang code)'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: endpoint,
+                    decoration: const InputDecoration(
+                      labelText: 'LibreTranslate endpoint',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: apiKey,
+                    decoration: const InputDecoration(
+                      labelText: 'LibreTranslate API key (optional)',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                setLocalState(() {
+                                  busy = true;
+                                  localError = '';
+                                  translated = '';
+                                });
+                                try {
+                                  translated = await subtitleProviders.translateText(
+                                    text: textInput.text,
+                                    fromLanguage: source.text.trim().isEmpty
+                                        ? 'auto'
+                                        : source.text.trim(),
+                                    toLanguage: target.text.trim().isEmpty
+                                        ? 'en'
+                                        : target.text.trim(),
+                                    providerConfig: {
+                                      'translateEndpoint': endpoint.text.trim(),
+                                      'translateApiKey': apiKey.text.trim(),
+                                    },
+                                  );
+                                  await _saveSubtitleProviderPrefs({
+                                    'translateEndpoint': endpoint.text.trim(),
+                                    'translateApiKey': apiKey.text.trim(),
+                                  });
+                                } catch (e) {
+                                  localError = e.toString().replaceFirst(
+                                    'Bad state: ',
+                                    '',
+                                  );
+                                } finally {
+                                  setLocalState(() => busy = false);
+                                }
+                              },
+                        icon: const Icon(Icons.translate),
+                        label: const Text('Translate'),
+                      ),
+                      const SizedBox(width: 10),
+                      if (busy) const CircularProgressIndicator(strokeWidth: 2),
+                    ],
+                  ),
+                  if (localError.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Text(
+                        localError,
+                        style: TextStyle(color: _LiveTvMediaPaint.warning),
+                      ),
+                    ),
+                  if (translated.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: SelectableText(translated),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickSecondarySubtitleTrack() async {
+    final current = player;
+    if (current == null || tracks.subtitle.isEmpty) {
+      return;
+    }
+    final platform = current.platform;
+    if (platform is! NativePlayer) {
+      return;
+    }
+    final pick = await showModalBottomSheet<SubtitleTrack>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            const ListTile(
+              title: Text(
+                'Secondary subtitle track',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final track in tracks.subtitle)
+              ListTile(
+                title: Text(track.title ?? '(Unnamed subtitle)'),
+                subtitle: Text(_langLabel(track.language)),
+                onTap: () => Navigator.pop(ctx, track),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (pick == null) {
+      return;
+    }
+    try {
+      await platform.setProperty('secondary-sid', '${pick.id}');
+      if (mounted) {
+        setState(() => statusMessage = 'Secondary subtitle enabled.');
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Multiple simultaneous subtitles are not supported by this platform/stream.';
+        });
+      }
+    }
+  }
+
+  Future<void> _seekToPreview(double value) async {
+    final current = player;
+    if (current == null) {
+      return;
+    }
+    await current.seek(Duration(milliseconds: value.round()));
+    if (mounted) {
+      setState(() => scrubPreviewMs = null);
+    } else {
+      scrubPreviewMs = null;
+    }
+  }
+
+  Widget _seekThumbnailPreview() {
+    final previewMs = scrubPreviewMs;
+    if (previewMs == null) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      width: 170,
+      height: 96,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface.withAlpha(210),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _LiveTvMediaPaint.onSurface24),
+      ),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: widget.posterUrl?.trim().isNotEmpty == true
+                  ? Image.network(
+                      widget.posterUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          ColoredBox(color: context.millitopTheme.panelColor),
+                    )
+                  : ColoredBox(color: context.millitopTheme.panelColor),
+            ),
+          ),
+          Positioned(
+            left: 8,
+            right: 8,
+            bottom: 8,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface.withAlpha(192),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Text(
+                  _clockText(Duration(milliseconds: previewMs.round())),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _toggleFullscreen() async {
@@ -1773,6 +4972,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
       }
       return;
     }
+    await _saveProgressSnapshot();
     playbackStatusTimer?.cancel();
     playbackStatusTimer = null;
     for (final subscription in subscriptions) {
@@ -1828,9 +5028,37 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                       : Icons.subtitles_outlined,
                 ),
                 title: Text(track.title ?? '(Unnamed subtitle track)'),
-                subtitle: Text('${track.id} • ${track.language ?? 'unknown'}'),
+                subtitle: Text(
+                  '${_langLabel(track.language)} • ${_trackKindLabel(track.title ?? '')}',
+                ),
                 onTap: () async {
-                  await current.setSubtitleTrack(track);
+                  try {
+                    await current.setSubtitleTrack(track);
+                    final subtitleLabel =
+                        '${track.title ?? ''} ${track.language ?? ''}'.toLowerCase();
+                    final likelyImageSubtitle =
+                        subtitleLabel.contains('pgs') ||
+                        subtitleLabel.contains('dvd') ||
+                        subtitleLabel.contains('vobsub');
+                    if (mounted) {
+                      setState(() {
+                        if (likelyImageSubtitle) {
+                          transcodeReason =
+                              'Selected subtitle may require provider-side burn-in on some servers.';
+                          qualityRoute = 'compatibility-constrained';
+                        } else {
+                          transcodeReason = 'Subtitle track switched without forced transcoding.';
+                        }
+                      });
+                    }
+                  } catch (_) {
+                    if (mounted) {
+                      setState(() {
+                        error =
+                            'This subtitle format could not be rendered on this platform. Try another track or compatible playback.';
+                      });
+                    }
+                  }
                   if (ctx.mounted) {
                     Navigator.pop(ctx);
                   }
@@ -1852,6 +5080,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
       duration.inMilliseconds,
     );
     await current.seek(Duration(milliseconds: target));
+  }
+
+  Future<void> _seekByConfigured(int direction, {bool accelerated = false}) async {
+    final step = seekIncrementSeconds * (accelerated ? 3 : 1);
+    await _seekRelative(Duration(seconds: step * direction));
   }
 
   Future<void> _togglePlayPause() async {
@@ -1906,13 +5139,107 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
     return remaining;
   }
 
+  Future<void> _showRemoteControlHelp() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remote & keyboard controls'),
+        content: const SizedBox(
+          width: 480,
+          child: SingleChildScrollView(
+            child: Text(
+              'Space/Enter: Play or pause\n'
+              'Left/Right: Seek by configured step\n'
+              'Up/Down: Volume +/- 10%\n'
+              'M: Mute or unmute\n'
+              'F: Toggle fullscreen\n'
+              'C: Subtitle tracks\n'
+              'A: Audio tracks\n'
+              'Q: Quality tracks\n'
+              'P or Esc: Back to home with PiP\n'
+              'H: Show this help\n\n'
+              'When buffering/transcoding, open Playback stats and choose Try compatible playback.',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => PopScope(
     canPop: false,
     onPopInvokedWithResult: (_, __) {
       unawaited(_minimizeToPipAndGoHome());
     },
-    child: Scaffold(
+    child: CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (fullscreen) {
+            unawaited(_setFullscreen(false));
+            return;
+          }
+          unawaited(_minimizeToPipAndGoHome());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyP): () {
+          unawaited(_minimizeToPipAndGoHome());
+        },
+        const SingleActivator(LogicalKeyboardKey.enter): () {
+          unawaited(_togglePlayPause());
+        },
+        const SingleActivator(LogicalKeyboardKey.space): () {
+          unawaited(_togglePlayPause());
+        },
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+          unawaited(_seekByConfigured(-1));
+        },
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+          unawaited(_seekByConfigured(1));
+        },
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+          unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
+        },
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+          unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
+        },
+        const SingleActivator(LogicalKeyboardKey.keyM): () {
+          unawaited(_toggleMute());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyF): () {
+          unawaited(_toggleFullscreen());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyC): () {
+          unawaited(_pickSubtitle());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyA): () {
+          unawaited(_pickAudioTrack());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyQ): () {
+          unawaited(_pickVideoTrackQuality());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyH): () {
+          unawaited(_showRemoteControlHelp());
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: MouseRegion(
+          onHover: (_) => _registerControlsInteraction(),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _registerControlsInteraction,
+            onPanStart: (_) => _registerControlsInteraction(),
+            child: MediaQuery(
+      data: MediaQuery.of(context).copyWith(
+        textScaler: TextScaler.linear(playerTextScale.clamp(0.8, 1.8)),
+      ),
+      child: Scaffold(
       appBar: fullscreen
           ? null
           : AppBar(
@@ -1935,6 +5262,315 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                   onPressed: _pickSubtitle,
                   icon: const Icon(Icons.subtitles),
                 ),
+                IconButton(
+                  tooltip: subtitlesEnabled ? 'Disable subtitles' : 'Enable subtitles',
+                  onPressed: () => unawaited(_toggleSubtitles(!subtitlesEnabled)),
+                  icon: Icon(
+                    subtitlesEnabled
+                        ? Icons.closed_caption
+                        : Icons.closed_caption_disabled,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Audio track',
+                  onPressed: _pickAudioTrack,
+                  icon: const Icon(Icons.audiotrack),
+                ),
+                IconButton(
+                  tooltip: 'Quality',
+                  onPressed: _pickVideoTrackQuality,
+                  icon: const Icon(Icons.hd),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'Playback options',
+                  onSelected: (value) async {
+                    switch (value) {
+                      case 'speed_05':
+                        await _setPlaybackSpeed(0.5);
+                        break;
+                      case 'speed_10':
+                        await _setPlaybackSpeed(1.0);
+                        break;
+                      case 'speed_125':
+                        await _setPlaybackSpeed(1.25);
+                        break;
+                      case 'speed_150':
+                        await _setPlaybackSpeed(1.5);
+                        break;
+                      case 'speed_200':
+                        await _setPlaybackSpeed(2.0);
+                        break;
+                      case 'bookmark_add':
+                        await _addBookmark();
+                        break;
+                      case 'bookmark_open':
+                        await _openBookmarks();
+                        break;
+                      case 'chapters':
+                        await _openChapters();
+                        break;
+                      case 'restart':
+                        await _restartPlayback();
+                        break;
+                      case 'resume_saved':
+                        await _resumeSavedPosition();
+                        break;
+                      case 'seek_10':
+                        seekIncrementSeconds = 10;
+                        await _savePlayerPreferences();
+                        break;
+                      case 'seek_30':
+                        seekIncrementSeconds = 30;
+                        await _savePlayerPreferences();
+                        break;
+                      case 'seek_45':
+                        seekIncrementSeconds = 45;
+                        await _savePlayerPreferences();
+                        break;
+                      case 'aspect_contain':
+                        await _setAspectMode('contain');
+                        break;
+                      case 'aspect_cover':
+                        await _setAspectMode('cover');
+                        break;
+                      case 'aspect_fill':
+                        await _setAspectMode('fill');
+                        break;
+                      case 'aspect_fit_width':
+                        await _setAspectMode('fitWidth');
+                        break;
+                      case 'aspect_fit_height':
+                        await _setAspectMode('fitHeight');
+                        break;
+                      case 'autoplay':
+                        setState(() => autoplayNext = !autoplayNext);
+                        await _savePlayerPreferences();
+                        break;
+                      case 'output_auto':
+                        await _setAudioOutputProfile('auto');
+                        break;
+                      case 'output_theater':
+                        await _setAudioOutputProfile('theater');
+                        break;
+                      case 'output_night':
+                        await _setAudioOutputProfile('night');
+                        break;
+                      case 'history_pause':
+                        setState(() => pauseHistory = !pauseHistory);
+                        await _savePlayerPreferences();
+                        break;
+                      case 'handoff_create':
+                        await _createSessionHandoff();
+                        break;
+                      case 'handoff_consume':
+                        await _consumeSessionHandoff();
+                        break;
+                      case 'external':
+                        await _openExternalPlayer();
+                        break;
+                      case 'step_back':
+                        await _stepFrame(-1);
+                        break;
+                      case 'step_forward':
+                        await _stepFrame(1);
+                        break;
+                      case 'stats':
+                        await _showPlaybackStats();
+                        break;
+                      case 'capabilities':
+                        await _showCapabilitiesReport();
+                        break;
+                      case 'try_compatible':
+                        await _tryCompatiblePlayback();
+                        break;
+                      case 'subtitle_access':
+                        await _openSubtitleAccessibilitySettings();
+                        break;
+                      case 'subtitle_import':
+                        await _importSubtitleFile();
+                        break;
+                      case 'subtitle_quality':
+                        await _subtitleQualityReport();
+                        break;
+                      case 'subtitle_search':
+                        await _subtitleSearchAuthorizedWorkflow();
+                        break;
+                      case 'subtitle_translate':
+                        await _translationAuthorizedWorkflow();
+                        break;
+                      case 'subtitle_secondary':
+                        await _pickSecondarySubtitleTrack();
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: 'subtitle_access',
+                      child: Text('Subtitle & accessibility settings'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'chapters',
+                      child: Text('Chapters'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'bookmark_add',
+                      child: Text('Add bookmark'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'bookmark_open',
+                      child: Text('Go to bookmark'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'restart',
+                      child: Text('Restart from beginning'),
+                    ),
+                    if ((resumePositionMs ?? 0) > 0)
+                      const PopupMenuItem(
+                        value: 'resume_saved',
+                        child: Text('Resume saved progress'),
+                      ),
+                    const PopupMenuDivider(),
+                    CheckedPopupMenuItem(
+                      value: 'autoplay',
+                      checked: autoplayNext,
+                      child: const Text('Autoplay next episode'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'history_pause',
+                      checked: pauseHistory,
+                      child: const Text('Pause history collection'),
+                    ),
+                    const PopupMenuDivider(),
+                    CheckedPopupMenuItem(
+                      value: 'output_auto',
+                      checked: audioOutputProfile == 'auto',
+                      child: const Text('Output: auto'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'output_theater',
+                      checked: audioOutputProfile == 'theater',
+                      child: const Text('Output: theater'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'output_night',
+                      checked: audioOutputProfile == 'night',
+                      child: const Text('Output: night'),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'seek_10',
+                      child: Text('Seek increment: 10s'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'seek_30',
+                      child: Text('Seek increment: 30s'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'seek_45',
+                      child: Text('Seek increment: 45s'),
+                    ),
+                    const PopupMenuDivider(),
+                    CheckedPopupMenuItem(
+                      value: 'aspect_contain',
+                      checked: aspectMode == 'contain',
+                      child: Text('Aspect: contain'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'aspect_cover',
+                      checked: aspectMode == 'cover',
+                      child: Text('Aspect: cover'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'aspect_fill',
+                      checked: aspectMode == 'fill',
+                      child: Text('Aspect: fill'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'aspect_fit_width',
+                      checked: aspectMode == 'fitWidth',
+                      child: Text('Aspect: fit width'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'aspect_fit_height',
+                      checked: aspectMode == 'fitHeight',
+                      child: Text('Aspect: fit height'),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'speed_05',
+                      child: Text('Speed 0.5x'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'speed_10',
+                      child: Text('Speed 1.0x'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'speed_125',
+                      child: Text('Speed 1.25x'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'speed_150',
+                      child: Text('Speed 1.5x'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'speed_200',
+                      child: Text('Speed 2.0x'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'step_back',
+                      child: Text('Step frame backward'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'step_forward',
+                      child: Text('Step frame forward'),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'handoff_create',
+                      child: Text('Create session handoff'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'handoff_consume',
+                      child: Text('Continue from handoff'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'external',
+                      child: Text('Open in external player'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'stats',
+                      child: Text('Playback stats'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'capabilities',
+                      child: Text('Capability report'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'try_compatible',
+                      child: Text('Try compatible playback'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'subtitle_import',
+                      child: Text('Import subtitle file'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'subtitle_quality',
+                      child: Text('Subtitle quality report'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'subtitle_search',
+                      child: Text('Search subtitles (authorized)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'subtitle_translate',
+                      child: Text('Translate subtitles (authorized)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'subtitle_secondary',
+                      child: Text('Secondary subtitle track'),
+                    ),
+                  ],
+                ),
               ],
               bottom: widget.subtitle == null
                   ? null
@@ -1944,40 +5580,78 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text(
                           widget.subtitle!,
-                          style: const TextStyle(color: Colors.white70),
+                          style: TextStyle(color: _LiveTvMediaPaint.onSurface70),
                         ),
                       ),
                     ),
             ),
-      body: error.isNotEmpty
-          ? Center(
-              child: Text(
-                error,
-                style: const TextStyle(color: Colors.orangeAccent),
-              ),
-            )
-          : video == null
+      body: video == null
           ? const Center(child: CircularProgressIndicator())
           : Stack(
               children: [
                 ColoredBox(
-                  color: Colors.black,
+                  color: Theme.of(context).colorScheme.surface,
                   child: Center(
                     child: AspectRatio(
                       aspectRatio: 16 / 9,
-                      child: Video(
-                        controller: video!,
-                        controls: NoVideoControls,
+                      child: FittedBox(
+                        fit: _aspectFit(),
+                        child: SizedBox(
+                          width: 1920,
+                          height: 1080,
+                          child: Video(
+                            controller: video!,
+                            controls: NoVideoControls,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
-                Positioned(
-                  top: 6,
-                  right: 6,
-                  child: SafeArea(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
+                if (buffering)
+                  const Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: LinearProgressIndicator(),
+                  ),
+                if (statusMessage.isNotEmpty)
+                  Positioned(
+                    top: buffering ? 8 : 0,
+                    left: 12,
+                    child: SafeArea(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: highContrastInterface
+                              ? Theme.of(context).colorScheme.surface
+                              : _LiveTvMediaPaint.overlayMuted,
+                          borderRadius: BorderRadius.circular(999),
+                          border: highContrastInterface
+                              ? Border.all(color: _LiveTvMediaPaint.onSurface)
+                              : null,
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          child: Text(
+                            statusMessage,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!fullscreen || controlsVisible)
+                  Positioned(
+                    top: 6,
+                    right: 6,
+                    child: SafeArea(
+                    child: Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      runSpacing: 8,
                       children: [
                         IconButton.filledTonal(
                           tooltip: fullscreen ? 'Exit fullscreen' : 'Fullscreen',
@@ -1997,7 +5671,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                         const SizedBox(width: 8),
                         DecoratedBox(
                           decoration: BoxDecoration(
-                            color: const Color(0xAA000000),
+                            color: _LiveTvMediaPaint.overlayMuted,
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Padding(
@@ -2011,19 +5685,80 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                             ),
                           ),
                         ),
+                        const SizedBox(width: 8),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: _LiveTvMediaPaint.overlayMuted,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            child: Text(
+                              '$playbackRoute · $qualityRoute',
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ),
+                        if (transcodeReason != 'None')
+                          DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: _LiveTvMediaPaint.overlayMuted,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              child: Text(
+                                'Why transcoding: $transcodeReason',
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                            ),
+                          ),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: _LiveTvMediaPaint.overlayMuted,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            child: Text(
+                              outputEnvironment,
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ),
+                        IconButton.filledTonal(
+                          tooltip: 'Remote controls help',
+                          onPressed: () => unawaited(_showRemoteControlHelp()),
+                          icon: const Icon(Icons.keyboard),
+                        ),
                       ],
                     ),
                   ),
                 ),
-                Positioned(
-                  left: 10,
-                  right: 10,
-                  bottom: 10,
-                  child: SafeArea(
+                if (!fullscreen || controlsVisible)
+                  Positioned(
+                    left: 10,
+                    right: 10,
+                    bottom: 10,
+                    child: SafeArea(
                     child: DecoratedBox(
                       decoration: BoxDecoration(
-                        color: const Color(0xCC000000),
+                        color: highContrastInterface
+                            ? Theme.of(context).colorScheme.surface
+                            : _LiveTvMediaPaint.overlayStrong,
                         borderRadius: BorderRadius.circular(12),
+                        border: highContrastInterface
+                            ? Border.all(color: _LiveTvMediaPaint.onSurface)
+                            : null,
                       ),
                       child: Padding(
                         padding: const EdgeInsets.all(8),
@@ -2038,21 +5773,17 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                     children: [
                                       IconButton.filledTonal(
                                         onPressed: () => unawaited(
-                                          _seekRelative(
-                                            const Duration(seconds: -30),
-                                          ),
+                                          _seekByConfigured(-1, accelerated: true),
                                         ),
                                         icon: const Icon(Icons.replay_30),
-                                        tooltip: 'Rewind 30s',
+                                        tooltip: 'Rewind',
                                       ),
                                       IconButton.filledTonal(
                                         onPressed: () => unawaited(
-                                          _seekRelative(
-                                            const Duration(seconds: -10),
-                                          ),
+                                          _seekByConfigured(-1),
                                         ),
                                         icon: const Icon(Icons.replay_10),
-                                        tooltip: 'Rewind 10s',
+                                        tooltip: 'Rewind step',
                                       ),
                                       IconButton.filled(
                                         onPressed: () =>
@@ -2066,21 +5797,27 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                       ),
                                       IconButton.filledTonal(
                                         onPressed: () => unawaited(
-                                          _seekRelative(
-                                            const Duration(seconds: 10),
-                                          ),
+                                          _seekByConfigured(1),
                                         ),
                                         icon: const Icon(Icons.forward_10),
-                                        tooltip: 'Forward 10s',
+                                        tooltip: 'Forward step',
                                       ),
                                       IconButton.filledTonal(
                                         onPressed: () => unawaited(
-                                          _seekRelative(
-                                            const Duration(seconds: 30),
-                                          ),
+                                          _seekByConfigured(1, accelerated: true),
                                         ),
                                         icon: const Icon(Icons.forward_30),
-                                        tooltip: 'Forward 30s',
+                                        tooltip: 'Forward',
+                                      ),
+                                      IconButton.filledTonal(
+                                        onPressed: () => unawaited(_seekRelative(const Duration(seconds: 90))),
+                                        icon: const Icon(Icons.skip_next_outlined),
+                                        tooltip: 'Skip intro',
+                                      ),
+                                      IconButton.filledTonal(
+                                        onPressed: () => unawaited(_seekRelative(const Duration(seconds: 30))),
+                                        icon: const Icon(Icons.fast_forward_outlined),
+                                        tooltip: 'Skip recap',
                                       ),
                                     ],
                                   ),
@@ -2096,16 +5833,20 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                         : duration.inMilliseconds.toDouble(),
                                     onChanged: duration.inMilliseconds <= 0
                                         ? null
+                                        : (value) => setState(
+                                            () => scrubPreviewMs = value,
+                                          ),
+                                    onChangeEnd: duration.inMilliseconds <= 0
+                                        ? null
                                         : (value) => unawaited(
-                                            player?.seek(
-                                                  Duration(
-                                                    milliseconds:
-                                                        value.toInt(),
-                                                  ),
-                                                ) ??
-                                                Future<void>.value(),
+                                            _seekToPreview(value),
                                           ),
                                   ),
+                                  if (scrubPreviewMs != null && !reducedMotion)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: _seekThumbnailPreview(),
+                                    ),
                                   if (duration.inMilliseconds > 0)
                                     Wrap(
                                       alignment: WrapAlignment.center,
@@ -2128,6 +5869,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                           'End ${_endTimeText(_remainingDuration())}',
                                           style: const TextStyle(fontSize: 11),
                                         ),
+                                        Text(
+                                          'Step ${seekIncrementSeconds}s',
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                        Text(
+                                          'Speed ${playbackSpeed.toStringAsFixed(2)}x',
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
                                       ],
                                     ),
                                 ],
@@ -2136,21 +5885,17 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                 children: [
                                   IconButton(
                                     onPressed: () => unawaited(
-                                      _seekRelative(
-                                        const Duration(seconds: -30),
-                                      ),
+                                      _seekByConfigured(-1, accelerated: true),
                                     ),
                                     icon: const Icon(Icons.replay_30),
-                                    tooltip: 'Rewind 30s',
+                                    tooltip: 'Rewind',
                                   ),
                                   IconButton(
                                     onPressed: () => unawaited(
-                                      _seekRelative(
-                                        const Duration(seconds: -10),
-                                      ),
+                                      _seekByConfigured(-1),
                                     ),
                                     icon: const Icon(Icons.replay_10),
-                                    tooltip: 'Rewind 10s',
+                                    tooltip: 'Rewind step',
                                   ),
                                   IconButton(
                                     onPressed: () => unawaited(
@@ -2163,21 +5908,46 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                   ),
                                   IconButton(
                                     onPressed: () => unawaited(
-                                      _seekRelative(
-                                        const Duration(seconds: 10),
-                                      ),
+                                      _seekByConfigured(1),
                                     ),
                                     icon: const Icon(Icons.forward_10),
-                                    tooltip: 'Forward 10s',
+                                    tooltip: 'Forward step',
                                   ),
                                   IconButton(
                                     onPressed: () => unawaited(
-                                      _seekRelative(
-                                        const Duration(seconds: 30),
-                                      ),
+                                      _seekByConfigured(1, accelerated: true),
                                     ),
                                     icon: const Icon(Icons.forward_30),
-                                    tooltip: 'Forward 30s',
+                                    tooltip: 'Forward',
+                                  ),
+                                  IconButton(
+                                    onPressed: () => unawaited(_seekRelative(const Duration(seconds: 90))),
+                                    icon: const Icon(Icons.skip_next_outlined),
+                                    tooltip: 'Skip intro',
+                                  ),
+                                  IconButton(
+                                    onPressed: () => unawaited(_seekRelative(const Duration(seconds: 30))),
+                                    icon: const Icon(Icons.fast_forward_outlined),
+                                    tooltip: 'Skip recap',
+                                  ),
+                                  IconButton(
+                                    onPressed: () => unawaited(_toggleMute()),
+                                    icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
+                                    tooltip: muted ? 'Unmute' : 'Mute',
+                                  ),
+                                  IconButton(
+                                    onPressed: () => unawaited(
+                                      _setVolume((volume - 10).clamp(0, 100).toDouble()),
+                                    ),
+                                    icon: const Icon(Icons.volume_down),
+                                    tooltip: 'Volume down',
+                                  ),
+                                  IconButton(
+                                    onPressed: () => unawaited(
+                                      _setVolume((volume + 10).clamp(0, 100).toDouble()),
+                                    ),
+                                    icon: const Icon(Icons.volume_up),
+                                    tooltip: 'Volume up',
                                   ),
                                   Expanded(
                                     child: Column(
@@ -2200,16 +5970,23 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                           onChanged:
                                               duration.inMilliseconds <= 0
                                               ? null
+                                              : (value) => setState(
+                                                  () => scrubPreviewMs = value,
+                                                ),
+                                          onChangeEnd:
+                                              duration.inMilliseconds <= 0
+                                              ? null
                                               : (value) => unawaited(
-                                                  player?.seek(
-                                                        Duration(
-                                                          milliseconds: value
-                                                              .toInt(),
-                                                        ),
-                                                      ) ??
-                                                      Future<void>.value(),
+                                                  _seekToPreview(value),
                                                 ),
                                         ),
+                                        if (scrubPreviewMs != null && !reducedMotion)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 6,
+                                            ),
+                                            child: _seekThumbnailPreview(),
+                                          ),
                                         if (duration.inMilliseconds > 0)
                                           Wrap(
                                             spacing: 12,
@@ -2239,6 +6016,18 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                                                   fontSize: 11,
                                                 ),
                                               ),
+                                              Text(
+                                                'Step ${seekIncrementSeconds}s',
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                              Text(
+                                                'Speed ${playbackSpeed.toStringAsFixed(2)}x',
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                ),
+                                              ),
                                             ],
                                           ),
                                       ],
@@ -2250,20 +6039,98 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen> {
                     ),
                   ),
                 ),
+                if (creditsVisible && widget.nextEpisodeStreamUrl?.trim().isNotEmpty == true)
+                  Positioned(
+                    right: 12,
+                    bottom: 124,
+                    child: SafeArea(
+                      child: FilledButton.icon(
+                        onPressed: () => unawaited(_handlePlaybackCompleted()),
+                        icon: const Icon(Icons.skip_next),
+                        label: Text(
+                          widget.nextEpisodeTitle == null
+                              ? 'Next episode'
+                              : 'Next: ${widget.nextEpisodeTitle}',
+                        ),
+                      ),
+                    ),
+                  ),
+                if (error.isNotEmpty)
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    top: 40,
+                    child: SafeArea(
+                      child: Card(
+                        color: highContrastInterface
+                            ? Theme.of(context).colorScheme.surface
+                            : _LiveTvMediaPaint.overlayOpaque,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Row(
+                            children: [
+                              Icon(Icons.error_outline, color: _LiveTvMediaPaint.warning),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  error,
+                                  style: TextStyle(color: _LiveTvMediaPaint.warning),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () => setState(() => error = ''),
+                                child: const Text('Dismiss'),
+                              ),
+                              FilledButton(
+                                onPressed: () => unawaited(_attemptStreamRecovery()),
+                                child: const Text('Retry'),
+                              ),
+                              const SizedBox(width: 6),
+                              FilledButton.tonal(
+                                onPressed: () => unawaited(_tryCompatiblePlayback()),
+                                child: const Text('Try compatible'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
+      ),
+    ),
+          ),
+        ),
+      ),
     ),
   );
 }
 
 class _SeriesDetailsScreen extends StatefulWidget {
   final LiveTvSeriesDetails details;
+  final String? status;
+  final String? contentRating;
+  final List<String> genres;
+  final bool followed;
+  final String? nextUpLabel;
+  final bool hasNewEpisode;
+  final double seriesProgress;
   final Future<void> Function(LiveTvSeriesEpisode episode) onPlay;
   final Future<void> Function(LiveTvSeriesEpisode episode) onEpisodeDetails;
+  final Future<void> Function() onToggleFollow;
   const _SeriesDetailsScreen({
     required this.details,
+    this.status,
+    this.contentRating,
+    this.genres = const [],
+    required this.followed,
+    this.nextUpLabel,
+    required this.hasNewEpisode,
+    required this.seriesProgress,
     required this.onPlay,
     required this.onEpisodeDetails,
+    required this.onToggleFollow,
   });
 
   @override
@@ -2272,11 +6139,14 @@ class _SeriesDetailsScreen extends StatefulWidget {
 
 class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
   late int season;
+  bool spoilerSafe = false;
+  late bool followed;
 
   @override
   void initState() {
     super.initState();
     season = widget.details.episodes.first.season;
+    followed = widget.followed;
   }
 
   List<int> get seasons =>
@@ -2288,12 +6158,37 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
     final visible = widget.details.episodes
         .where((item) => item.season == season)
         .toList();
+    final sectionCardDecoration = BoxDecoration(
+      color: context.millitopTheme.panelColor.withAlpha(130),
+      borderRadius: BorderRadius.circular(context.millitopTheme.cardRadius),
+      border: Border.all(color: context.millitopTheme.panelBorder),
+    );
     return Scaffold(
-      appBar: AppBar(title: Text(widget.details.title)),
-      body: Column(
+      appBar: AppBar(
+        title: Text(widget.details.title),
+        actions: [
+          IconButton(
+            tooltip: followed ? 'Unfollow series' : 'Follow series',
+            onPressed: () async {
+              await widget.onToggleFollow();
+              if (mounted) {
+                setState(() => followed = !followed);
+              }
+            },
+            icon: Icon(followed ? Icons.notifications_active : Icons.notifications_none),
+          ),
+          IconButton(
+            tooltip: spoilerSafe ? 'Disable spoiler-safe mode' : 'Enable spoiler-safe mode',
+            onPressed: () => setState(() => spoilerSafe = !spoilerSafe),
+            icon: Icon(spoilerSafe ? Icons.visibility_off : Icons.visibility),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
         children: [
           SizedBox(
-            height: 220,
+            height: 270,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -2303,43 +6198,45 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                     widget.details.backdropUrl!,
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) =>
-                        const ColoredBox(color: Color(0xFF0E1829)),
+                        ColoredBox(color: context.millitopTheme.panelColor),
                   )
                 else
-                  const ColoredBox(color: Color(0xFF0E1829)),
-                Container(color: const Color(0xAA000000)),
+                  ColoredBox(color: context.millitopTheme.panelColor),
+                Container(
+                  color: Theme.of(context).colorScheme.surface.withAlpha(170),
+                ),
                 Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(12),
                         child:
                             widget.details.posterUrl == null ||
                                 widget.details.posterUrl!.trim().isEmpty
                             ? Container(
-                                width: 120,
-                                height: 172,
-                                color: const Color(0xFF1F2B3F),
+                                width: 160,
+                                height: 220,
+                                color: context.millitopTheme.panelColor,
                                 alignment: Alignment.center,
-                                child: const Icon(Icons.tv, size: 42),
+                                child: const Icon(Icons.tv, size: 52),
                               )
                             : Image.network(
                                 widget.details.posterUrl!,
-                                width: 120,
-                                height: 172,
+                                width: 160,
+                                height: 220,
                                 fit: BoxFit.cover,
                                 errorBuilder: (_, __, ___) => Container(
-                                  width: 120,
-                                  height: 172,
-                                  color: const Color(0xFF1F2B3F),
+                                  width: 160,
+                                  height: 220,
+                                  color: context.millitopTheme.panelColor,
                                   alignment: Alignment.center,
-                                  child: const Icon(Icons.tv, size: 42),
+                                  child: const Icon(Icons.tv, size: 52),
                                 ),
                               ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 16),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2347,13 +6244,66 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                             Text(
                               widget.details.title,
                               style: const TextStyle(
-                                fontSize: 30,
+                                fontSize: 34,
                                 fontWeight: FontWeight.w700,
                               ),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                if (widget.status?.trim().isNotEmpty == true)
+                                  Chip(label: Text('Status: ${widget.status!}')),
+                                if (widget.contentRating?.trim().isNotEmpty == true)
+                                  Chip(label: Text('Rating: ${widget.contentRating!}')),
+                                Chip(
+                                  label: Text(
+                                    widget.hasNewEpisode
+                                        ? 'New episodes available'
+                                        : 'Up to date',
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            LinearProgressIndicator(
+                              value: widget.seriesProgress.clamp(0.0, 1.0),
+                              minHeight: 6,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Series progress ${(widget.seriesProgress * 100).toStringAsFixed(0)}%',
+                              style: TextStyle(
+                                color: _LiveTvMediaPaint.onSurface70,
+                                fontSize: 12,
+                              ),
+                            ),
+                            if (widget.nextUpLabel != null) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                'Next Up: ${widget.nextUpLabel}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: _LiveTvMediaPaint.onSurface70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                            if (widget.genres.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: widget.genres
+                                    .map((genre) => Chip(label: Text(genre)))
+                                    .toList(),
+                              ),
+                            ],
+                            const SizedBox(height: 10),
                             Text(
                               widget.details.description?.trim().isNotEmpty ==
                                       true
@@ -2361,7 +6311,11 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                                   : 'Series details are not provided by this source.',
                               maxLines: 4,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white70),
+                              style: TextStyle(
+                                color: _LiveTvMediaPaint.onSurface70,
+                                fontSize: 15,
+                                height: 1.35,
+                              ),
                             ),
                           ],
                         ),
@@ -2373,11 +6327,14 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: sectionCardDecoration,
               child: Wrap(
                 spacing: 8,
+                runSpacing: 8,
                 children: [
                   for (final value in seasons)
                     ChoiceChip(
@@ -2397,22 +6354,24 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
               itemBuilder: (context, index) {
                 final episode = visible[index];
                 return Card(
+                  elevation: 1,
                   child: InkWell(
                     borderRadius: BorderRadius.circular(12),
                     onTap: () => unawaited(widget.onEpisodeDetails(episode)),
                     child: Padding(
-                      padding: const EdgeInsets.all(10),
+                      padding: const EdgeInsets.all(12),
                       child: Row(
                         children: [
                           ClipRRect(
                             borderRadius: BorderRadius.circular(6),
                             child:
-                                episode.posterUrl == null ||
+                                spoilerSafe ||
+                                    episode.posterUrl == null ||
                                     episode.posterUrl!.trim().isEmpty
                                 ? Container(
                                     width: 130,
                                     height: 74,
-                                    color: const Color(0xFF1F2B3F),
+                                    color: _LiveTvMediaPaint.panel,
                                     alignment: Alignment.center,
                                     child: const Icon(
                                       Icons.ondemand_video_outlined,
@@ -2426,7 +6385,7 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                                     errorBuilder: (_, __, ___) => Container(
                                       width: 130,
                                       height: 74,
-                                      color: const Color(0xFF1F2B3F),
+                                      color: _LiveTvMediaPaint.panel,
                                       alignment: Alignment.center,
                                       child: const Icon(
                                         Icons.ondemand_video_outlined,
@@ -2445,24 +6404,27 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
                                     fontWeight: FontWeight.w700,
+                                    fontSize: 16,
                                   ),
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  episode.description?.trim().isNotEmpty == true
+                                  spoilerSafe
+                                      ? 'Spoiler-safe mode is on.'
+                                      : episode.description?.trim().isNotEmpty == true
                                       ? episode.description!
                                       : 'No episode synopsis available from source.',
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
+                                  style: TextStyle(
+                                    color: _LiveTvMediaPaint.onSurface70,
+                                    fontSize: 13,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          const Icon(Icons.play_circle_fill),
+                          const Icon(Icons.play_circle_fill, size: 28),
                         ],
                       ),
                     ),
@@ -2472,6 +6434,7 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
             ),
           ),
         ],
+      ),
       ),
     );
   }

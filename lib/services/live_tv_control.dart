@@ -166,4 +166,13 @@ class LiveTvControlService {
       'profileId': profileId,
     }, expectedConnection: expectedConnection);
   }
+
+  Future<Map<String, dynamic>> mediaLibraryCatalog({
+    required String expectedConnection,
+    required int profileId,
+  }) async {
+    return connection.postDevice('/api/device/media-library/catalog', {
+      'profileId': profileId,
+    }, expectedConnection: expectedConnection);
+  }
 }

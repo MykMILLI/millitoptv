@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/auto_weather.dart';
+import '../theme/millitop_visual_theme.dart';
 
 class LiveWeatherCard extends StatefulWidget {
   final int profileId;
@@ -84,7 +85,7 @@ class _LiveWeatherCardState extends State<LiveWeatherCard>
 
   @override
   Widget build(BuildContext context) {
-    const muted = Color(0xFFA4B3C8);
+    final muted = context.millitopTheme.mutedColor;
     final data = weather.hasUsableForecast ? weather.forecast : null;
     final now = DateTime.now();
     final expired = data != null && !data.end.isAfter(now);
@@ -103,7 +104,7 @@ class _LiveWeatherCardState extends State<LiveWeatherCard>
         Text(
           (data?.label ?? (weather.enabled ? 'Your area' : 'Local weather'))
               .toUpperCase(),
-          style: const TextStyle(fontSize: 14, color: muted),
+          style: TextStyle(fontSize: 14, color: muted),
         ),
         const SizedBox(height: 10),
         Text(
@@ -125,11 +126,11 @@ class _LiveWeatherCardState extends State<LiveWeatherCard>
                 : data.start.isAfter(now)
                 ? 'Next hourly forecast · not a station observation'
                 : 'Hourly forecast · not a station observation',
-            style: const TextStyle(color: muted),
+            style: TextStyle(color: muted),
           ),
           Text(
             '${cached ? 'Last saved forecast' : 'Retrieved'} $fetchedTime',
-            style: const TextStyle(color: muted),
+            style: TextStyle(color: muted),
           ),
         ],
         if (!weather.enabled && !weather.busy) ...[
@@ -148,22 +149,19 @@ class _LiveWeatherCardState extends State<LiveWeatherCard>
           const SizedBox(height: 6),
           Text(
             'Windows location · reported accuracy approximately ${accuracy.round()} m',
-            style: const TextStyle(fontSize: 12, color: muted),
+            style: TextStyle(fontSize: 12, color: muted),
           ),
         ],
         if (weather.problem.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(
             weather.problem,
-            style: const TextStyle(color: Color(0xFFFFD19A)),
+            style: TextStyle(color: Theme.of(context).colorScheme.secondary),
           ),
         ],
         if (weather.persistenceWarning.isNotEmpty) ...[
           const SizedBox(height: 6),
-          Text(
-            weather.persistenceWarning,
-            style: const TextStyle(color: muted),
-          ),
+          Text(weather.persistenceWarning, style: TextStyle(color: muted)),
         ],
         const SizedBox(height: 10),
         Wrap(
@@ -199,12 +197,12 @@ class _LiveWeatherCardState extends State<LiveWeatherCard>
           ],
         ),
         const SizedBox(height: 6),
-        const Text(
+        Text(
           'Windows determines position; GPS availability depends on this PC. Forecasts refresh every 20 minutes while this widget is open.',
           style: TextStyle(fontSize: 12, color: muted),
         ),
         const SizedBox(height: 4),
-        const Text(
+        Text(
           'Source: NOAA / National Weather Service · U.S.-focused coverage',
           style: TextStyle(fontSize: 12, color: muted),
         ),

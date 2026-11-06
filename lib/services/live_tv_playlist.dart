@@ -166,15 +166,41 @@ class LiveTvMetadataDetails {
   final String? posterUrl;
   final String? backdropUrl;
   final String? overview;
+  final int? year;
+  final int? runtimeMinutes;
+  final String? status;
+  final String? ratingSystem;
+  final String? contentRating;
+  final List<String> advisories;
+  final List<String> genres;
   final List<String> cast;
+  final List<String> crew;
+  final List<String> relatedTitles;
+  final List<LiveTvMediaExtraLink> extras;
   final String? trailerUrl;
   const LiveTvMetadataDetails({
     this.posterUrl,
     this.backdropUrl,
     this.overview,
+    this.year,
+    this.runtimeMinutes,
+    this.status,
+    this.ratingSystem,
+    this.contentRating,
+    this.advisories = const [],
+    this.genres = const [],
     this.cast = const [],
+    this.crew = const [],
+    this.relatedTitles = const [],
+    this.extras = const [],
     this.trailerUrl,
   });
+}
+
+class LiveTvMediaExtraLink {
+  final String label;
+  final String url;
+  const LiveTvMediaExtraLink({required this.label, required this.url});
 }
 
 class _ParsedM3uEntry {
@@ -534,17 +560,61 @@ class LiveTvPlaylistService {
         mediaId: result.mediaId,
         series: series,
       );
+      final crew = await _loadTmdbCrew(
+        client: client,
+        apiKey: key,
+        mediaId: result.mediaId,
+        series: series,
+      );
       final trailerUrl = await _loadTmdbTrailerUrl(
         client: client,
         apiKey: key,
         mediaId: result.mediaId,
         series: series,
       );
+      final details = await _loadTmdbDetailPayload(
+        client: client,
+        apiKey: key,
+        mediaId: result.mediaId,
+        series: series,
+      );
+      final contentRating = await _loadTmdbContentRating(
+        client: client,
+        apiKey: key,
+        mediaId: result.mediaId,
+        series: series,
+      );
+      final related = await _loadTmdbRelatedTitles(
+        client: client,
+        apiKey: key,
+        mediaId: result.mediaId,
+        series: series,
+      );
+      final extras = await _loadTmdbExtras(
+        client: client,
+        apiKey: key,
+        mediaId: result.mediaId,
+        series: series,
+      );
+      final advisories = _advisoriesForRating(contentRating);
+      final runtime = _runtimeFromTmdbPayload(details, series);
+      final genres = _genresFromTmdbPayload(details);
+      final status = details?['status']?.toString().trim();
       return LiveTvMetadataDetails(
         posterUrl: result.posterUrl,
         backdropUrl: result.backdropUrl,
         overview: result.overview,
+        year: result.year,
+        runtimeMinutes: runtime,
+        status: status == null || status.isEmpty ? null : status,
+        ratingSystem: contentRating == null ? null : (series ? 'TV' : 'MPA'),
+        contentRating: contentRating,
+        advisories: advisories,
+        genres: genres,
         cast: cast,
+        crew: crew,
+        relatedTitles: related,
+        extras: extras,
         trailerUrl: trailerUrl,
       );
     } finally {
@@ -1140,6 +1210,7 @@ class LiveTvPlaylistService {
             ? null
             : 'https://image.tmdb.org/t/p/w780$backdropPath',
         overview: (overview == null || overview.isEmpty) ? null : overview,
+        year: _extractTmdbYear(item, series),
       );
       _tmdbCache[cacheKey] = result;
       return result;
@@ -1158,7 +1229,7 @@ class LiveTvPlaylistService {
     cleaned = cleaned.replaceAll(RegExp(r'\([^\)]*\d{4}[^\)]*\)'), ' ');
     cleaned = cleaned.replaceAll(
       RegExp(
-        r'\b(uhd|fhd|hd|sd|hevc|x265|x264|h264|h265|web-dl|bluray|remux|dubbed|multi|1080p|720p|2160p)\b',
+        r'\b(uhd|fhd|hd|sd|hevc|x265|x264|h264|h265|web-dl|webrip|web rip|bluray|brrip|dvdrip|hdrip|remux|dubbed|multi|xvid|aac|ac3|dts|proper|repack|yify|rarbg|1080p|720p|2160p|480p)\b',
         caseSensitive: false,
       ),
       ' ',
@@ -1204,6 +1275,55 @@ class LiveTvPlaylistService {
           .where((name) => name.isNotEmpty)
           .take(8)
           .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<List<String>> _loadTmdbCrew({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+  }) async {
+    final uri = Uri.https(
+      'api.themoviedb.org',
+      '/3/${series ? 'tv' : 'movie'}/$mediaId/credits',
+      {'api_key': apiKey, 'language': 'en-US'},
+    );
+    try {
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 10));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return const [];
+      }
+      final body = await utf8.decoder.bind(response).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! Map) {
+        return const [];
+      }
+      final rawCrew = decoded['crew'];
+      if (rawCrew is! List) {
+        return const [];
+      }
+      final wanted = {'director', 'writer', 'screenplay', 'creator', 'producer'};
+      final values = <String>{};
+      for (final entry in rawCrew.whereType<Map>()) {
+        final job = entry['job']?.toString().trim().toLowerCase() ?? '';
+        final name = entry['name']?.toString().trim() ?? '';
+        if (name.isEmpty) {
+          continue;
+        }
+        if (wanted.contains(job)) {
+          values.add('$name (${entry['job']})');
+        }
+      }
+      return values.take(8).toList();
     } catch (_) {
       return const [];
     }
@@ -1256,6 +1376,235 @@ class LiveTvPlaylistService {
       return null;
     }
   }
+
+  Future<Map<String, dynamic>?> _loadTmdbDetailPayload({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+  }) async {
+    final uri = Uri.https(
+      'api.themoviedb.org',
+      '/3/${series ? 'tv' : 'movie'}/$mediaId',
+      {'api_key': apiKey, 'language': 'en-US'},
+    );
+    try {
+      final data = await _getJson(client, uri);
+      if (data is! Map) {
+        return null;
+      }
+      return Map<String, dynamic>.from(data);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _loadTmdbContentRating({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+  }) async {
+    final uri = Uri.https(
+      'api.themoviedb.org',
+      '/3/${series ? 'tv' : 'movie'}/$mediaId/${series ? 'content_ratings' : 'release_dates'}',
+      {'api_key': apiKey},
+    );
+    try {
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 10));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final body = await utf8.decoder.bind(response).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! Map) {
+        return null;
+      }
+      final raw = decoded['results'];
+      if (raw is! List) {
+        return null;
+      }
+      for (final entry in raw.whereType<Map>()) {
+        final iso = entry['iso_3166_1']?.toString().trim().toUpperCase();
+        if (iso != 'US') {
+          continue;
+        }
+        if (series) {
+          final rating = entry['rating']?.toString().trim();
+          if (rating != null && rating.isNotEmpty) {
+            return rating;
+          }
+        } else {
+          final releaseDates = entry['release_dates'];
+          if (releaseDates is! List) {
+            continue;
+          }
+          for (final date in releaseDates.whereType<Map>()) {
+            final cert = date['certification']?.toString().trim();
+            if (cert != null && cert.isNotEmpty) {
+              return cert;
+            }
+          }
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<List<String>> _loadTmdbRelatedTitles({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+  }) async {
+    final uri = Uri.https(
+      'api.themoviedb.org',
+      '/3/${series ? 'tv' : 'movie'}/$mediaId/recommendations',
+      {'api_key': apiKey, 'language': 'en-US', 'page': '1'},
+    );
+    try {
+      final payload = await _getJson(client, uri);
+      if (payload is! Map) {
+        return const [];
+      }
+      final results = payload['results'];
+      if (results is! List) {
+        return const [];
+      }
+      return results
+          .whereType<Map>()
+          .map(
+            (entry) =>
+                (entry['title'] ?? entry['name'] ?? '').toString().trim(),
+          )
+          .where((value) => value.isNotEmpty)
+          .take(8)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<List<LiveTvMediaExtraLink>> _loadTmdbExtras({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+  }) async {
+    final uri = Uri.https(
+      'api.themoviedb.org',
+      '/3/${series ? 'tv' : 'movie'}/$mediaId/videos',
+      {'api_key': apiKey, 'language': 'en-US'},
+    );
+    try {
+      final payload = await _getJson(client, uri);
+      if (payload is! Map) {
+        return const [];
+      }
+      final results = payload['results'];
+      if (results is! List) {
+        return const [];
+      }
+      final extras = <LiveTvMediaExtraLink>[];
+      for (final entry in results.whereType<Map>()) {
+        final site = entry['site']?.toString().trim().toLowerCase();
+        final key = entry['key']?.toString().trim();
+        final type = entry['type']?.toString().trim();
+        final name = entry['name']?.toString().trim();
+        if (site != 'youtube' || key == null || key.isEmpty) {
+          continue;
+        }
+        final label = [
+          if (type != null && type.isNotEmpty) type,
+          if (name != null && name.isNotEmpty) name,
+        ].join(' · ');
+        extras.add(
+          LiveTvMediaExtraLink(
+            label: label.isEmpty ? 'Extra' : label,
+            url: 'https://www.youtube.com/watch?v=$key',
+          ),
+        );
+      }
+      return extras.take(8).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  int? _extractTmdbYear(Map<String, dynamic> item, bool series) {
+    final primary = series
+        ? item['first_air_date']?.toString()
+        : item['release_date']?.toString();
+    if (primary != null && primary.length >= 4) {
+      final parsed = int.tryParse(primary.substring(0, 4));
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  int? _runtimeFromTmdbPayload(Map<String, dynamic>? payload, bool series) {
+    if (payload == null) {
+      return null;
+    }
+    if (!series) {
+      final runtime = int.tryParse(payload['runtime']?.toString() ?? '');
+      if (runtime != null && runtime > 0) {
+        return runtime;
+      }
+      return null;
+    }
+    final runtimes = payload['episode_run_time'];
+    if (runtimes is List && runtimes.isNotEmpty) {
+      final first = int.tryParse(runtimes.first.toString());
+      if (first != null && first > 0) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  List<String> _genresFromTmdbPayload(Map<String, dynamic>? payload) {
+    if (payload == null) {
+      return const [];
+    }
+    final raw = payload['genres'];
+    if (raw is! List) {
+      return const [];
+    }
+    return raw
+        .whereType<Map>()
+        .map((entry) => entry['name']?.toString().trim() ?? '')
+        .where((value) => value.isNotEmpty)
+        .take(6)
+        .toList();
+  }
+
+  List<String> _advisoriesForRating(String? rating) {
+    final value = (rating ?? '').toUpperCase();
+    if (value.isEmpty) {
+      return const [];
+    }
+    if (value.contains('R') || value.contains('TV-MA') || value.contains('NC-17')) {
+      return const ['Mature themes', 'Strong language or violence may be present'];
+    }
+    if (value.contains('PG-13') || value.contains('TV-14')) {
+      return const ['Parental guidance suggested for younger audiences'];
+    }
+    if (value.contains('PG') || value.contains('TV-PG')) {
+      return const ['Some material may not be suitable for children'];
+    }
+    return const [];
+  }
 }
 
 class _TmdbSearchResult {
@@ -1263,10 +1612,12 @@ class _TmdbSearchResult {
   final String? posterUrl;
   final String? backdropUrl;
   final String? overview;
+  final int? year;
   const _TmdbSearchResult({
     required this.mediaId,
     this.posterUrl,
     this.backdropUrl,
     this.overview,
+    this.year,
   });
 }

@@ -6,14 +6,18 @@ import '../library/library_models.dart';
 import '../library/library_file_service.dart';
 import 'library_media_screen.dart';
 import '../library/recording_label.dart';
+import '../services/library_metadata_service.dart';
 import '../services/native_app_launcher.dart';
+import '../theme/millitop_visual_theme.dart';
 
 class LibraryBrowserScreen extends StatefulWidget {
+  final int profileId;
   final LibraryFolder folder;
   final LibraryFileService? files;
   final Future<void> Function(BuildContext, String)? playRecording;
   const LibraryBrowserScreen({
     super.key,
+    required this.profileId,
     required this.folder,
     this.files,
     this.playRecording,
@@ -28,6 +32,9 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
   final history = <String>[];
   final search = TextEditingController();
   LibrarySnapshot? snapshot;
+  final metadata = const LibraryMetadataService();
+  Map<String, LibraryMetadataEntry> metadataCache =
+      const <String, LibraryMetadataEntry>{};
   bool busy = true;
   String error = '';
   int generation = 0;
@@ -62,6 +69,11 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
         snapshot = result;
         directory = result.directory;
       });
+      final cache = await metadata.loadCache(widget.profileId);
+      if (!mounted || token != generation) {
+        return;
+      }
+      setState(() => metadataCache = cache);
     } catch (e) {
       if (mounted && token == generation) {
         setState(() => error = '$e');
@@ -123,6 +135,7 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
       await Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
           builder: (_) => LibraryMediaScreen(
+            profileId: widget.profileId,
             folder: widget.folder,
             item: LibraryItem(path: verified, name: item.name, kind: item.kind),
             files: files,
@@ -149,6 +162,7 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
   };
   @override
   Widget build(BuildContext context) {
+    final accent = context.millitopTheme.accentColor;
     final query = search.text.toLowerCase();
     final items = (snapshot?.items ?? <LibraryItem>[])
         .where(
@@ -272,19 +286,30 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
                               widget.folder.recordings &&
                               item.kind != LibraryMediaKind.folder;
                           final label = RecordingLabel.fromFilename(item.name);
+                          final enriched = metadataCache[item.path];
+                          final title = enriched?.title.trim() ?? '';
+                          final overview = enriched?.overview?.trim() ?? '';
                           return ListTile(
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 24,
                               vertical: 12,
                             ),
-                            leading: Icon(
-                              icon(item.kind),
-                              color: supported
-                                  ? const Color(0xFF63DFCB)
-                                  : Colors.white38,
-                            ),
+                            leading:
+                                enriched?.posterUrl != null &&
+                                    item.kind != LibraryMediaKind.folder
+                                ? CircleAvatar(
+                                    backgroundImage: NetworkImage(
+                                      enriched!.posterUrl!,
+                                    ),
+                                  )
+                                : Icon(
+                                    icon(item.kind),
+                                    color: supported ? accent : Colors.white38,
+                                  ),
                             title: Text(
-                              recording ? label.channel : item.name,
+                              title.isNotEmpty
+                                  ? title
+                                  : (recording ? label.channel : item.name),
                               style: recording
                                   ? const TextStyle(
                                       fontSize: 23,
@@ -295,19 +320,23 @@ class _LibraryBrowserScreenState extends State<LibraryBrowserScreen> {
                             subtitle: Text(
                               recording
                                   ? label.subtitle
+                                  : overview.isNotEmpty
+                                  ? overview
                                   : item.kind == LibraryMediaKind.folder
                                   ? 'Folder'
                                   : supported
                                   ? '${item.kind.name} · ${p.extension(item.name).replaceFirst('.', '').toUpperCase()}'
                                   : 'Not supported in Millitop; not launched externally',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                             ),
                             trailing: recording
-                                ? const Row(
+                                ? Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Icon(
                                         Icons.play_circle_fill,
-                                        color: Color(0xFF63DFCB),
+                                        color: accent,
                                       ),
                                       SizedBox(width: 8),
                                       Text(

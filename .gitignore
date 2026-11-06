@@ -46,3 +46,7 @@ app.*.map.json
 
 # Local release journal; no credentials are stored here.
 /.release/
+
+# Generated installer build artifacts (too large for GitHub and reproducible).
+/installer/build-*/
+/installer/prerequisites/*.exe

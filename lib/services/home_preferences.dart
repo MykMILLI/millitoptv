@@ -155,7 +155,10 @@ class LiveTvLibraryItem {
     final mediaType = json['mediaType']?.toString().trim() ?? '';
     final mediaId = json['mediaId']?.toString().trim() ?? '';
     final title = json['title']?.toString().trim() ?? '';
-    if (sourceId.isEmpty || mediaType.isEmpty || mediaId.isEmpty || title.isEmpty) {
+    if (sourceId.isEmpty ||
+        mediaType.isEmpty ||
+        mediaId.isEmpty ||
+        title.isEmpty) {
       throw const FormatException('Library item is incomplete.');
     }
     final subtitle = json['subtitle']?.toString().trim();
@@ -241,6 +244,76 @@ class HomePreferences {
       value,
     )) {
       throw StateError('Could not save Family Moments preference.');
+    }
+  }
+
+  Future<String> visualTheme(int profile) async =>
+      (await SharedPreferences.getInstance()).getString(
+        'home.visualTheme.v1.$profile',
+      ) ??
+      'aurora-glass';
+
+  Future<void> setVisualTheme(int profile, String value) async {
+    final normalized = value.trim();
+    if (normalized.isEmpty) {
+      throw const FormatException('Theme id cannot be empty.');
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.visualTheme.v1.$profile',
+      normalized,
+    )) {
+      throw StateError('Could not save app theme.');
+    }
+  }
+
+  Future<int?> lastActiveProfileId() async {
+    final raw = (await SharedPreferences.getInstance()).getInt(
+      'home.lastActiveProfileId.v1',
+    );
+    if (raw == null || raw < 1) {
+      return null;
+    }
+    return raw;
+  }
+
+  Future<void> setLastActiveProfileId(int profileId) async {
+    if (profileId < 1) {
+      throw const FormatException('Profile ID is invalid.');
+    }
+    if (!await (await SharedPreferences.getInstance()).setInt(
+      'home.lastActiveProfileId.v1',
+      profileId,
+    )) {
+      throw StateError('Could not save active profile.');
+    }
+  }
+
+  Future<DateTime?> launcherPromptSnoozeUntil(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.launcherPromptSnoozeUntil.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return null;
+    }
+    return DateTime.tryParse(raw)?.toUtc();
+  }
+
+  Future<void> setLauncherPromptSnoozeUntil(
+    int profile,
+    DateTime? value,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (value == null) {
+      if (!await prefs.remove('home.launcherPromptSnoozeUntil.v1.$profile')) {
+        throw StateError('Could not clear launcher reminder.');
+      }
+      return;
+    }
+    if (!await prefs.setString(
+      'home.launcherPromptSnoozeUntil.v1.$profile',
+      value.toUtc().toIso8601String(),
+    )) {
+      throw StateError('Could not save launcher reminder.');
     }
   }
 
@@ -331,7 +404,9 @@ class HomePreferences {
     if (decoded is! Map) {
       throw const FormatException('Playback performance settings are invalid.');
     }
-    return PlaybackPerformanceSettings.fromJson(Map<String, dynamic>.from(decoded));
+    return PlaybackPerformanceSettings.fromJson(
+      Map<String, dynamic>.from(decoded),
+    );
   }
 
   Future<void> savePlaybackPerformance(
@@ -344,6 +419,48 @@ class HomePreferences {
       raw,
     )) {
       throw StateError('Could not save playback performance settings.');
+    }
+  }
+
+  Future<Map<String, dynamic>> subtitleProviderSettings(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.subtitleProviders.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const {};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('Subtitle provider settings are invalid.');
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<void> saveSubtitleProviderSettings(
+    int profile,
+    Map<String, dynamic> settings,
+  ) async {
+    final sanitized = <String, dynamic>{};
+    for (final entry in settings.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty) {
+        continue;
+      }
+      final value = entry.value;
+      if (value == null) {
+        continue;
+      }
+      if (value is String) {
+        sanitized[key] = value.trim();
+      } else if (value is num || value is bool) {
+        sanitized[key] = value;
+      }
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.subtitleProviders.v1.$profile',
+      jsonEncode(sanitized),
+    )) {
+      throw StateError('Could not save subtitle provider settings.');
     }
   }
 
@@ -630,7 +747,10 @@ class HomePreferences {
     return playlists;
   }
 
-  Future<void> upsertLiveTvPlaylist(int profile, LiveTvUserPlaylist playlist) async {
+  Future<void> upsertLiveTvPlaylist(
+    int profile,
+    LiveTvUserPlaylist playlist,
+  ) async {
     final current = await liveTvPlaylists(profile);
     final merged = [
       playlist,
@@ -672,7 +792,10 @@ class HomePreferences {
     return Map<String, dynamic>.from(decoded);
   }
 
-  Future<void> saveLiveTvUiState(int profile, Map<String, dynamic> state) async {
+  Future<void> saveLiveTvUiState(
+    int profile,
+    Map<String, dynamic> state,
+  ) async {
     final encoded = jsonEncode(state);
     if (!await (await SharedPreferences.getInstance()).setString(
       'home.liveTvUiState.v1.$profile',
@@ -712,8 +835,10 @@ class HomePreferences {
         };
       }
     } catch (_) {}
+    final libraryFolders = await _libraryFolderSyncPayload(profile);
     return {
       'familyMoments': await familyMoments(profile),
+      'visualTheme': await visualTheme(profile),
       'appOrder': await order(profile),
       'recentChannels': (await liveTvRecentChannels(
         profile,
@@ -729,7 +854,10 @@ class HomePreferences {
       )).map((item) => item.toJson()).toList(),
       'uiState': await liveTvUiState(profile),
       'playbackPerformance': (await playbackPerformance(profile)).toJson(),
+      'subtitleProviders': await subtitleProviderSettings(profile),
       'music': await music.profileSyncState(profile),
+      if (libraryFolders.isNotEmpty) 'libraryFolders': libraryFolders,
+      'libraryPlayback': await libraryPlaybackState(profile),
       if (profileIdentity != null) 'profileIdentity': profileIdentity,
       'syncedAtUtc': DateTime.now().toUtc().toIso8601String(),
     };
@@ -742,6 +870,14 @@ class HomePreferences {
     final familyMomentsRaw = state['familyMoments'];
     if (familyMomentsRaw is bool) {
       await setFamilyMoments(profile, familyMomentsRaw);
+    }
+
+    final visualThemeRaw = state['visualTheme'];
+    if (visualThemeRaw != null) {
+      final value = visualThemeRaw.toString().trim();
+      if (value.isNotEmpty) {
+        await setVisualTheme(profile, value);
+      }
     }
 
     final appOrderRaw = state['appOrder'];
@@ -782,7 +918,9 @@ class HomePreferences {
           continue;
         }
         try {
-          media.add(LiveTvRecentMedia.fromJson(Map<String, dynamic>.from(entry)));
+          media.add(
+            LiveTvRecentMedia.fromJson(Map<String, dynamic>.from(entry)),
+          );
         } catch (_) {}
       }
       media.sort((a, b) => b.watchedAtUtc.compareTo(a.watchedAtUtc));
@@ -830,15 +968,41 @@ class HomePreferences {
     if (playbackRaw is Map) {
       await savePlaybackPerformance(
         profile,
-        PlaybackPerformanceSettings.fromJson(Map<String, dynamic>.from(playbackRaw)),
+        PlaybackPerformanceSettings.fromJson(
+          Map<String, dynamic>.from(playbackRaw),
+        ),
+      );
+    }
+
+    final subtitleProviderRaw = state['subtitleProviders'];
+    if (subtitleProviderRaw is Map) {
+      await saveSubtitleProviderSettings(
+        profile,
+        Map<String, dynamic>.from(subtitleProviderRaw),
       );
     }
 
     final musicRaw = state['music'];
     if (musicRaw is Map) {
       try {
-        await music.applyProfileSyncState(profile, Map<String, dynamic>.from(musicRaw));
+        await music.applyProfileSyncState(
+          profile,
+          Map<String, dynamic>.from(musicRaw),
+        );
       } catch (_) {}
+    }
+
+    final libraryFoldersRaw = state['libraryFolders'];
+    if (libraryFoldersRaw is List) {
+      await _applyLibraryFolderSyncPayload(profile, libraryFoldersRaw);
+    }
+
+    final libraryPlaybackRaw = state['libraryPlayback'];
+    if (libraryPlaybackRaw is Map) {
+      await _applyLibraryPlaybackState(
+        profile,
+        Map<String, dynamic>.from(libraryPlaybackRaw),
+      );
     }
 
     final identityRaw = state['profileIdentity'];
@@ -851,7 +1015,8 @@ class HomePreferences {
           if (name.isNotEmpty && name != localProfile.name) {
             await HouseholdStore.instance.rename(profile, name);
           }
-          final avatarBase64 = identityRaw['avatarBase64']?.toString().trim() ?? '';
+          final avatarBase64 =
+              identityRaw['avatarBase64']?.toString().trim() ?? '';
           if (avatarBase64.isNotEmpty) {
             final bytes = base64Decode(avatarBase64);
             if (bytes.length <= 262144) {
@@ -868,10 +1033,181 @@ class HomePreferences {
     }
   }
 
+  Future<List<Map<String, dynamic>>> _libraryFolderSyncPayload(
+    int profile,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('library.folders.v1.$profile');
+    if (raw == null || raw.trim().isEmpty) {
+      return const [];
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) {
+      return const [];
+    }
+    final values = <Map<String, dynamic>>[];
+    for (final entry in decoded) {
+      if (entry is! Map) {
+        continue;
+      }
+      final map = Map<String, dynamic>.from(entry);
+      final id = map['id']?.toString().trim() ?? '';
+      final label = map['label']?.toString().trim() ?? '';
+      final path = map['path']?.toString().trim() ?? '';
+      if (id.isEmpty || label.isEmpty || path.isEmpty) {
+        continue;
+      }
+      values.add({
+        'id': id,
+        'label': label,
+        'path': path,
+        'recordings': map['recordings'] == true,
+      });
+      if (values.length >= 100) {
+        break;
+      }
+    }
+    return values;
+  }
+
+  Future<void> _applyLibraryFolderSyncPayload(
+    int profile,
+    List<dynamic> rawEntries,
+  ) async {
+    final values = <Map<String, dynamic>>[];
+    final seenIds = <String>{};
+    for (final entry in rawEntries) {
+      if (entry is! Map) {
+        continue;
+      }
+      final map = Map<String, dynamic>.from(entry);
+      final id = map['id']?.toString().trim() ?? '';
+      final label = map['label']?.toString().trim() ?? '';
+      final path = map['path']?.toString().trim() ?? '';
+      if (id.isEmpty || label.isEmpty || path.isEmpty || seenIds.contains(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      values.add({
+        'id': id,
+        'label': label.length > 80 ? label.substring(0, 80) : label,
+        'path': path,
+        'recordings': map['recordings'] == true,
+      });
+      if (values.length >= 100) {
+        break;
+      }
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (values.isEmpty) {
+      await prefs.remove('library.folders.v1.$profile');
+      return;
+    }
+    await prefs.setString('library.folders.v1.$profile', jsonEncode(values));
+  }
+
+  Future<Map<String, dynamic>> libraryPlaybackState(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'library.playback.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const {};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      return const {};
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<void> saveLibraryPlaybackState(
+    int profile, {
+    required String itemPath,
+    required String title,
+    required int positionMs,
+    required int durationMs,
+    required bool complete,
+  }) async {
+    final current = await libraryPlaybackState(profile);
+    current[itemPath] = {
+      'title': title,
+      'positionMs': positionMs < 0 ? 0 : positionMs,
+      'durationMs': durationMs < 0 ? 0 : durationMs,
+      'complete': complete,
+      'updatedAtUtc': DateTime.now().toUtc().toIso8601String(),
+    };
+    if (current.length > 1200) {
+      final entries = current.entries.toList()
+        ..sort((a, b) {
+          final aTime =
+              DateTime.tryParse(
+                (a.value is Map
+                        ? (a.value as Map)['updatedAtUtc']
+                        : null)
+                    ?.toString() ??
+                    '',
+              )?.toUtc() ??
+              DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+          final bTime =
+              DateTime.tryParse(
+                (b.value is Map
+                        ? (b.value as Map)['updatedAtUtc']
+                        : null)
+                    ?.toString() ??
+                    '',
+              )?.toUtc() ??
+              DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+          return bTime.compareTo(aTime);
+        });
+      final trimmed = <String, dynamic>{};
+      for (final entry in entries.take(1000)) {
+        trimmed[entry.key] = entry.value;
+      }
+      current
+        ..clear()
+        ..addAll(trimmed);
+    }
+    await (await SharedPreferences.getInstance()).setString(
+      'library.playback.v1.$profile',
+      jsonEncode(current),
+    );
+  }
+
+  Future<void> _applyLibraryPlaybackState(
+    int profile,
+    Map<String, dynamic> remote,
+  ) async {
+    final normalized = <String, dynamic>{};
+    for (final entry in remote.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty || key.length > 2048 || entry.value is! Map) {
+        continue;
+      }
+      final map = Map<String, dynamic>.from(entry.value as Map);
+      normalized[key] = {
+        'title': map['title']?.toString() ?? '',
+        'positionMs': int.tryParse(map['positionMs']?.toString() ?? '') ?? 0,
+        'durationMs': int.tryParse(map['durationMs']?.toString() ?? '') ?? 0,
+        'complete': map['complete'] == true,
+        'updatedAtUtc':
+            map['updatedAtUtc']?.toString() ??
+            DateTime.now().toUtc().toIso8601String(),
+      };
+      if (normalized.length >= 1000) {
+        break;
+      }
+    }
+    await (await SharedPreferences.getInstance()).setString(
+      'library.playback.v1.$profile',
+      jsonEncode(normalized),
+    );
+  }
+
   Future<void> clearProfileData(int profile) async {
     final prefs = await SharedPreferences.getInstance();
     final keys = <String>[
       'home.familyMoments.v1.$profile',
+      'home.visualTheme.v1.$profile',
       'home.appOrder.v1.$profile',
       'home.sleepUrl.v1.$profile',
       'home.liveTvPlaylistUrl.v1.$profile',
@@ -887,6 +1223,8 @@ class HomePreferences {
       'weather.auto.v1.$profile.forecast',
       'gallery.preferences.v2.$profile',
       'library.folders.v1.$profile',
+      'library.playback.v1.$profile',
+      'library.tmdb.cache.v1.$profile',
     ];
     for (final key in keys) {
       if (!await prefs.remove(key)) {

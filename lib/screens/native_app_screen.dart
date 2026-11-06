@@ -124,7 +124,7 @@ class _NativeAppScreenState extends State<NativeAppScreen> {
     return PopScope(
       canPop: !busy,
       child: Scaffold(
-        backgroundColor: const Color(0xFF0B1425),
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         appBar: AppBar(
           title: const Text('App Store'),
           automaticallyImplyLeading: !busy,

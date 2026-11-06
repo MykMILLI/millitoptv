@@ -51,7 +51,16 @@ dependencies:
   media_kit: 1.2.6
   media_kit_video: 2.0.1
   media_kit_libs_video: 1.0.7
+  audio_session: ^0.2.2
+  audio_service: ^0.18.18
   url_launcher: 6.3.3
+  share_plus: ^13.3.1
+  app_links: ^6.4.0
+  quick_actions: ^1.1.0
+  home_widget: 0.7.0
+  flutter_chrome_cast: ^1.4.6
+  multicast_dns: ^0.3.3
+  wakelock_plus: ^1.4.0
 
 dev_dependencies:
   flutter_test:
@@ -63,6 +72,9 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+
+dependency_overrides:
+  permission_handler_android: 13.0.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -106,4 +118,3 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
-

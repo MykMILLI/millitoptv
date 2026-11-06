@@ -1,4 +1,5 @@
-         import 'dart:async';
+import 'dart:async';
+import 'dart:math' as math;
 import '../services/home_preferences.dart';
 import 'package:flutter/material.dart';
 import '../services/device_connection.dart';
@@ -10,10 +11,43 @@ import '../services/web_app_catalog.dart';
 import '../services/web_app_definition.dart';
 import '../services/firefox_browser.dart';
 import '../services/native_app_launcher.dart';
+import '../services/music_service.dart';
+import '../theme/millitop_visual_theme.dart';
 import 'live_tv_screen.dart';
 import 'live_tv_media_screen.dart';
 import 'music_screen.dart';
 import 'app_settings_screen.dart';
+
+class _HoverCardLift extends StatefulWidget {
+  final Widget child;
+  const _HoverCardLift({required this.child});
+
+  @override
+  State<_HoverCardLift> createState() => _HoverCardLiftState();
+}
+
+class _HoverCardLiftState extends State<_HoverCardLift> {
+  bool hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => hovering = true),
+      onExit: (_) => setState(() => hovering = false),
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        offset: hovering ? const Offset(0, -0.02) : Offset.zero,
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          scale: hovering ? 1.01 : 1,
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
 
 class HomeAppTiles extends StatefulWidget {
   final int profileId;
@@ -24,21 +58,29 @@ class HomeAppTiles extends StatefulWidget {
 }
 
 class _HomeAppTilesState extends State<HomeAppTiles>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late WebAppCatalog catalog;
   final epgService = const LiveTvEpgService();
   final playlistService = const LiveTvPlaylistService();
   final liveTvControl = LiveTvControlService();
+  final musicService = MusicService();
   List<WebAppDefinition> apps = builtinWebApps;
   List<LiveTvRecentChannel> recentLiveTv = [];
   List<LiveTvRecentMedia> recentMedia = [];
+  MusicTrack? recentMusicTrack;
+  String recentMusicQueueContext = '';
+  Duration recentMusicPosition = Duration.zero;
+  bool recentMusicAvailable = false;
   LiveTvProgram? recentNowProgram;
   LiveTvProgram? recentNextProgram;
   late final AnimationController livePulseController;
   late final Animation<double> livePulse;
+  late final AnimationController tileFxController;
+  late final Animation<double> tileFx;
   String error = '';
   List<String> savedOrder = [];
   bool arranging = false, savingOrder = false;
+  String? hoveredTileId;
   @override
   void initState() {
     super.initState();
@@ -48,6 +90,11 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       value: 1,
     );
     livePulse = Tween<double>(begin: 0.35, end: 1).animate(livePulseController);
+    tileFxController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+    tileFx = CurvedAnimation(parent: tileFxController, curve: Curves.easeInOut);
     catalog = widget.catalog ?? WebAppCatalog.instance;
     catalog.addListener(_changed);
     unawaited(_load());
@@ -55,6 +102,18 @@ class _HomeAppTilesState extends State<HomeAppTiles>
 
   void _changed() {
     unawaited(_load());
+  }
+
+  void _syncTileFxActivity() {
+    final needsAnimation = hoveredTileId != null || recentMusicAvailable;
+    if (needsAnimation) {
+      if (!tileFxController.isAnimating) {
+        tileFxController.repeat();
+      }
+      return;
+    }
+    tileFxController.stop();
+    tileFxController.value = 0;
   }
 
   Future<void> _load() async {
@@ -107,14 +166,51 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       final mediaRecents = await HomePreferences().liveTvRecentMedia(
         widget.profileId,
       );
+      final musicSession = await musicService.loadPlaybackSession(
+        widget.profileId,
+      );
+      MusicTrack? sessionTrack;
+      var sessionContext = '';
+      var sessionPosition = Duration.zero;
+      var hasMusicSession = false;
+      if (musicSession != null) {
+        final queueRaw = musicSession['queue'];
+        final index =
+            int.tryParse(musicSession['index']?.toString() ?? '') ?? 0;
+        if (queueRaw is List &&
+            queueRaw.isNotEmpty &&
+            index >= 0 &&
+            index < queueRaw.length) {
+          final current = queueRaw[index];
+          if (current is Map) {
+            try {
+              sessionTrack = MusicTrack.fromJson(
+                Map<String, dynamic>.from(current),
+              );
+              hasMusicSession = true;
+            } catch (_) {}
+          }
+        }
+        sessionContext =
+            musicSession['queueContextLabel']?.toString().trim() ?? '';
+        sessionPosition = Duration(
+          milliseconds:
+              int.tryParse(musicSession['positionMs']?.toString() ?? '') ?? 0,
+        );
+      }
       if (mounted) {
         setState(() {
           apps = values;
           savedOrder = order;
           recentLiveTv = recents.take(8).toList();
           recentMedia = mediaRecents.take(8).toList();
+          recentMusicTrack = sessionTrack;
+          recentMusicQueueContext = sessionContext;
+          recentMusicPosition = sessionPosition;
+          recentMusicAvailable = hasMusicSession;
           error = '';
         });
+        _syncTileFxActivity();
         if (recents.isNotEmpty) {
           if (!livePulseController.isAnimating) {
             livePulseController.repeat(reverse: true);
@@ -158,6 +254,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
   @override
   void dispose() {
     livePulseController.dispose();
+    tileFxController.dispose();
     catalog.removeListener(_changed);
     super.dispose();
   }
@@ -279,8 +376,9 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     final cardWidth = screenWidth < 700 ? double.infinity : 554.0;
     return SizedBox(
       width: cardWidth,
-      child: Card(
-        child: Padding(
+      child: _HoverCardLift(
+        child: Card(
+          child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -351,6 +449,149 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         ),
       ),
+      ),
+    );
+  }
+
+  Future<void> _openRecentMusic() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => MusicScreen(profileId: widget.profileId),
+      ),
+    );
+    await _load();
+  }
+
+  Widget _continueListeningMusicPanel() {
+    final accent = context.millitopTheme.accentColor;
+    final track = recentMusicTrack;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final cardWidth = screenWidth < 700 ? double.infinity : 554.0;
+    if (!recentMusicAvailable || track == null) {
+      return const SizedBox.shrink();
+    }
+    final minutes = recentMusicPosition.inMinutes;
+    final seconds = (recentMusicPosition.inSeconds % 60).toString().padLeft(
+      2,
+      '0',
+    );
+    final positionLabel = '$minutes:$seconds';
+    return SizedBox(
+      width: cardWidth,
+      child: _HoverCardLift(
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Music · Continue Listening',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            track.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            track.artist,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                          Text(
+                            track.album,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white60),
+                          ),
+                          if (recentMusicQueueContext.trim().isNotEmpty)
+                            Text(
+                              'Queue: $recentMusicQueueContext',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white60),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    RotationTransition(
+                      turns: tileFxController,
+                      child: Container(
+                        width: 96,
+                        height: 96,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: const RadialGradient(
+                            colors: [Color(0xFF2C2D34), Color(0xFF050506)],
+                          ),
+                          border: Border.all(
+                            color: const Color(0xFF3A3B43),
+                            width: 2,
+                          ),
+                        ),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            for (double ring = 42; ring >= 18; ring -= 4)
+                              Container(
+                                width: ring * 2,
+                                height: ring * 2,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white.withAlpha(22),
+                                    width: .8,
+                                  ),
+                                ),
+                              ),
+                            Container(
+                              width: 30,
+                              height: 30,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: accent.withAlpha(190),
+                                border: Border.all(
+                                  color: Colors.white.withAlpha(28),
+                                ),
+                              ),
+                              child: const Icon(
+                                Icons.music_note_rounded,
+                                size: 16,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _openRecentMusic,
+                  icon: const Icon(Icons.play_arrow),
+                  label: Text('Resume at $positionLabel'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -390,8 +631,9 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     final cardWidth = screenWidth < 700 ? double.infinity : 554.0;
     return SizedBox(
       width: cardWidth,
-      child: Card(
-        child: Padding(
+      child: _HoverCardLift(
+        child: Card(
+          child: Padding(
           padding: const EdgeInsets.all(16),
           child: Row(
             children: [
@@ -402,7 +644,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
                     ? Container(
                         width: 84,
                         height: 120,
-                        color: const Color(0xFF1F2B3F),
+                        color: context.millitopTheme.panelColor,
                         alignment: Alignment.center,
                         child: Icon(
                           recent.mediaType == 'movie' ? Icons.movie : Icons.tv,
@@ -417,7 +659,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
                         errorBuilder: (_, __, ___) => Container(
                           width: 84,
                           height: 120,
-                          color: const Color(0xFF1F2B3F),
+                          color: context.millitopTheme.panelColor,
                           alignment: Alignment.center,
                           child: Icon(
                             recent.mediaType == 'movie'
@@ -487,6 +729,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         ),
       ),
+      ),
     );
   }
 
@@ -526,68 +769,236 @@ class _HomeAppTilesState extends State<HomeAppTiles>
   }
 
   Widget _tile(
+    String tileId,
     String title,
     String icon,
     VoidCallback launch, {
     WebAppDefinition? app,
     IconData? iconData,
-  }) => SizedBox(
-    width: MediaQuery.sizeOf(context).width < 700
-        ? ((MediaQuery.sizeOf(context).width - 48) / 2).clamp(150.0, 230.0)
-        : 270.0,
-    child: Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                if (iconData != null)
-                  Icon(iconData, size: 46, color: const Color(0xFF8D7BFF))
-                else
-                  Image.asset(
-                    'assets/native/$icon.png',
-                    width: 52,
-                    height: 52,
-                    errorBuilder: (_, e, s) =>
-                        const Icon(Icons.language, size: 48),
-                  ),
-                const Spacer(),
-                if (app != null)
-                  IconButton(
-                    onPressed: () => editWebApp(
-                      context,
-                      widget.profileId,
-                      app,
-                      catalog: catalog,
+  }) {
+    final isHovered = hoveredTileId == tileId;
+    final tilt = isHovered ? -0.008 : 0.0;
+    return MouseRegion(
+      onEnter: (_) => setState(() {
+        hoveredTileId = tileId;
+        _syncTileFxActivity();
+      }),
+      onExit: (_) => setState(() {
+        if (hoveredTileId == tileId) {
+          hoveredTileId = null;
+        }
+        _syncTileFxActivity();
+      }),
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 190),
+        curve: Curves.easeOutCubic,
+        offset: isHovered ? const Offset(0, -0.03) : Offset.zero,
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 190),
+          curve: Curves.easeOutCubic,
+          scale: isHovered ? 1.012 : 1.0,
+          child: Transform.rotate(
+            angle: tilt,
+            child: SizedBox(
+              width: MediaQuery.sizeOf(context).width < 700
+                  ? ((MediaQuery.sizeOf(context).width - 48) / 2).clamp(
+                      150.0,
+                      230.0,
+                    )
+                  : 270.0,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: isHovered
+                      ? const [
+                          BoxShadow(
+                            color: Color(0x3348D1CC),
+                            blurRadius: 14,
+                            spreadRadius: 1,
+                            offset: Offset(0, 6),
+                          ),
+                        ]
+                      : null,
+                ),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            _buildTileIcon(
+                              tileId: tileId,
+                              title: title,
+                              icon: icon,
+                              iconData: iconData,
+                              isHovered: isHovered,
+                            ),
+                            const Spacer(),
+                            if (app != null)
+                              IconButton(
+                                onPressed: () => editWebApp(
+                                  context,
+                                  widget.profileId,
+                                  app,
+                                  catalog: catalog,
+                                ),
+                                icon: Icon(
+                                  app.managed
+                                      ? Icons.info_outline
+                                      : Icons.settings,
+                                ),
+                                tooltip: app.managed
+                                    ? 'Managed app details'
+                                    : 'App settings',
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 23),
+                        ),
+                        if (app?.managed == true)
+                          const Text(
+                            'Managed',
+                            style: TextStyle(color: Colors.white60),
+                          ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: launch,
+                          child: const Text('Open'),
+                        ),
+                      ],
                     ),
-                    icon: Icon(
-                      app.managed ? Icons.info_outline : Icons.settings,
-                    ),
-                    tooltip: app.managed
-                        ? 'Managed app details'
-                        : 'App settings',
                   ),
-              ],
+                ),
+              ),
             ),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 23),
-            ),
-            if (app?.managed == true)
-              const Text('Managed', style: TextStyle(color: Colors.white60)),
-            const SizedBox(height: 12),
-            FilledButton(onPressed: launch, child: const Text('Open')),
-          ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
+
+  Widget _buildTileIcon({
+    required String tileId,
+    required String title,
+    required String icon,
+    required bool isHovered,
+    IconData? iconData,
+  }) {
+    if (tileId == 'native:iptvnator') {
+      return AnimatedBuilder(
+        animation: tileFxController,
+        builder: (context, _) {
+          final flicker = (tileFx.value * 2 * 3.14159);
+          final snowA = 0.2 + ((math.sin(flicker) + 1) * 0.25);
+          final snowB = 0.18 + ((math.sin(flicker + 1.2) + 1) * 0.25);
+          return SizedBox(
+            width: 62,
+            height: 62,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                const Icon(
+                  Icons.live_tv_rounded,
+                  size: 54,
+                  color: Color(0xFF7FE9E0),
+                ),
+                Positioned(
+                  top: 17,
+                  left: 12,
+                  right: 12,
+                  bottom: 15,
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 120),
+                    opacity: isHovered ? 1 : 0,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.white.withValues(alpha: snowA),
+                              Colors.white.withValues(alpha: 0.06),
+                              Colors.white.withValues(alpha: snowB),
+                            ],
+                          ),
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+    }
+    if (tileId == 'native:vlc') {
+      return AnimatedRotation(
+        duration: const Duration(milliseconds: 220),
+        turns: isHovered ? 0.015 : -0.015,
+        child: const Icon(
+          Icons.traffic_rounded,
+          size: 52,
+          color: Color(0xFFFFA94A),
+        ),
+      );
+    }
+    if (tileId == 'native:music') {
+      return AnimatedBuilder(
+        animation: tileFxController,
+        builder: (context, _) {
+          final wobble = 1 + (math.sin(tileFx.value * 2 * 3.14159) * 0.03);
+          final scale = isHovered ? 1.08 * wobble : 1.0 * wobble;
+          return Transform.scale(
+            scale: scale,
+            child: Icon(
+              Icons.library_music_rounded,
+              size: 52,
+              color: isHovered
+                  ? const Color(0xFF9D9CFF)
+                  : const Color(0xFF8D7BFF),
+            ),
+          );
+        },
+      );
+    }
+    final titleLower = title.toLowerCase();
+    if (titleLower.contains('emby') || titleLower.contains('jellyfin')) {
+      return AnimatedSlide(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutBack,
+        offset: isHovered ? const Offset(0.05, -0.04) : Offset.zero,
+        child: Image.asset(
+          'assets/native/$icon.png',
+          width: 52,
+          height: 52,
+          errorBuilder: (_, __, ___) => const Icon(Icons.language, size: 48),
+        ),
+      );
+    }
+    if (iconData != null) {
+      return Icon(iconData, size: 46, color: const Color(0xFF8D7BFF));
+    }
+    return Image.asset(
+      'assets/native/$icon.png',
+      width: 52,
+      height: 52,
+      errorBuilder: (_, __, ___) => const Icon(Icons.language, size: 48),
+    );
+  }
+
   Future<void> _move(String id, int target, List<String> visible) async {
     if (savingOrder) {
       return;
@@ -635,6 +1046,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
         : 270.0;
     final tiles = <String, Widget>{
       'native:iptvnator': _tile(
+        'native:iptvnator',
         'Live TV',
         'iptvnator',
         () => Navigator.of(context).push<void>(
@@ -643,13 +1055,26 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         ),
       ),
+      'native:vod': _tile(
+        'native:vod',
+        'VOD Movies & Series',
+        'movie',
+        () => Navigator.of(context).push<void>(
+          MaterialPageRoute<void>(
+            builder: (_) => LiveTvMediaScreen(profileId: widget.profileId),
+          ),
+        ),
+        iconData: Icons.movie_filter_rounded,
+      ),
       'native:vlc': _tile(
+        'native:vlc',
         'VLC player',
         'vlc',
         () =>
             NativeAppLauncher.open(context, appKey: 'vlc', title: 'VLC player'),
       ),
       'native:music': _tile(
+        'native:music',
         'Music',
         'music',
         () => Navigator.of(context).push<void>(
@@ -660,7 +1085,13 @@ class _HomeAppTilesState extends State<HomeAppTiles>
         iconData: Icons.graphic_eq_rounded,
       ),
       for (final app in apps)
-        'web:${app.id}': _tile(app.title, app.icon, () => _open(app), app: app),
+        'web:${app.id}': _tile(
+          'web:${app.id}',
+          app.title,
+          app.icon,
+          () => _open(app),
+          app: app,
+        ),
     };
     final order = mergeAppOrder(tiles.keys.toList(), savedOrder);
     Widget arrange(String id, int index) => DragTarget<String>(
@@ -732,9 +1163,16 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         if (error.isNotEmpty)
           Text(error, style: const TextStyle(color: Colors.orangeAccent)),
-        if (recentLiveTv.isNotEmpty) ...[
+        if (recentLiveTv.isNotEmpty || recentMusicAvailable) ...[
           const SizedBox(height: 8),
-          _continueWatchingPanel(),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (recentLiveTv.isNotEmpty) _continueWatchingPanel(),
+              if (recentMusicAvailable) _continueListeningMusicPanel(),
+            ],
+          ),
           const SizedBox(height: 8),
         ],
         if (recentMedia.isNotEmpty) ...[

@@ -21,9 +21,17 @@ import 'services/live_tv_control.dart';
 import 'screens/device_setup_screen.dart';
 import 'profiles/profile_gate.dart';
 import 'services/pip_playback.dart';
+import 'services/audio_background_service.dart';
+import 'services/deep_link_service.dart';
+import 'services/platform_shortcuts_service.dart';
+import 'screens/music_screen.dart';
+import 'screens/live_tv_screen.dart';
+import 'theme/millitop_visual_theme.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
+// ignore_for_file: deprecated_member_use
+
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -44,6 +52,9 @@ Future<void> main() async {
   unawaited(DeviceConnection.instance.start());
   unawaited(WebAppCatalog.instance.start());
   unawaited(AppUpdates.instance.start());
+  unawaited(initializeAudioBackgroundService());
+  unawaited(DeepLinkService.instance.start());
+  unawaited(PlatformShortcutsService.instance.start());
 
   if (desktopWindowMode) {
     await windowManager.waitUntilReadyToShow(
@@ -70,38 +81,78 @@ Future<void> main() async {
   }
 }
 
-const background = Color(0xFF0B1425);
-const panel = Color(0xFF16243A);
-const accent = Color(0xFF63DFCB);
-const muted = Color(0xFFA4B3C8);
+Color get background => MillitopThemeController.instance.current.background;
+Color get panel => MillitopThemeController.instance.current.surfaceVariant;
+Color get accent => MillitopThemeController.instance.current.accent;
+Color get muted => MillitopThemeController.instance.current.muted;
 
-class MillitopApp extends StatelessWidget {
-  const MillitopApp({super.key});
+class HoverLift extends StatefulWidget {
+  final Widget child;
+  final double lift;
+  final double scale;
+  const HoverLift({
+    super.key,
+    required this.child,
+    this.lift = 0.02,
+    this.scale = 1.012,
+  });
+
+  @override
+  State<HoverLift> createState() => _HoverLiftState();
+}
+
+class _HoverLiftState extends State<HoverLift> {
+  bool hovering = false;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: overnightNavigatorKey,
-      title: 'MILLITOP TV',
-      debugShowCheckedModeBanner: false,
-      builder: (context, child) => Listener(
-        onPointerDown: (_) => DeviceConnection.instance.noteInteraction(),
-        onPointerHover: (_) => DeviceConnection.instance.noteInteraction(),
-        onPointerSignal: (_) => DeviceConnection.instance.noteInteraction(),
-        child: OvernightWindowGuard(
-          child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+    return MouseRegion(
+      onEnter: (_) => setState(() => hovering = true),
+      onExit: (_) => setState(() => hovering = false),
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 170),
+        curve: Curves.easeOutCubic,
+        offset: hovering ? Offset(0, -widget.lift) : Offset.zero,
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 170),
+          curve: Curves.easeOutCubic,
+          scale: hovering ? widget.scale : 1,
+          child: widget.child,
         ),
       ),
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: background,
-        colorScheme: const ColorScheme.dark(primary: accent, surface: panel),
-        fontFamily: 'Segoe UI',
-        useMaterial3: true,
-      ),
-      home: ProfileGate(
-        builder: (profile) =>
-            Launcher(key: ValueKey(profile.id), profileId: profile.id),
+    );
+  }
+}
+
+class MillitopApp extends StatefulWidget {
+  const MillitopApp({super.key});
+
+  @override
+  State<MillitopApp> createState() => _MillitopAppState();
+}
+
+class _MillitopAppState extends State<MillitopApp> {
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: MillitopThemeController.instance,
+      builder: (context, _) => MaterialApp(
+        navigatorKey: overnightNavigatorKey,
+        title: 'MILLITOP TV',
+        debugShowCheckedModeBanner: false,
+        builder: (context, child) => Listener(
+          onPointerDown: (_) => DeviceConnection.instance.noteInteraction(),
+          onPointerHover: (_) => DeviceConnection.instance.noteInteraction(),
+          onPointerSignal: (_) => DeviceConnection.instance.noteInteraction(),
+          child: OvernightWindowGuard(
+            child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+          ),
+        ),
+        theme: MillitopThemeController.instance.materialTheme,
+        home: ProfileGate(
+          builder: (profile) =>
+              Launcher(key: ValueKey(profile.id), profileId: profile.id),
+        ),
       ),
     );
   }
@@ -135,9 +186,11 @@ class TvButton extends StatefulWidget {
 
 class _TvButtonState extends State<TvButton> {
   bool focused = false;
+  bool hovered = false;
 
   @override
   Widget build(BuildContext context) {
+    final tokens = context.millitopTheme;
     return Semantics(
       button: true,
       label: widget.label,
@@ -191,81 +244,113 @@ class _TvButtonState extends State<TvButton> {
           return KeyEventResult.ignored;
         },
         child: Builder(
-          builder: (buttonContext) => GestureDetector(
-            onTap: () {
-              Focus.of(buttonContext).requestFocus();
-              widget.onPressed();
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 140),
-              height: widget.height,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              decoration: BoxDecoration(
-                color: focused
-                    ? const Color(0xFF23423F)
-                    : widget.selected
-                    ? const Color(0xFF22354B)
-                    : panel,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: focused ? accent : Colors.transparent,
-                  width: 3,
-                ),
-                boxShadow: focused
-                    ? [BoxShadow(color: accent.withAlpha(28), blurRadius: 20)]
-                    : [],
-              ),
-              child: widget.height > 110
-                  ? Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (widget.icon != null) ...[
-                          widget.imageAsset == null
-                              ? Icon(
-                                  widget.icon,
-                                  size: 48,
-                                  color: widget.iconColor ?? accent,
-                                )
-                              : Image.asset(
-                                  widget.imageAsset!,
-                                  width: 58,
-                                  height: 58,
-                                  fit: BoxFit.contain,
-                                  filterQuality: FilterQuality.high,
-                                  errorBuilder: (context, error, stack) => Icon(
-                                    widget.icon,
-                                    size: 48,
-                                    color: widget.iconColor ?? accent,
-                                  ),
-                                ),
-                          const SizedBox(height: 18),
-                        ],
-                        Text(
-                          widget.label,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 23,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    )
-                  : Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (widget.icon != null) ...[
-                          Icon(widget.icon, color: widget.iconColor ?? accent),
-                          const SizedBox(width: 10),
-                        ],
-                        Flexible(
-                          child: Text(
-                            widget.label,
-                            style: const TextStyle(fontSize: 19),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
+          builder: (buttonContext) => MouseRegion(
+            onEnter: (_) => setState(() => hovered = true),
+            onExit: (_) => setState(() => hovered = false),
+            child: AnimatedSlide(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOutCubic,
+              offset: hovered ? const Offset(0, -0.03) : Offset.zero,
+              child: AnimatedScale(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOutCubic,
+                scale: hovered ? 1.012 : 1,
+                child: GestureDetector(
+                  onTap: () {
+                    Focus.of(buttonContext).requestFocus();
+                    widget.onPressed();
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 140),
+                    height: widget.height,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 12,
                     ),
+                    decoration: BoxDecoration(
+                      color: focused
+                          ? tokens.selectedSurface
+                          : widget.selected
+                          ? tokens.panelColor.withAlpha(222)
+                          : panel,
+                      borderRadius: BorderRadius.circular(tokens.buttonRadius),
+                      border: Border.all(
+                        color: (focused || hovered)
+                            ? tokens.accentColor
+                            : Colors.transparent,
+                        width: 3,
+                      ),
+                      boxShadow: (focused || hovered)
+                          ? [
+                              BoxShadow(
+                                color: tokens.accentColor.withAlpha(34),
+                                blurRadius: 20,
+                              ),
+                            ]
+                          : [],
+                    ),
+                    child: widget.height > 110
+                        ? Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (widget.icon != null) ...[
+                                widget.imageAsset == null
+                                    ? Icon(
+                                        widget.icon,
+                                        size: 48,
+                                        color:
+                                            widget.iconColor ??
+                                            tokens.accentColor,
+                                      )
+                                    : Image.asset(
+                                        widget.imageAsset!,
+                                        width: 58,
+                                        height: 58,
+                                        fit: BoxFit.contain,
+                                        filterQuality: FilterQuality.high,
+                                        errorBuilder: (context, error, stack) =>
+                                            Icon(
+                                              widget.icon,
+                                              size: 48,
+                                              color:
+                                                  widget.iconColor ??
+                                                  tokens.accentColor,
+                                            ),
+                                      ),
+                                const SizedBox(height: 18),
+                              ],
+                              Text(
+                                widget.label,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontSize: 23,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          )
+                        : Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (widget.icon != null) ...[
+                                Icon(
+                                  widget.icon,
+                                  color: widget.iconColor ?? tokens.accentColor,
+                                ),
+                                const SizedBox(width: 10),
+                              ],
+                              Flexible(
+                                child: Text(
+                                  widget.label,
+                                  style: const TextStyle(fontSize: 19),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -294,11 +379,30 @@ class _LauncherState extends State<Launcher> {
   bool serviceLocked = false;
   String serviceLockReason = '';
   Offset pipMiniPlayerOffset = const Offset(0, 0);
+  StreamSubscription<String>? shortcutSub;
+  StreamSubscription<DeepLinkAction>? deepLinkSub;
+  Timer? welcomeFadeTimer;
+  Timer? welcomeRemoveTimer;
+  bool showWelcomeSplash = true;
+  bool welcomeVisible = true;
+  bool showLoginActionOverlay = false;
+  DateTime? loginPromptSnoozeUntilUtc;
+  bool loginOverlayDismissed = false;
   Future<void> _loadHomePreferences() async {
     try {
-      final visible = await HomePreferences().familyMoments(widget.profileId);
+      final prefs = HomePreferences();
+      final visible = await prefs.familyMoments(widget.profileId);
+      await prefs.setLastActiveProfileId(widget.profileId);
+      final savedThemeId = MillitopThemeController.fromStorage(
+        await prefs.visualTheme(widget.profileId),
+      );
+      loginPromptSnoozeUntilUtc = await prefs.launcherPromptSnoozeUntil(
+        widget.profileId,
+      );
+      MillitopThemeController.instance.setTheme(savedThemeId);
       if (mounted) {
         setState(() => familyMoments = visible);
+        _evaluateLoginActionOverlay();
       }
     } catch (_) {}
   }
@@ -315,14 +419,145 @@ class _LauncherState extends State<Launcher> {
     serviceAccessPoll = Timer.periodic(const Duration(seconds: 45), (_) {
       unawaited(_refreshServiceAccess());
     });
+    shortcutSub = PlatformShortcutsService.instance.actions.listen(
+      _handleShortcutAction,
+    );
+    deepLinkSub = DeepLinkService.instance.actions.listen(
+      _handleDeepLinkAction,
+    );
+    RemoteInbox.instance.notices.addListener(_onInboxUpdated);
+    welcomeFadeTimer = Timer(const Duration(milliseconds: 1650), () {
+      if (mounted) {
+        setState(() => welcomeVisible = false);
+      }
+    });
+    welcomeRemoveTimer = Timer(const Duration(milliseconds: 2350), () {
+      if (mounted) {
+        setState(() => showWelcomeSplash = false);
+        _evaluateLoginActionOverlay();
+      }
+    });
   }
 
   @override
   void dispose() {
     clock?.cancel();
     serviceAccessPoll?.cancel();
+    welcomeFadeTimer?.cancel();
+    welcomeRemoveTimer?.cancel();
+    unawaited(shortcutSub?.cancel());
+    unawaited(deepLinkSub?.cancel());
+    RemoteInbox.instance.notices.removeListener(_onInboxUpdated);
     DeviceConnection.instance.status.removeListener(_onConnectionStatusChanged);
     super.dispose();
+  }
+
+  void _onInboxUpdated() {
+    if (!mounted) {
+      return;
+    }
+    _evaluateLoginActionOverlay();
+  }
+
+  bool get _hasUnreadInboxMessage =>
+      RemoteInbox.instance.notices.value.any((message) => !message.opened);
+
+  bool get _hasBillingPrompt {
+    if (serviceLocked) {
+      return true;
+    }
+    final reason = serviceLockReason.toLowerCase();
+    return reason.contains('balance') ||
+        reason.contains('billing') ||
+        reason.contains('payment') ||
+        reason.contains('due');
+  }
+
+  bool get _isPromptSnoozed =>
+      loginPromptSnoozeUntilUtc != null &&
+      loginPromptSnoozeUntilUtc!.isAfter(DateTime.now().toUtc());
+
+  void _evaluateLoginActionOverlay() {
+    if (!mounted || showWelcomeSplash) {
+      return;
+    }
+    final shouldShow =
+        !loginOverlayDismissed &&
+        !_isPromptSnoozed &&
+        (_hasUnreadInboxMessage || _hasBillingPrompt);
+    if (shouldShow == showLoginActionOverlay) {
+      return;
+    }
+    setState(() => showLoginActionOverlay = shouldShow);
+  }
+
+  void _handleShortcutAction(String action) {
+    if (!mounted) {
+      return;
+    }
+    switch (action) {
+      case 'open_music':
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => MusicScreen(profileId: widget.profileId),
+            ),
+          ),
+        );
+        break;
+      case 'open_live_tv':
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => LiveTvScreen(profileId: widget.profileId),
+            ),
+          ),
+        );
+        break;
+      case 'resume_playback':
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => MusicScreen(profileId: widget.profileId),
+            ),
+          ),
+        );
+        break;
+    }
+  }
+
+  void _handleDeepLinkAction(DeepLinkAction action) {
+    if (!mounted) {
+      return;
+    }
+    switch (action.route) {
+      case 'music':
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => MusicScreen(
+                profileId: widget.profileId,
+                initialSection: action.query['section'],
+                initialQuery: action.query['query'],
+              ),
+            ),
+          ),
+        );
+        break;
+      case 'livetv':
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => LiveTvScreen(profileId: widget.profileId),
+            ),
+          ),
+        );
+        break;
+      case 'home':
+      default:
+        setState(() => page = 0);
+        break;
+    }
   }
 
   void _onConnectionStatusChanged() {
@@ -337,6 +572,7 @@ class _LauncherState extends State<Launcher> {
           serviceLocked = false;
           serviceLockReason = '';
         });
+        _evaluateLoginActionOverlay();
       }
       return;
     }
@@ -352,6 +588,7 @@ class _LauncherState extends State<Launcher> {
         serviceLocked = response['locked'] == true;
         serviceLockReason = response['reason']?.toString().trim() ?? '';
       });
+      _evaluateLoginActionOverlay();
     } catch (_) {}
   }
 
@@ -415,15 +652,17 @@ class _LauncherState extends State<Launcher> {
   }
 
   Widget card(Widget child) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(26),
-      decoration: BoxDecoration(
-        color: panel,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white.withAlpha(12)),
+    return HoverLift(
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(26),
+        decoration: BoxDecoration(
+          color: panel,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white.withAlpha(12)),
+        ),
+        child: child,
       ),
-      child: child,
     );
   }
 
@@ -438,259 +677,384 @@ class _LauncherState extends State<Launcher> {
             style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 8),
-          Text(subtitle, style: const TextStyle(fontSize: 19, color: muted)),
+          Text(subtitle, style: TextStyle(fontSize: 19, color: muted)),
         ],
       ),
     );
   }
 
-  Widget home() {
-    final compact = MediaQuery.sizeOf(context).width < 1000;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (compact) ...[
-          Text(
-            greeting,
-            style: const TextStyle(fontSize: 22, color: muted),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            time,
-            style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w300),
-          ),
-          Text(
-            date,
-            style: const TextStyle(fontSize: 16, color: muted),
-          ),
-          const SizedBox(height: 16),
-          card(LiveWeatherCard(profileId: widget.profileId)),
-        ] else ...[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      greeting,
-                      style: const TextStyle(fontSize: 28, color: muted),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      time,
-                      style: const TextStyle(
-                        fontSize: 64,
-                        fontWeight: FontWeight.w300,
-                      ),
-                    ),
-                    Text(
-                      date,
-                      style: const TextStyle(fontSize: 21, color: muted),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 28),
-              Expanded(child: card(LiveWeatherCard(profileId: widget.profileId))),
+  Widget _welcomeOverlayContent(String profileName) {
+    final salutation = profileName.isEmpty
+        ? 'Welcome back'
+        : 'Welcome back, $profileName';
+    return AnimatedOpacity(
+      opacity: welcomeVisible ? 1 : 0,
+      duration: const Duration(milliseconds: 620),
+      curve: Curves.easeOutCubic,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              MillitopThemeController.instance.current.surface.withAlpha(238),
+              panel.withAlpha(222),
             ],
           ),
-        ],
-        SizedBox(height: compact ? 20 : 32),
-        HomeAppTiles(profileId: widget.profileId),
-        SizedBox(height: compact ? 16 : 26),
-        if (compact) ...[
-          card(
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'From your support team',
-                  style: TextStyle(fontSize: 18),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.waving_hand_rounded, size: 64, color: accent),
+              const SizedBox(height: 14),
+              Text(
+                salutation,
+                style: const TextStyle(
+                  fontSize: 40,
+                  fontWeight: FontWeight.w700,
                 ),
-                const SizedBox(height: 10),
-                ValueListenableBuilder<List<RemoteNotice>>(
-                  valueListenable: RemoteInbox.instance.notices,
-                  builder: (context, messages, _) => Text(
-                    messages.isEmpty
-                        ? 'No admin messages received yet.'
-                        : '${messages.where((m) => !m.opened).length} unread - ${messages.first.title}',
-                    style: const TextStyle(
-                      fontSize: 15,
-                      color: muted,
-                      height: 1.35,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Great to see you.',
+                style: TextStyle(fontSize: 22, color: muted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _welcomeOverlay(String profileName) {
+    return AbsorbPointer(
+      absorbing: true,
+      child: _welcomeOverlayContent(profileName),
+    );
+  }
+
+  Widget home() {
+    final compact = MediaQuery.sizeOf(context).width < 1000;
+    final preset = context.millitopTheme.layoutPreset;
+    final profileName =
+        SelectedProfileScope.maybeOf(context)?.profile.name.trim() ?? '';
+    final greetingWithName = profileName.isEmpty
+        ? greeting
+        : '$greeting, $profileName';
+    final hero = compact
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                greetingWithName,
+                style: TextStyle(fontSize: 22, color: muted),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                time,
+                style: const TextStyle(
+                  fontSize: 42,
+                  fontWeight: FontWeight.w300,
+                ),
+              ),
+              Text(date, style: TextStyle(fontSize: 16, color: muted)),
+              const SizedBox(height: 16),
+              card(LiveWeatherCard(profileId: widget.profileId)),
+            ],
+          )
+        : Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: switch (preset) {
+              MillitopLayoutPreset.haloSplit => [
+                Expanded(
+                  child: card(LiveWeatherCard(profileId: widget.profileId)),
+                ),
+                const SizedBox(width: 28),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        greetingWithName,
+                        style: TextStyle(fontSize: 28, color: muted),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        time,
+                        style: const TextStyle(
+                          fontSize: 64,
+                          fontWeight: FontWeight.w300,
+                        ),
+                      ),
+                      Text(date, style: TextStyle(fontSize: 21, color: muted)),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 14),
-                TvButton(
-                  label: 'View messages',
-                  icon: Icons.campaign_outlined,
-                  onPressed: () => setState(() => page = 5),
+              ],
+              _ => [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        greetingWithName,
+                        style: TextStyle(fontSize: 28, color: muted),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        time,
+                        style: const TextStyle(
+                          fontSize: 64,
+                          fontWeight: FontWeight.w300,
+                        ),
+                      ),
+                      Text(date, style: TextStyle(fontSize: 21, color: muted)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 28),
+                Expanded(
+                  child: card(LiveWeatherCard(profileId: widget.profileId)),
                 ),
               ],
-            ),
-          ),
-          if (familyMoments) ...[
-            const SizedBox(height: 14),
+            },
+          );
+
+    final infoBlocks = compact
+        ? <Widget>[
             card(
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.photo_library_outlined, color: accent),
-                      SizedBox(width: 12),
-                      Text(
-                        'Family moments',
-                        style: TextStyle(fontSize: 18),
-                      ),
-                    ],
+                  const Text(
+                    'From your support team',
+                    style: TextStyle(fontSize: 18),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'Browse your photos and videos, or start a slideshow.\n'
-                    'Your family folders are saved for this profile.',
-                    style: TextStyle(
-                      fontSize: 15,
-                      color: muted,
-                      height: 1.35,
+                  ValueListenableBuilder<List<RemoteNotice>>(
+                    valueListenable: RemoteInbox.instance.notices,
+                    builder: (context, messages, _) => Text(
+                      messages.isEmpty
+                          ? 'No admin messages received yet.'
+                          : '${messages.where((m) => !m.opened).length} unread - ${messages.first.title}',
+                      style: TextStyle(
+                        fontSize: 15,
+                        color: muted,
+                        height: 1.35,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   const SizedBox(height: 14),
                   TvButton(
-                    label: 'Open gallery',
-                    onPressed: () => setState(() => page = 4),
+                    label: 'View messages',
+                    icon: Icons.campaign_outlined,
+                    onPressed: () => setState(() => page = 5),
                   ),
                 ],
               ),
             ),
-          ],
-        ] else ...[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 3,
-                child: card(
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'From your support team',
-                        style: TextStyle(fontSize: 21),
-                      ),
-                      const SizedBox(height: 10),
-                      ValueListenableBuilder<List<RemoteNotice>>(
-                        valueListenable: RemoteInbox.instance.notices,
-                        builder: (context, messages, _) => Text(
-                          messages.isEmpty
-                              ? 'No admin messages received yet.'
-                              : '${messages.where((m) => !m.opened).length} unread - ${messages.first.title}',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            color: muted,
-                            height: 1.4,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+            if (familyMoments) ...[
+              const SizedBox(height: 14),
+              card(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.photo_library_outlined, color: accent),
+                        const SizedBox(width: 12),
+                        const Text(
+                          'Family moments',
+                          style: TextStyle(fontSize: 18),
                         ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Browse your photos and videos, or start a slideshow.\n'
+                      'Your family folders are saved for this profile.',
+                      style: TextStyle(
+                        fontSize: 15,
+                        color: muted,
+                        height: 1.35,
                       ),
-                      const SizedBox(height: 16),
-                      TvButton(
-                        label: 'View messages',
-                        icon: Icons.campaign_outlined,
-                        onPressed: () => setState(() => page = 5),
-                      ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(height: 14),
+                    TvButton(
+                      label: 'Open gallery',
+                      onPressed: () => setState(() => page = 4),
+                    ),
+                  ],
                 ),
               ),
-              if (familyMoments) const SizedBox(width: 22),
-              if (familyMoments)
+            ],
+          ]
+        : <Widget>[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Expanded(
-                  flex: 2,
+                  flex: 3,
                   child: card(
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Row(
-                          children: [
-                            Icon(Icons.photo_library_outlined, color: accent),
-                            SizedBox(width: 12),
-                            Text(
-                              'Family moments',
-                              style: TextStyle(fontSize: 21),
-                            ),
-                          ],
+                        const Text(
+                          'From your support team',
+                          style: TextStyle(fontSize: 21),
                         ),
                         const SizedBox(height: 10),
-                        const Text(
-                          'Browse your photos and videos, or start a slideshow.\n'
-                          'Your family folders are saved for this profile.',
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: muted,
-                            height: 1.4,
+                        ValueListenableBuilder<List<RemoteNotice>>(
+                          valueListenable: RemoteInbox.instance.notices,
+                          builder: (context, messages, _) => Text(
+                            messages.isEmpty
+                                ? 'No admin messages received yet.'
+                                : '${messages.where((m) => !m.opened).length} unread - ${messages.first.title}',
+                            style: TextStyle(
+                              fontSize: 18,
+                              color: muted,
+                              height: 1.4,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(height: 16),
                         TvButton(
-                          label: 'Open gallery',
-                          onPressed: () => setState(() => page = 4),
+                          label: 'View messages',
+                          icon: Icons.campaign_outlined,
+                          onPressed: () => setState(() => page = 5),
                         ),
                       ],
                     ),
                   ),
                 ),
-            ],
-          ),
-        ],
-        const SizedBox(height: 24),
-        if (compact) ...[
-          TvButton(
-            label: 'Support Assist',
-            icon: Icons.support_agent,
-            onPressed: support,
-          ),
-          const SizedBox(height: 12),
-          TvButton(
-            label: 'App Store',
-            icon: Icons.apps,
-            onPressed: () => Navigator.of(context).push<void>(
-              MaterialPageRoute<void>(
-                builder: (_) => AppStoreScreen(profileId: widget.profileId),
-              ),
+                if (familyMoments) const SizedBox(width: 22),
+                if (familyMoments)
+                  Expanded(
+                    flex: 2,
+                    child: card(
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.photo_library_outlined, color: accent),
+                              const SizedBox(width: 12),
+                              const Text(
+                                'Family moments',
+                                style: TextStyle(fontSize: 21),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Browse your photos and videos, or start a slideshow.\n'
+                            'Your family folders are saved for this profile.',
+                            style: TextStyle(
+                              fontSize: 18,
+                              color: muted,
+                              height: 1.4,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          TvButton(
+                            label: 'Open gallery',
+                            onPressed: () => setState(() => page = 4),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
             ),
-          ),
-        ] else
-          Row(
-            children: [
-              Expanded(
-                child: TvButton(
-                  label: 'Support Assist',
-                  icon: Icons.support_agent,
-                  onPressed: support,
+          ];
+
+    final actionButtons = compact
+        ? <Widget>[
+            TvButton(
+              label: 'Support Assist',
+              icon: Icons.support_agent,
+              onPressed: support,
+            ),
+            const SizedBox(height: 12),
+            TvButton(
+              label: 'App Store',
+              icon: Icons.apps,
+              onPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => AppStoreScreen(profileId: widget.profileId),
                 ),
               ),
-              const SizedBox(width: 18),
-              Expanded(
-                child: TvButton(
-                  label: 'App Store',
-                  icon: Icons.apps,
-                  onPressed: () => Navigator.of(context).push<void>(
-                    MaterialPageRoute<void>(
-                      builder: (_) => AppStoreScreen(profileId: widget.profileId),
+            ),
+          ]
+        : <Widget>[
+            Row(
+              children: [
+                Expanded(
+                  child: TvButton(
+                    label: 'Support Assist',
+                    icon: Icons.support_agent,
+                    onPressed: support,
+                  ),
+                ),
+                const SizedBox(width: 18),
+                Expanded(
+                  child: TvButton(
+                    label: 'App Store',
+                    icon: Icons.apps,
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            AppStoreScreen(profileId: widget.profileId),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
-          ),
-      ],
+              ],
+            ),
+          ];
+
+    final contentOrder = <Widget>[
+      hero,
+      SizedBox(height: compact ? 20 : 32),
+      HomeAppTiles(profileId: widget.profileId),
+      SizedBox(height: compact ? 16 : 26),
+      ...infoBlocks,
+      const SizedBox(height: 24),
+      ...actionButtons,
+    ];
+    if (!compact && preset == MillitopLayoutPreset.commandDeck) {
+      contentOrder
+        ..clear()
+        ..addAll([
+          HomeAppTiles(profileId: widget.profileId),
+          const SizedBox(height: 30),
+          hero,
+          const SizedBox(height: 24),
+          ...infoBlocks,
+          const SizedBox(height: 24),
+          ...actionButtons,
+        ]);
+    } else if (!compact && preset == MillitopLayoutPreset.emberStack) {
+      contentOrder
+        ..clear()
+        ..addAll([
+          hero,
+          const SizedBox(height: 20),
+          ...infoBlocks,
+          const SizedBox(height: 22),
+          HomeAppTiles(profileId: widget.profileId),
+          const SizedBox(height: 24),
+          ...actionButtons,
+        ]);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: contentOrder,
     );
   }
 
@@ -740,9 +1104,509 @@ class _LauncherState extends State<Launcher> {
 
   Widget account() => CustomerAccountPanel(profileId: widget.profileId);
 
+  void _openSettings() {
+    Navigator.of(context)
+        .push<void>(
+          MaterialPageRoute<void>(
+            builder: (_) => AppSettingsScreen(profileId: widget.profileId),
+          ),
+        )
+        .then((_) => _loadHomePreferences());
+  }
+
+  Future<void> _openThemePicker() async {
+    var draft = MillitopThemeController.instance.current.id;
+    final selected = await showDialog<MillitopThemeId>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Choose interface theme'),
+        content: SizedBox(
+          width: 520,
+          child: StatefulBuilder(
+            builder: (context, setLocal) => SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final spec in MillitopThemeController.themes)
+                    RadioListTile<MillitopThemeId>(
+                      value: spec.id,
+                      groupValue: draft,
+                      onChanged: (value) {
+                        if (value == null) {
+                          return;
+                        }
+                        setLocal(() => draft = value);
+                      },
+                      title: Text(spec.label),
+                      subtitle: Text(spec.summary),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, draft),
+            child: const Text('Apply theme'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || selected == null) {
+      return;
+    }
+    try {
+      await HomePreferences().setVisualTheme(
+        widget.profileId,
+        MillitopThemeController.toStorage(selected),
+      );
+      MillitopThemeController.instance.setTheme(selected);
+      setState(() {});
+    } catch (_) {}
+  }
+
+  Future<void> _dismissLoginActionOverlay() async {
+    if (!mounted) {
+      return;
+    }
+    setState(() => showLoginActionOverlay = false);
+    loginOverlayDismissed = true;
+  }
+
+  Future<void> _snoozeLoginActionOverlay(Duration duration) async {
+    final until = DateTime.now().toUtc().add(duration);
+    try {
+      await HomePreferences().setLauncherPromptSnoozeUntil(
+        widget.profileId,
+        until,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        loginPromptSnoozeUntilUtc = until;
+        showLoginActionOverlay = false;
+        loginOverlayDismissed = true;
+      });
+    } catch (_) {}
+  }
+
+  Widget _loginActionOverlay() {
+    final unread = RemoteInbox.instance.notices.value.where((m) => !m.opened);
+    final latestMessage = unread.isNotEmpty ? unread.first : null;
+    final hasBillingPrompt = _hasBillingPrompt;
+    return DecoratedBox(
+      decoration: BoxDecoration(color: Colors.black.withAlpha(178)),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.notifications_active_rounded, color: accent),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'Before you continue',
+                          style: TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (latestMessage != null) ...[
+                    Text(
+                      'Admin message: ${latestMessage.title}',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      latestMessage.body,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (hasBillingPrompt) ...[
+                    const Text(
+                      'Billing action needed',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      serviceLockReason.isEmpty
+                          ? 'Your account needs attention before all services are available.'
+                          : serviceLockReason,
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      if (hasBillingPrompt)
+                        FilledButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              page = 3;
+                              showLoginActionOverlay = false;
+                              loginOverlayDismissed = true;
+                            });
+                          },
+                          icon: const Icon(Icons.payments_outlined),
+                          label: const Text('Pay now'),
+                        ),
+                      if (latestMessage != null)
+                        FilledButton.tonalIcon(
+                          onPressed: () {
+                            setState(() {
+                              page = 5;
+                              showLoginActionOverlay = false;
+                              loginOverlayDismissed = true;
+                            });
+                          },
+                          icon: const Icon(Icons.mark_chat_read_outlined),
+                          label: const Text('View message'),
+                        ),
+                      OutlinedButton(
+                        onPressed: () =>
+                            unawaited(_dismissLoginActionOverlay()),
+                        child: const Text('Pay/View later'),
+                      ),
+                      PopupMenuButton<Duration>(
+                        onSelected: (value) =>
+                            unawaited(_snoozeLoginActionOverlay(value)),
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: Duration(minutes: 30),
+                            child: Text('Remind me in 30 minutes'),
+                          ),
+                          PopupMenuItem(
+                            value: Duration(hours: 2),
+                            child: Text('Remind me in 2 hours'),
+                          ),
+                          PopupMenuItem(
+                            value: Duration(hours: 24),
+                            child: Text('Remind me tomorrow'),
+                          ),
+                        ],
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 10,
+                          ),
+                          child: Text('Remind me in...'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _selectPage(int index) {
+    if (serviceLocked && index != 3) {
+      unawaited(
+        notice(
+          'Service locked',
+          serviceLockReason.isEmpty
+              ? 'This service is currently locked until billing is restored.'
+              : serviceLockReason,
+        ),
+      );
+      return;
+    }
+    setState(() => page = index);
+  }
+
+  Widget _navigationHeader(bool compact, MillitopLayoutPreset preset) {
+    if (compact) {
+      return Column(
+        children: [
+          Row(
+            children: [
+              IconButton(
+                key: const ValueKey('launcher-settings'),
+                onPressed: _openSettings,
+                icon: const Icon(Icons.settings),
+                tooltip: 'Settings',
+              ),
+              IconButton(
+                key: const ValueKey('launcher-themes'),
+                onPressed: () => unawaited(_openThemePicker()),
+                icon: const Icon(Icons.palette_outlined),
+                tooltip: 'Themes',
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'MILLITOP TV',
+                  style: TextStyle(
+                    fontSize: 18,
+                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 48,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: pages.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, i) => SizedBox(
+                width: 118,
+                child: TvButton(
+                  label: pages[i],
+                  selected: page == i,
+                  onPressed: () => _selectPage(i),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    final navButtons = <Widget>[
+      for (int i = 0; i < pages.length; i++)
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: TvButton(
+              label: pages[i],
+              height: 58,
+              selected: page == i,
+              onPressed: () => _selectPage(i),
+            ),
+          ),
+        ),
+    ];
+
+    switch (preset) {
+      case MillitopLayoutPreset.commandDeck:
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 220,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        'MILLITOP TV',
+                        style: TextStyle(
+                          fontSize: 21,
+                          letterSpacing: 2,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        key: const ValueKey('launcher-settings'),
+                        onPressed: _openSettings,
+                        icon: const Icon(Icons.settings),
+                        tooltip: 'Settings',
+                      ),
+                      IconButton(
+                        key: const ValueKey('launcher-themes'),
+                        onPressed: () => unawaited(_openThemePicker()),
+                        icon: const Icon(Icons.palette_outlined),
+                        tooltip: 'Themes',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  for (int i = 0; i < pages.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: TvButton(
+                        label: pages[i],
+                        selected: page == i,
+                        height: 56,
+                        onPressed: () => _selectPage(i),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 18),
+            Expanded(
+              child: Container(
+                height: 68,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(
+                    context.millitopTheme.cardRadius,
+                  ),
+                  color: panel.withAlpha(190),
+                  border: Border.all(color: context.millitopTheme.softBorder),
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Now viewing: ${pages[page]}',
+                  style: TextStyle(
+                    fontSize: 20,
+                    color: context.millitopTheme.mutedColor,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      case MillitopLayoutPreset.haloSplit:
+        return Column(
+          children: [
+            Row(
+              children: [
+                IconButton(
+                  key: const ValueKey('launcher-settings'),
+                  onPressed: _openSettings,
+                  icon: const Icon(Icons.settings),
+                  tooltip: 'Settings',
+                ),
+                IconButton(
+                  key: const ValueKey('launcher-themes'),
+                  onPressed: () => unawaited(_openThemePicker()),
+                  icon: const Icon(Icons.palette_outlined),
+                  tooltip: 'Themes',
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'MILLITOP TV',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 22,
+                      letterSpacing: 2.2,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 48),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(children: navButtons),
+          ],
+        );
+      case MillitopLayoutPreset.emberStack:
+        return Column(
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'MILLITOP TV',
+                    style: TextStyle(
+                      fontSize: 23,
+                      letterSpacing: 1.4,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  key: const ValueKey('launcher-settings'),
+                  onPressed: _openSettings,
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Settings'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const ValueKey('launcher-themes'),
+                  onPressed: () => unawaited(_openThemePicker()),
+                  icon: const Icon(Icons.palette_outlined),
+                  label: const Text('Themes'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (int i = 0; i < pages.length; i++)
+                  SizedBox(
+                    width: 180,
+                    child: TvButton(
+                      label: pages[i],
+                      selected: page == i,
+                      height: 54,
+                      onPressed: () => _selectPage(i),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        );
+      case MillitopLayoutPreset.streamRail:
+      case MillitopLayoutPreset.cinematicTopBar:
+        return Row(
+          children: [
+            IconButton(
+              key: const ValueKey('launcher-settings'),
+              onPressed: _openSettings,
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+            ),
+            IconButton(
+              key: const ValueKey('launcher-themes'),
+              onPressed: () => unawaited(_openThemePicker()),
+              icon: const Icon(Icons.palette_outlined),
+              tooltip: 'Themes',
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              'MILLITOP TV',
+              style: TextStyle(
+                fontSize: 21,
+                letterSpacing: 2,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 30),
+            Expanded(child: Row(children: navButtons)),
+          ],
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 1000;
+    final themePreset = context.millitopTheme.layoutPreset;
+    final activeProfileName =
+        SelectedProfileScope.maybeOf(context)?.profile.name.trim() ?? '';
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -750,455 +1614,369 @@ class _LauncherState extends State<Launcher> {
         },
       },
       child: Scaffold(
-        body: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF14283C), background, Color(0xFF101A2C)],
-            ),
-          ),
-          child: SafeArea(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                compact ? 12 : 36,
-                compact ? 12 : 24,
-                compact ? 12 : 36,
-                16,
-              ),
-              child: Column(
-                children: [
-                  if (compact) ...[
-                    Row(
-                      children: [
-                        IconButton(
-                          key: const ValueKey('launcher-settings'),
-                          onPressed: () => Navigator.of(context)
-                              .push<void>(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => AppSettingsScreen(
-                                    profileId: widget.profileId,
-                                  ),
-                                ),
-                              )
-                              .then((_) => _loadHomePreferences()),
-                          icon: const Icon(Icons.settings),
-                          tooltip: 'Settings',
-                        ),
-                        const SizedBox(width: 8),
-                        const Expanded(
-                          child: Text(
-                            'MILLITOP TV',
-                            style: TextStyle(
-                              fontSize: 18,
-                              letterSpacing: 1.5,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      height: 48,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: pages.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 8),
-                        itemBuilder: (context, i) => SizedBox(
-                          width: 118,
-                          child: TvButton(
-                            label: pages[i],
-                            selected: page == i,
-                            onPressed: () {
-                              if (serviceLocked && i != 3) {
-                                unawaited(
-                                  notice(
-                                    'Service locked',
-                                    serviceLockReason.isEmpty
-                                        ? 'This service is currently locked until billing is restored.'
-                                        : serviceLockReason,
-                                  ),
-                                );
-                                return;
-                              }
-                              setState(() => page = i);
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                  ] else ...[
-                    Row(
-                      children: [
-                        IconButton(
-                          key: const ValueKey('launcher-settings'),
-                          onPressed: () => Navigator.of(context)
-                              .push<void>(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => AppSettingsScreen(
-                                    profileId: widget.profileId,
-                                  ),
-                                ),
-                              )
-                              .then((_) => _loadHomePreferences()),
-                          icon: const Icon(Icons.settings),
-                          tooltip: 'Settings',
-                        ),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'MILLITOP TV',
-                          style: TextStyle(
-                            fontSize: 21,
-                            letterSpacing: 2,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: 30),
-                        Expanded(
-                          child: Row(
-                            children: [
-                              for (int i = 0; i < pages.length; i++)
-                                Expanded(
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 4,
-                                    ),
-                                    child: TvButton(
-                                      label: pages[i],
-                                      height: 58,
-                                      selected: page == i,
-                                      onPressed: () {
-                                        if (serviceLocked && i != 3) {
-                                          unawaited(
-                                            notice(
-                                              'Service locked',
-                                              serviceLockReason.isEmpty
-                                                  ? 'This service is currently locked until billing is restored.'
-                                                  : serviceLockReason,
-                                            ),
-                                          );
-                                          return;
-                                        }
-                                        setState(() => page = i);
-                                      },
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+        body: Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    panel.withAlpha(214),
+                    background,
+                    background.withAlpha(236),
                   ],
-                  SizedBox(height: compact ? 14 : 30),
-                  Expanded(
-                    child: FocusTraversalGroup(
-                      policy: ReadingOrderTraversalPolicy(),
-                      child: SingleChildScrollView(
-                        key: ValueKey(page),
-                        padding: const EdgeInsets.only(bottom: 20),
-                        child: Stack(
-                          children: [
-                            IgnorePointer(
-                              ignoring: serviceLocked && page != 3,
-                              child: switch (page) {
-                                1 => files(),
-                                2 => dvr(),
-                                3 => account(),
-                                4 => gallery(),
-                                5 => updates(),
-                                _ => home(),
-                              },
-                            ),
-                            if (serviceLocked && page != 3)
-                              Positioned.fill(
-                                child: DecoratedBox(
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xAA000000),
-                                  ),
-                                  child: Center(
-                                    child: Card(
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(18),
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            const Icon(
-                                              Icons.lock_outline,
-                                              size: 40,
+                ),
+              ),
+              child: SafeArea(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 12 : 36,
+                    compact ? 12 : 24,
+                    compact ? 12 : 36,
+                    16,
+                  ),
+                  child: Column(
+                    children: [
+                      _navigationHeader(compact, themePreset),
+                      SizedBox(height: compact ? 14 : 30),
+                      Expanded(
+                        child: FocusTraversalGroup(
+                          policy: ReadingOrderTraversalPolicy(),
+                          child: SingleChildScrollView(
+                            key: ValueKey(page),
+                            padding: const EdgeInsets.only(bottom: 20),
+                            child: Stack(
+                              children: [
+                                IgnorePointer(
+                                  ignoring: serviceLocked && page != 3,
+                                  child: switch (page) {
+                                    1 => files(),
+                                    2 => dvr(),
+                                    3 => account(),
+                                    4 => gallery(),
+                                    5 => updates(),
+                                    _ => home(),
+                                  },
+                                ),
+                                if (serviceLocked && page != 3)
+                                  Positioned.fill(
+                                    child: DecoratedBox(
+                                      decoration: const BoxDecoration(
+                                        color: Color(0xAA000000),
+                                      ),
+                                      child: Center(
+                                        child: Card(
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(18),
+                                            child: Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Icon(
+                                                  Icons.lock_outline,
+                                                  size: 40,
+                                                ),
+                                                const SizedBox(height: 10),
+                                                const Text(
+                                                  'Service locked',
+                                                  style: TextStyle(
+                                                    fontSize: 24,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                Text(
+                                                  serviceLockReason.isEmpty
+                                                      ? 'Open Account to restore access.'
+                                                      : serviceLockReason,
+                                                  textAlign: TextAlign.center,
+                                                ),
+                                                const SizedBox(height: 10),
+                                                FilledButton(
+                                                  onPressed: () =>
+                                                      setState(() => page = 3),
+                                                  child: const Text(
+                                                    'Open Account',
+                                                  ),
+                                                ),
+                                              ],
                                             ),
-                                            const SizedBox(height: 10),
-                                            const Text(
-                                              'Service locked',
-                                              style: TextStyle(
-                                                fontSize: 24,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 8),
-                                            Text(
-                                              serviceLockReason.isEmpty
-                                                  ? 'Open Account to restore access.'
-                                                  : serviceLockReason,
-                                              textAlign: TextAlign.center,
-                                            ),
-                                            const SizedBox(height: 10),
-                                            FilledButton(
-                                              onPressed: () =>
-                                                  setState(() => page = 3),
-                                              child: const Text('Open Account'),
-                                            ),
-                                          ],
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ),
-                          ],
+                              ],
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                  AnimatedBuilder(
-                    animation: PipPlaybackController.instance,
-                    builder: (context, _) {
-                      final session = PipPlaybackController.instance.session;
-                      if (session == null ||
-                          !PipPlaybackController
-                              .instance
-                              .hasVisibleMiniPlayer) {
-                        return const SizedBox.shrink();
-                      }
-                      return LayoutBuilder(
-                        builder: (context, constraints) {
-                          const miniWidth = 360.0;
-                          const miniHeight = 255.0;
-                          const edgePadding = 8.0;
-                          final maxX = (constraints.maxWidth - miniWidth)
-                              .clamp(0.0, double.infinity);
-                          final maxY = (miniHeight + 20.0).clamp(
-                            0.0,
-                            double.infinity,
-                          );
-                          final clampedOffset = Offset(
-                            pipMiniPlayerOffset.dx.clamp(0.0, maxX),
-                            pipMiniPlayerOffset.dy.clamp(0.0, maxY),
-                          );
-                          if (clampedOffset != pipMiniPlayerOffset) {
-                            pipMiniPlayerOffset = clampedOffset;
+                      AnimatedBuilder(
+                        animation: PipPlaybackController.instance,
+                        builder: (context, _) {
+                          final session =
+                              PipPlaybackController.instance.session;
+                          if (session == null ||
+                              !PipPlaybackController
+                                  .instance
+                                  .hasVisibleMiniPlayer) {
+                            return const SizedBox.shrink();
                           }
-                          return SizedBox(
-                            width: double.infinity,
-                            height: miniHeight + 20,
-                            child: Stack(
-                              children: [
-                                Positioned(
-                                  left: clampedOffset.dx,
-                                  top: clampedOffset.dy,
-                                  child: GestureDetector(
-                                    onPanUpdate: (details) {
-                                      setState(() {
-                                        pipMiniPlayerOffset = Offset(
-                                          (pipMiniPlayerOffset.dx +
-                                                  details.delta.dx)
-                                              .clamp(0.0, maxX),
-                                          (pipMiniPlayerOffset.dy +
-                                                  details.delta.dy)
-                                              .clamp(0.0, maxY),
-                                        );
-                                      });
-                                    },
-                                    child: SizedBox(
-                                      width: miniWidth,
-                                      child: Card(
-                                        elevation: 10,
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            AspectRatio(
-                                              aspectRatio: 16 / 9,
-                                              child: ClipRRect(
-                                                borderRadius:
-                                                    const BorderRadius.vertical(
-                                                      top: Radius.circular(12),
-                                                    ),
-                                                child: DecoratedBox(
-                                                  decoration: const BoxDecoration(
-                                                    color: Colors.black,
-                                                  ),
-                                                  child: Video(
-                                                    controller: session.video,
-                                                    controls: NoVideoControls,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                            Padding(
-                                              padding: const EdgeInsets.fromLTRB(
-                                                10,
-                                                edgePadding,
-                                                edgePadding,
-                                                edgePadding,
-                                              ),
-                                              child: Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: Column(
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        Text(
-                                                          session.title,
-                                                          maxLines: 1,
-                                                          overflow: TextOverflow
-                                                              .ellipsis,
-                                                          style: const TextStyle(
-                                                            fontWeight:
-                                                                FontWeight.w700,
+                          return LayoutBuilder(
+                            builder: (context, constraints) {
+                              const miniWidth = 360.0;
+                              const miniHeight = 255.0;
+                              const edgePadding = 8.0;
+                              final maxX = (constraints.maxWidth - miniWidth)
+                                  .clamp(0.0, double.infinity);
+                              final maxY = (miniHeight + 20.0).clamp(
+                                0.0,
+                                double.infinity,
+                              );
+                              final clampedOffset = Offset(
+                                pipMiniPlayerOffset.dx.clamp(0.0, maxX),
+                                pipMiniPlayerOffset.dy.clamp(0.0, maxY),
+                              );
+                              if (clampedOffset != pipMiniPlayerOffset) {
+                                pipMiniPlayerOffset = clampedOffset;
+                              }
+                              return SizedBox(
+                                width: double.infinity,
+                                height: miniHeight + 20,
+                                child: Stack(
+                                  children: [
+                                    Positioned(
+                                      left: clampedOffset.dx,
+                                      top: clampedOffset.dy,
+                                      child: GestureDetector(
+                                        onPanUpdate: (details) {
+                                          setState(() {
+                                            pipMiniPlayerOffset = Offset(
+                                              (pipMiniPlayerOffset.dx +
+                                                      details.delta.dx)
+                                                  .clamp(0.0, maxX),
+                                              (pipMiniPlayerOffset.dy +
+                                                      details.delta.dy)
+                                                  .clamp(0.0, maxY),
+                                            );
+                                          });
+                                        },
+                                        child: SizedBox(
+                                          width: miniWidth,
+                                          child: Card(
+                                            elevation: 10,
+                                            child: Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                AspectRatio(
+                                                  aspectRatio: 16 / 9,
+                                                  child: ClipRRect(
+                                                    borderRadius:
+                                                        const BorderRadius.vertical(
+                                                          top: Radius.circular(
+                                                            12,
                                                           ),
                                                         ),
-                                                        if (session.subtitle !=
-                                                                null &&
-                                                            session.subtitle!
-                                                                .trim()
-                                                                .isNotEmpty)
-                                                          Text(
-                                                            session.subtitle!,
-                                                            maxLines: 1,
-                                                            overflow:
-                                                                TextOverflow
-                                                                    .ellipsis,
-                                                            style:
-                                                                const TextStyle(
+                                                    child: DecoratedBox(
+                                                      decoration:
+                                                          const BoxDecoration(
+                                                            color: Colors.black,
+                                                          ),
+                                                      child: Video(
+                                                        controller:
+                                                            session.video,
+                                                        controls:
+                                                            NoVideoControls,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.fromLTRB(
+                                                        10,
+                                                        edgePadding,
+                                                        edgePadding,
+                                                        edgePadding,
+                                                      ),
+                                                  child: Row(
+                                                    children: [
+                                                      Expanded(
+                                                        child: Column(
+                                                          crossAxisAlignment:
+                                                              CrossAxisAlignment
+                                                                  .start,
+                                                          children: [
+                                                            Text(
+                                                              session.title,
+                                                              maxLines: 1,
+                                                              overflow:
+                                                                  TextOverflow
+                                                                      .ellipsis,
+                                                              style: const TextStyle(
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w700,
+                                                              ),
+                                                            ),
+                                                            if (session.subtitle !=
+                                                                    null &&
+                                                                session
+                                                                    .subtitle!
+                                                                    .trim()
+                                                                    .isNotEmpty)
+                                                              Text(
+                                                                session
+                                                                    .subtitle!,
+                                                                maxLines: 1,
+                                                                overflow:
+                                                                    TextOverflow
+                                                                        .ellipsis,
+                                                                style: const TextStyle(
                                                                   color: Colors
                                                                       .white70,
                                                                   fontSize: 12,
                                                                 ),
-                                                          ),
-                                                        const Text(
-                                                          'Drag mini player',
-                                                          style: TextStyle(
-                                                            color:
-                                                                Colors.white54,
-                                                            fontSize: 11,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                  IconButton(
-                                                    tooltip: 'Expand',
-                                                    onPressed: () async {
-                                                      final active =
-                                                          await PipPlaybackController
-                                                              .instance
-                                                              .beginExpand();
-                                                      if (active == null ||
-                                                          !context.mounted) {
-                                                        return;
-                                                      }
-                                                      await Navigator.of(
-                                                        context,
-                                                      ).push<void>(
-                                                        MaterialPageRoute<void>(
-                                                          builder: (_) =>
-                                                              _PipExpandedScreen(
-                                                                session: active,
                                                               ),
+                                                            const Text(
+                                                              'Drag mini player',
+                                                              style: TextStyle(
+                                                                color: Colors
+                                                                    .white54,
+                                                                fontSize: 11,
+                                                              ),
+                                                            ),
+                                                          ],
                                                         ),
-                                                      );
-                                                      PipPlaybackController
-                                                          .instance
-                                                          .endExpand();
-                                                    },
-                                                    icon: const Icon(
-                                                      Icons.open_in_full,
-                                                    ),
+                                                      ),
+                                                      IconButton(
+                                                        tooltip: 'Expand',
+                                                        onPressed: () async {
+                                                          final active =
+                                                              await PipPlaybackController
+                                                                  .instance
+                                                                  .beginExpand();
+                                                          if (active == null ||
+                                                              !context
+                                                                  .mounted) {
+                                                            return;
+                                                          }
+                                                          await Navigator.of(
+                                                            context,
+                                                          ).push<void>(
+                                                            MaterialPageRoute<
+                                                              void
+                                                            >(
+                                                              builder: (_) =>
+                                                                  _PipExpandedScreen(
+                                                                    session:
+                                                                        active,
+                                                                  ),
+                                                            ),
+                                                          );
+                                                          PipPlaybackController
+                                                              .instance
+                                                              .endExpand();
+                                                        },
+                                                        icon: const Icon(
+                                                          Icons.open_in_full,
+                                                        ),
+                                                      ),
+                                                      IconButton(
+                                                        tooltip:
+                                                            'Close mini player',
+                                                        onPressed: () => unawaited(
+                                                          PipPlaybackController
+                                                              .instance
+                                                              .close(),
+                                                        ),
+                                                        icon: const Icon(
+                                                          Icons.close,
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ),
-                                                  IconButton(
-                                                    tooltip: 'Close mini player',
-                                                    onPressed: () => unawaited(
-                                                      PipPlaybackController
-                                                          .instance
-                                                          .close(),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons.close,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
+                                                ),
+                                              ],
                                             ),
-                                          ],
+                                          ),
                                         ),
                                       ),
                                     ),
-                                  ),
+                                  ],
                                 ),
-                              ],
+                              );
+                            },
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      ValueListenableBuilder<AppUpdateView>(
+                        valueListenable: AppUpdates.instance.view,
+                        builder: (context, update, _) {
+                          final profile = SelectedProfileScope.maybeOf(context);
+                          bool canLeave() =>
+                              !AppUpdates.instance.view.value.busy &&
+                              !AppUpdates.instance.recoveryRequired &&
+                              !StoreJob.operationActive;
+                          return LauncherFooter(
+                            profileName: profile?.profile.name ?? 'Profile',
+                            onSwitchProfile: profile?.switchProfile,
+                            blocked:
+                                update.busy ||
+                                AppUpdates.instance.recoveryRequired ||
+                                StoreJob.operationActive ||
+                                (serviceLocked && page != 3),
+                            canLeave: canLeave,
+                            connection: ValueListenableBuilder<String>(
+                              valueListenable: DeviceConnection.instance.status,
+                              builder: (context, status, _) =>
+                                  OutlinedButton.icon(
+                                    key: const ValueKey('footer-connection'),
+                                    onPressed: !canLeave()
+                                        ? null
+                                        : () =>
+                                              Navigator.of(context).push<void>(
+                                                MaterialPageRoute<void>(
+                                                  builder: (_) =>
+                                                      const DeviceSetupScreen(),
+                                                ),
+                                              ),
+                                    icon: Icon(
+                                      DeviceConnection.instance.isConnected
+                                          ? Icons.cloud_done_outlined
+                                          : Icons.cloud_off_outlined,
+                                    ),
+                                    label: Text(
+                                      DeviceConnection.instance.isConnected
+                                          ? 'Connected'
+                                          : 'Disconnected',
+                                    ),
+                                  ),
+                            ),
+                            sleepChip: OutlinedButton.icon(
+                              key: const ValueKey('footer-sleep-timer'),
+                              onPressed: !canLeave()
+                                  ? null
+                                  : _openSleepModeModal,
+                              icon: const Icon(Icons.nightlight_round),
+                              label: const Text('Sleep sounds & timer'),
                             ),
                           );
                         },
-                      );
-                    },
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 10),
-                  ValueListenableBuilder<AppUpdateView>(
-                    valueListenable: AppUpdates.instance.view,
-                    builder: (context, update, _) {
-                      final profile = SelectedProfileScope.maybeOf(context);
-                      bool canLeave() =>
-                          !AppUpdates.instance.view.value.busy &&
-                          !AppUpdates.instance.recoveryRequired &&
-                          !StoreJob.operationActive;
-                      return LauncherFooter(
-                        profileName: profile?.profile.name ?? 'Profile',
-                        onSwitchProfile: profile?.switchProfile,
-                        blocked:
-                            update.busy ||
-                            AppUpdates.instance.recoveryRequired ||
-                            StoreJob.operationActive ||
-                            (serviceLocked && page != 3),
-                        canLeave: canLeave,
-                        connection: ValueListenableBuilder<String>(
-                          valueListenable: DeviceConnection.instance.status,
-                          builder: (context, status, _) => OutlinedButton.icon(
-                            key: const ValueKey('footer-connection'),
-                            onPressed: !canLeave()
-                                ? null
-                                : () => Navigator.of(context).push<void>(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => const DeviceSetupScreen(),
-                                    ),
-                                  ),
-                            icon: Icon(
-                              DeviceConnection.instance.isConnected
-                                  ? Icons.cloud_done_outlined
-                                  : Icons.cloud_off_outlined,
-                            ),
-                            label: Text(
-                              DeviceConnection.instance.isConnected
-                                  ? 'Connected'
-                                  : 'Disconnected',
-                            ),
-                          ),
-                        ),
-                        sleepChip: OutlinedButton.icon(
-                          key: const ValueKey('footer-sleep-timer'),
-                          onPressed: !canLeave() ? null : _openSleepModeModal,
-                          icon: const Icon(Icons.nightlight_round),
-                          label: const Text('Sleep sounds & timer'),
-                        ),
-                      );
-                    },
-                  ),
-                ],
+                ),
               ),
             ),
-          ),
+            showWelcomeSplash
+                ? Positioned.fill(child: _welcomeOverlay(activeProfileName))
+                : const SizedBox.shrink(),
+            !showWelcomeSplash && showLoginActionOverlay
+                ? Positioned.fill(child: _loginActionOverlay())
+                : const SizedBox.shrink(),
+          ],
         ),
       ),
     );

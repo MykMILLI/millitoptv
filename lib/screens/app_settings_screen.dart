@@ -6,13 +6,12 @@ import 'package:flutter/material.dart';
 import '../services/firefox_browser.dart';
 import '../services/web_app_catalog.dart';
 import '../services/web_app_definition.dart';
-import '../services/native_app_launcher.dart';
 import '../services/device_connection.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_source.dart';
 import '../services/playback_performance.dart';
+import '../theme/millitop_visual_theme.dart';
 import 'gallery_panel.dart';
-import 'live_tv_screen.dart';
 import 'music_screen.dart';
 
 Future<void> editWebApp(
@@ -182,6 +181,8 @@ class AppSettingsScreen extends StatefulWidget {
   State<AppSettingsScreen> createState() => _AppSettingsScreenState();
 }
 
+enum _SettingsSection { general, tvMovies, music, websites, advanced }
+
 class _AppSettingsScreenState extends State<AppSettingsScreen> {
   final catalog = WebAppCatalog.instance;
   final liveTvControl = LiveTvControlService();
@@ -189,7 +190,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   String error = '', exe = 'Not checked';
   bool busy = false;
   bool familyMoments = true;
+  int sleepQuickMinutes = 45;
+  _SettingsSection section = _SettingsSection.general;
   String tmdbApiKey = '';
+  MillitopThemeId visualTheme = MillitopThemeId.auroraGlass;
+  Map<String, dynamic> subtitleProviderSettings = const {};
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
   @override
@@ -248,6 +253,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       final values = await catalog.load(widget.profileId, includeHidden: true);
       final visible = await HomePreferences().familyMoments(widget.profileId);
       final key = await HomePreferences().tmdbApiKey(widget.profileId);
+      final themeId = MillitopThemeController.fromStorage(
+        await HomePreferences().visualTheme(widget.profileId),
+      );
+      final subtitleProviders = await HomePreferences()
+          .subtitleProviderSettings(widget.profileId);
       final performance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
@@ -256,6 +266,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           apps = values;
           familyMoments = visible;
           tmdbApiKey = key;
+          visualTheme = themeId;
+          subtitleProviderSettings = subtitleProviders;
           playbackPerformance = performance;
         });
       }
@@ -320,6 +332,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     if (!mounted) {
                       return;
                     }
+
                     setState(() => tmdbApiKey = '');
                     if (ctx.mounted) {
                       Navigator.pop(ctx);
@@ -371,6 +384,252 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       );
     } finally {
       input.dispose();
+    }
+  }
+
+  Future<void> _editVisualTheme() async {
+    MillitopThemeId draft = visualTheme;
+    String localError = '';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Visual theme'),
+          content: SizedBox(
+            width: 620,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Themes restyle and re-layout MILLITOP TV across screens.',
+                ),
+                const SizedBox(height: 14),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 360),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final spec in MillitopThemeController.themes)
+                        ListTile(
+                          leading: Icon(
+                            draft == spec.id
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_off,
+                          ),
+                          title: Text(spec.label),
+                          subtitle: Text(spec.summary),
+                          onTap: () => setLocal(() => draft = spec.id),
+                        ),
+                    ],
+                  ),
+                ),
+                if (localError.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    localError,
+                    style: const TextStyle(color: Colors.orangeAccent),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  await HomePreferences().setVisualTheme(
+                    widget.profileId,
+                    MillitopThemeController.toStorage(draft),
+                  );
+                  MillitopThemeController.instance.setTheme(draft);
+                  if (!mounted) {
+                    return;
+                  }
+                  setState(() => visualTheme = draft);
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                } catch (error) {
+                  if (ctx.mounted) {
+                    setLocal(() => localError = '$error');
+                  }
+                }
+              },
+              child: const Text('Apply theme'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editSubtitleProviders() async {
+    final opensubsApi = TextEditingController(
+      text: subtitleProviderSettings['openSubtitlesApiKey']?.toString() ?? '',
+    );
+    final opensubsUser = TextEditingController(
+      text: subtitleProviderSettings['openSubtitlesUsername']?.toString() ?? '',
+    );
+    final opensubsPass = TextEditingController(
+      text: subtitleProviderSettings['openSubtitlesPassword']?.toString() ?? '',
+    );
+    final subdlApi = TextEditingController(
+      text: subtitleProviderSettings['subdlApiKey']?.toString() ?? '',
+    );
+    final translateEndpoint = TextEditingController(
+      text:
+          subtitleProviderSettings['translateEndpoint']?.toString() ??
+          'https://libretranslate.com/translate',
+    );
+    final translateApi = TextEditingController(
+      text: subtitleProviderSettings['translateApiKey']?.toString() ?? '',
+    );
+    String localError = '';
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setLocal) => AlertDialog(
+            title: const Text('Subtitle providers'),
+            content: SizedBox(
+              width: 620,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Configure OpenSubtitles (primary), SubDL (secondary), and LibreTranslate translation endpoint.',
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: opensubsApi,
+                      decoration: const InputDecoration(
+                        labelText: 'OpenSubtitles API key',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: opensubsUser,
+                      decoration: const InputDecoration(
+                        labelText: 'OpenSubtitles username',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: opensubsPass,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'OpenSubtitles password',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: subdlApi,
+                      decoration: const InputDecoration(
+                        labelText: 'SubDL API key (optional)',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: translateEndpoint,
+                      decoration: const InputDecoration(
+                        labelText: 'LibreTranslate endpoint',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: translateApi,
+                      decoration: const InputDecoration(
+                        labelText: 'LibreTranslate API key (optional)',
+                      ),
+                    ),
+                    if (localError.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        localError,
+                        style: const TextStyle(color: Colors.orangeAccent),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  try {
+                    await HomePreferences().saveSubtitleProviderSettings(
+                      widget.profileId,
+                      const {},
+                    );
+                    await _syncLiveTvConfig();
+                    if (!mounted) {
+                      return;
+                    }
+                    setState(() => subtitleProviderSettings = const {});
+                    if (ctx.mounted) {
+                      Navigator.pop(ctx);
+                    }
+                  } catch (e) {
+                    if (ctx.mounted) {
+                      setLocal(() => localError = e.toString());
+                    }
+                  }
+                },
+                child: const Text('Clear'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  final next = <String, dynamic>{
+                    'openSubtitlesApiKey': opensubsApi.text.trim(),
+                    'openSubtitlesUsername': opensubsUser.text.trim(),
+                    'openSubtitlesPassword': opensubsPass.text.trim(),
+                    'subdlApiKey': subdlApi.text.trim(),
+                    'translateEndpoint': translateEndpoint.text.trim(),
+                    'translateApiKey': translateApi.text.trim(),
+                  };
+                  try {
+                    await HomePreferences().saveSubtitleProviderSettings(
+                      widget.profileId,
+                      next,
+                    );
+                    await _syncLiveTvConfig();
+                    if (!mounted) {
+                      return;
+                    }
+                    setState(() => subtitleProviderSettings = next);
+                    if (ctx.mounted) {
+                      Navigator.pop(ctx);
+                    }
+                  } catch (e) {
+                    if (ctx.mounted) {
+                      setLocal(() => localError = e.toString());
+                    }
+                  }
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      opensubsApi.dispose();
+      opensubsUser.dispose();
+      opensubsPass.dispose();
+      subdlApi.dispose();
+      translateEndpoint.dispose();
+      translateApi.dispose();
     }
   }
 
@@ -620,18 +879,149 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Settings')),
-    body: ListView(
-      padding: const EdgeInsets.all(28),
-      children: [
-        SleepModePanel(profileId: widget.profileId),
-        SwitchListTile(
-          title: const Text('Show Family Moments on Home'),
-          subtitle: const Text(
-            'Hiding the card does not remove gallery folders or slideshow settings.',
+  Future<void> _openSleepPanel() async {
+    final tokens = context.millitopTheme;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: tokens.panelColor,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(tokens.cardRadius + 2),
+        ),
+      ),
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: 16 + MediaQuery.of(context).viewInsets.bottom,
           ),
+          child: SleepModePanel(profileId: widget.profileId),
+        ),
+      ),
+    );
+  }
+
+  Widget _settingsCard({required Widget child}) {
+    final tokens = context.millitopTheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: tokens.panelColor.withAlpha(130),
+        borderRadius: BorderRadius.circular(tokens.cardRadius),
+        border: Border.all(color: tokens.panelBorder.withAlpha(128)),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _sectionButton({
+    required _SettingsSection value,
+    required String label,
+    required IconData icon,
+  }) {
+    final tokens = context.millitopTheme;
+    final selected = section == value;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextButton.icon(
+        onPressed: () => setState(() => section = value),
+        style: TextButton.styleFrom(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          backgroundColor: selected ? tokens.accentColor : null,
+          foregroundColor: selected
+              ? Theme.of(context).colorScheme.onPrimary
+              : tokens.mutedColor,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(999),
+          ),
+        ),
+        icon: Icon(icon),
+        label: Text(label),
+      ),
+    );
+  }
+
+  Widget _generalSection() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Text(
+        'General',
+        style: TextStyle(fontSize: 38, fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        'Make Millitop feel right for you.',
+        style: TextStyle(color: Colors.white70),
+      ),
+      const SizedBox(height: 18),
+      _settingsCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.nightlight_round,
+                  color: context.millitopTheme.accentColor,
+                ),
+                SizedBox(width: 10),
+                Text(
+                  'Sleep timer',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Stop watching after a set time. Keep your sleep sounds playing.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final minutes in [15, 30, 45, 60])
+                  ChoiceChip(
+                    label: Text('$minutes min'),
+                    selected: sleepQuickMinutes == minutes,
+                    onSelected: (_) =>
+                        setState(() => sleepQuickMinutes = minutes),
+                  ),
+                OutlinedButton(
+                  onPressed: _openSleepPanel,
+                  child: const Text('Custom'),
+                ),
+                FilledButton(
+                  onPressed: _openSleepPanel,
+                  child: const Text('Start timer'),
+                ),
+              ],
+            ),
+            const Divider(height: 26),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.music_note_outlined),
+              title: const Text('Sleep sounds'),
+              subtitle: const Text('Choose something relaxing for bedtime.'),
+              trailing: OutlinedButton(
+                onPressed: _openSleepPanel,
+                child: const Text('Open sounds'),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 14),
+      _settingsCard(
+        child: SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Home screen'),
+          subtitle: const Text('Show Family Moments on Home.'),
           value: familyMoments,
           onChanged: (value) async {
             try {
@@ -649,11 +1039,77 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
             }
           },
         ),
-        const SizedBox(height: 28),
-        const Text('Live TV', style: TextStyle(fontSize: 28)),
-        const SizedBox(height: 10),
+      ),
+      const SizedBox(height: 14),
+      _settingsCard(
+        child: ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.palette_outlined),
+          title: const Text('Interface theme'),
+          subtitle: Text(
+            MillitopThemeController.themes
+                .firstWhere(
+                  (theme) => theme.id == visualTheme,
+                  orElse: () => MillitopThemeController.themes.first,
+                )
+                .label,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _editVisualTheme,
+        ),
+      ),
+      const SizedBox(height: 14),
+      _settingsCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Your entertainment',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Manage the services you use in Millitop.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 10),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.tv_outlined),
+              title: const Text('TV & movies'),
+              subtitle: const Text('Live channels, movies, and subtitles'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => setState(() => section = _SettingsSection.tvMovies),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.music_note_outlined),
+              title: const Text('Music'),
+              subtitle: const Text('Your library and music connection'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => setState(() => section = _SettingsSection.music),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.public_outlined),
+              title: const Text('Websites'),
+              subtitle: const Text('Add and organize your website shortcuts'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => setState(() => section = _SettingsSection.websites),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+
+  Widget _tvMoviesSection() => _settingsCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         const Text(
-          'Live TV opens inside Millitop with managed M3U or Xtream sources, channel groups, and search. Keep IPTVnator as a temporary fallback while testing.',
+          'TV & movies',
+          style: TextStyle(fontSize: 32, fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 12),
         ListTile(
@@ -667,48 +1123,46 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           trailing: const Icon(Icons.tune),
           onTap: _editPlaybackPerformance,
         ),
-        const SizedBox(height: 6),
         ListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('TMDB metadata key'),
           subtitle: Text(
             tmdbApiKey.isEmpty
-                ? 'Not configured. Add your key to enrich M3U Movies/Series metadata.'
+                ? 'Not configured.'
                 : 'Configured (${tmdbApiKey.length} chars).',
           ),
           trailing: const Icon(Icons.chevron_right),
           onTap: _editTmdbApiKey,
         ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 10,
-          runSpacing: 8,
-          children: [
-            FilledButton(
-              onPressed: () => Navigator.of(context).push<void>(
-                MaterialPageRoute<void>(
-                  builder: (_) => LiveTvScreen(profileId: widget.profileId),
-                ),
-              ),
-              child: const Text('Open native Live TV'),
-            ),
-            OutlinedButton(
-              onPressed: () => NativeAppLauncher.open(
-                context,
-                appKey: 'iptvnator',
-                title: 'IPTVnator',
-              ),
-              child: const Text('Open IPTVnator (legacy)'),
-            ),
-          ],
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Subtitle provider settings'),
+          subtitle: Text(
+            subtitleProviderSettings.isEmpty
+                ? 'Not configured.'
+                : 'Configured (${subtitleProviderSettings.keys.length} values).',
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _editSubtitleProviders,
         ),
-        const SizedBox(height: 28),
-        const Text('Music', style: TextStyle(fontSize: 28)),
-        const SizedBox(height: 10),
+      ],
+    ),
+  );
+
+  Widget _musicSection() => _settingsCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         const Text(
-          'Connect your Navidrome server for native music playback, stations, and profile parity sync.',
+          'Music',
+          style: TextStyle(fontSize: 32, fontWeight: FontWeight.w700),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 8),
+        const Text(
+          'Connect your Navidrome server for native music playback and profile sync.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        const SizedBox(height: 12),
         FilledButton(
           onPressed: () => Navigator.of(context).push<void>(
             MaterialPageRoute<void>(
@@ -717,15 +1171,21 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           ),
           child: const Text('Open Music'),
         ),
-        const SizedBox(height: 28),
-        const Text('Browser', style: TextStyle(fontSize: 28)),
-        const SizedBox(height: 10),
+      ],
+    ),
+  );
+
+  Widget _websitesSection() => _settingsCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         const Text(
-          'Website apps open in their own Firefox fullscreen app-style window. Closing that Millitop browser session returns here. This does not change the Windows default browser. Firefox, AdBlocker Ultimate and SponsorBlock are prepared automatically on first use. Browsing data is reused per profile. Personal Firefox is not changed.',
+          'Websites',
+          style: TextStyle(fontSize: 32, fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 10),
         SelectableText(exe),
-        const SizedBox(height: 10),
+        const SizedBox(height: 8),
         Wrap(
           spacing: 10,
           runSpacing: 8,
@@ -742,31 +1202,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               ),
               child: const Text('Manage Firefox extensions'),
             ),
-            TextButton(
-              onPressed: () => FirefoxBrowser.open(
-                context,
-                profileId: widget.profileId,
-                url:
-                    'https://addons.mozilla.org/firefox/addon/adblocker-ultimate/',
-              ),
-              child: const Text('AdBlocker Ultimate listing'),
-            ),
-            TextButton(
-              onPressed: () => FirefoxBrowser.open(
-                context,
-                profileId: widget.profileId,
-                url: 'https://addons.mozilla.org/firefox/addon/sponsorblock/',
-              ),
-              child: const Text('SponsorBlock listing'),
-            ),
           ],
         ),
-        const SizedBox(height: 28),
-        const Text('Web apps', style: TextStyle(fontSize: 28)),
-        const Text(
-          'Local names and URLs are per profile. Managed apps are read-only here and controlled by the dashboard.',
-        ),
-        const SizedBox(height: 12),
+        const Divider(height: 24),
         Wrap(
           spacing: 10,
           children: [
@@ -785,47 +1223,128 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         if (error.isNotEmpty)
           Text(error, style: const TextStyle(color: Colors.orangeAccent)),
         for (final app in apps)
-          Card(
-            child: ListTile(
-              leading: Icon(
-                app.managed
-                    ? Icons.admin_panel_settings_outlined
-                    : Icons.language,
-              ),
-              title: Text(
-                '${app.title}${app.enabled ? '' : ' (hidden)'}${app.managed ? ' · Managed' : ''}',
-              ),
-              subtitle: Text(app.url),
-              trailing: Wrap(
-                children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              app.managed
+                  ? Icons.admin_panel_settings_outlined
+                  : Icons.language,
+            ),
+            title: Text(
+              '${app.title}${app.enabled ? '' : ' (hidden)'}${app.managed ? ' · Managed' : ''}',
+            ),
+            subtitle: Text(app.url),
+            trailing: Wrap(
+              children: [
+                IconButton(
+                  onPressed: () => editWebApp(context, widget.profileId, app),
+                  icon: const Icon(Icons.settings),
+                  tooltip: app.managed ? 'Managed app details' : 'Edit app',
+                ),
+                if (!app.managed)
                   IconButton(
-                    onPressed: () => editWebApp(context, widget.profileId, app),
-                    icon: const Icon(Icons.settings),
-                    tooltip: app.managed ? 'Managed app details' : 'Edit app',
-                  ),
-                  if (!app.managed)
-                    IconButton(
-                      onPressed: () => _remove(app),
-                      icon: Icon(
-                        app.builtin ? Icons.restore : Icons.delete_outline,
-                      ),
-                      tooltip: app.builtin ? 'Restore defaults' : 'Remove app',
+                    onPressed: () => _remove(app),
+                    icon: Icon(
+                      app.builtin ? Icons.restore : Icons.delete_outline,
                     ),
-                ],
-              ),
+                    tooltip: app.builtin ? 'Restore defaults' : 'Remove app',
+                  ),
+              ],
             ),
           ),
-        const SizedBox(height: 28),
-        const Text('Gallery', style: TextStyle(fontSize: 28)),
-        ListTile(
-          title: const Text('Family folders and slideshow'),
-          subtitle: const Text(
-            'Choose folders, photo interval, videos, sound, shuffle and repeat.',
-          ),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => editGallerySettings(context, widget.profileId),
-        ),
       ],
     ),
   );
+
+  Widget _advancedSection() => _settingsCard(
+    child: ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: const Text('Family folders and slideshow'),
+      subtitle: const Text(
+        'Choose folders, photo interval, videos, sound, shuffle and repeat.',
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => editGallerySettings(context, widget.profileId),
+    ),
+  );
+
+  Widget _sectionContent() {
+    switch (section) {
+      case _SettingsSection.general:
+        return _generalSection();
+      case _SettingsSection.tvMovies:
+        return _tvMoviesSection();
+      case _SettingsSection.music:
+        return _musicSection();
+      case _SettingsSection.websites:
+        return _websitesSection();
+      case _SettingsSection.advanced:
+        return _advancedSection();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.millitopTheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: Row(
+        children: [
+          Container(
+            width: 220,
+            padding: const EdgeInsets.fromLTRB(16, 18, 16, 18),
+            decoration: BoxDecoration(
+              border: Border(right: BorderSide(color: tokens.panelBorder)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'MILLITOP',
+                  style: TextStyle(
+                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.w700,
+                    color: tokens.accentColor,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _sectionButton(
+                  value: _SettingsSection.general,
+                  label: 'General',
+                  icon: Icons.settings_outlined,
+                ),
+                _sectionButton(
+                  value: _SettingsSection.tvMovies,
+                  label: 'TV & movies',
+                  icon: Icons.tv_outlined,
+                ),
+                _sectionButton(
+                  value: _SettingsSection.music,
+                  label: 'Music',
+                  icon: Icons.music_note_outlined,
+                ),
+                _sectionButton(
+                  value: _SettingsSection.websites,
+                  label: 'Websites',
+                  icon: Icons.public_outlined,
+                ),
+                const Divider(height: 30),
+                _sectionButton(
+                  value: _SettingsSection.advanced,
+                  label: 'Advanced',
+                  icon: Icons.tune,
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(22),
+              children: [_sectionContent()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

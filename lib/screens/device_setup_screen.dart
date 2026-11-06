@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/device_connection.dart';
+import '../theme/millitop_visual_theme.dart';
 
 class DeviceSetupScreen extends StatefulWidget {
   const DeviceSetupScreen({super.key});
@@ -102,7 +103,7 @@ class _DeviceSetupScreenState extends State<DeviceSetupScreen> {
     return PopScope(
       canPop: !busy,
       child: Scaffold(
-        backgroundColor: const Color(0xFF0B1425),
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         appBar: AppBar(title: const Text('Device setup')),
         body: Center(
           child: SingleChildScrollView(
@@ -124,7 +125,7 @@ class _DeviceSetupScreenState extends State<DeviceSetupScreen> {
                         status,
                         style: TextStyle(
                           fontSize: statusSize,
-                          color: Color(0xFF63DFCB),
+                          color: context.millitopTheme.accentColor,
                         ),
                       ),
                       const SizedBox(height: 24),
