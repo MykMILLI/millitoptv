@@ -190,7 +190,7 @@ class WebAppCatalog extends ChangeNotifier {
     final overrides = await _overrides(profile);
     final local = <String, WebAppDefinition>{
       for (final a in builtinWebApps) a.id: a,
-      for (final a in overrides) a.id: a,
+      for (final a in overrides.where((a) => a.id != 'emby')) a.id: a,
     };
     final values = <WebAppDefinition>[
       ...local.values,

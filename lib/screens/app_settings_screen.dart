@@ -10,9 +10,10 @@ import '../services/device_connection.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_source.dart';
 import '../services/playback_performance.dart';
+import '../services/shared_family_album_service.dart';
 import '../theme/millitop_visual_theme.dart';
-import 'gallery_panel.dart';
 import 'music_screen.dart';
+import 'media_library_home.dart';
 
 Future<void> editWebApp(
   BuildContext context,
@@ -181,18 +182,20 @@ class AppSettingsScreen extends StatefulWidget {
   State<AppSettingsScreen> createState() => _AppSettingsScreenState();
 }
 
-enum _SettingsSection { general, tvMovies, music, websites, advanced }
+enum _SettingsSection { general, tvMovies, music, websites }
 
 class _AppSettingsScreenState extends State<AppSettingsScreen> {
+  static const bool _sharedFamilyAlbumEnabled = false;
   final catalog = WebAppCatalog.instance;
   final liveTvControl = LiveTvControlService();
   List<WebAppDefinition> apps = [];
   String error = '', exe = 'Not checked';
   bool busy = false;
-  bool familyMoments = true;
   int sleepQuickMinutes = 45;
   _SettingsSection section = _SettingsSection.general;
   String tmdbApiKey = '';
+  SharedFamilyAlbumSettings sharedFamilyAlbumSettings =
+      const SharedFamilyAlbumSettings();
   MillitopThemeId visualTheme = MillitopThemeId.auroraGlass;
   Map<String, dynamic> subtitleProviderSettings = const {};
   PlaybackPerformanceSettings playbackPerformance =
@@ -251,7 +254,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     try {
       await _pullRemoteLiveTvConfig();
       final values = await catalog.load(widget.profileId, includeHidden: true);
-      final visible = await HomePreferences().familyMoments(widget.profileId);
       final key = await HomePreferences().tmdbApiKey(widget.profileId);
       final themeId = MillitopThemeController.fromStorage(
         await HomePreferences().visualTheme(widget.profileId),
@@ -261,11 +263,14 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       final performance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
+      final sharedFamilyAlbum = await HomePreferences().sharedFamilyAlbumSettings(
+        widget.profileId,
+      );
       if (mounted) {
         setState(() {
           apps = values;
-          familyMoments = visible;
           tmdbApiKey = key;
+          sharedFamilyAlbumSettings = sharedFamilyAlbum;
           visualTheme = themeId;
           subtitleProviderSettings = subtitleProviders;
           playbackPerformance = performance;
@@ -385,6 +390,329 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     } finally {
       input.dispose();
     }
+  }
+
+  Future<void> _editSharedFamilyAlbum() async {
+    var draft = sharedFamilyAlbumSettings;
+    final proxy = TextEditingController(text: draft.proxyUrl);
+    final host = TextEditingController(text: draft.serverUrl);
+    final key = TextEditingController(text: draft.apiKey);
+    final seconds = TextEditingController(text: draft.seconds.toString());
+    final manualAlbumIds = TextEditingController(
+      text: draft.albumIds.join(','),
+    );
+    var loadingAlbums = false;
+    var albums = <SharedFamilyAlbumInfo>[];
+    var localError = '';
+    Future<void> loadAlbums(StateSetter setLocal) async {
+      final currentHost = host.text.trim();
+      final currentKey = key.text.trim();
+      if (currentHost.isEmpty || currentKey.isEmpty) {
+        setLocal(() => localError = 'Enter host and API key first.');
+        return;
+      }
+      setLocal(() {
+        loadingAlbums = true;
+        localError = '';
+      });
+      try {
+        albums = await const SharedFamilyAlbumService().albums(
+          proxyUrl: proxy.text.trim(),
+          host: currentHost,
+          apiKey: currentKey,
+        );
+        if (albums.isEmpty) {
+          setLocal(
+            () => localError = proxy.text.trim().isEmpty
+                ? 'No albums found. Check credentials, permissions, or add Proxy URL.'
+                : 'No albums found. Check proxy, credentials, and album permissions.',
+          );
+        }
+      } catch (e) {
+        setLocal(
+          () => localError = e.toString().replaceFirst('FormatException: ', ''),
+        );
+      } finally {
+        setLocal(() => loadingAlbums = false);
+      }
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Shared Family Album'),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Set up Immich to show a Home slideshow. If these settings are empty, nothing appears on Home.',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: proxy,
+                    autocorrect: false,
+                    onChanged: (_) => setLocal(() => localError = ''),
+                    decoration: const InputDecoration(
+                      labelText: 'Proxy URL (Flask backend)',
+                      hintText: 'https://dashboard.example.com',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: host,
+                    autocorrect: false,
+                    onChanged: (_) => setLocal(() => localError = ''),
+                    decoration: const InputDecoration(
+                      labelText: 'Immich host (external URL)',
+                      hintText: 'https://immich.example.com',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: key,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    onChanged: (_) => setLocal(() => localError = ''),
+                    decoration: const InputDecoration(labelText: 'Immich API key'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: seconds,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Slide duration (seconds)',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: draft.shuffle,
+                          onChanged: (value) {
+                            setLocal(() => draft = draft.copy(shuffle: value));
+                          },
+                          title: const Text('Shuffle'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: draft.enabled,
+                    onChanged: (value) {
+                      setLocal(() => draft = draft.copy(enabled: value));
+                    },
+                    title: const Text('Enable on Home'),
+                  ),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: loadingAlbums
+                            ? null
+                            : () => unawaited(loadAlbums(setLocal)),
+                        icon: const Icon(Icons.refresh),
+                        label: Text(
+                          loadingAlbums ? 'Loading albums...' : 'Load albums',
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          draft.albumIds.isEmpty
+                              ? 'No album selected.'
+                              : 'Selected: ${draft.albumIds.length} album(s)',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (albums.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Albums to show on Home',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 4),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 220),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final album in albums)
+                            CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              value: draft.albumIds.contains(album.id),
+                              onChanged: (selected) {
+                                final ids = List<String>.from(draft.albumIds);
+                                final names = List<String>.from(draft.albumNames);
+                                if (selected == true) {
+                                  if (!ids.contains(album.id)) {
+                                    ids.add(album.id);
+                                    names.add(album.name);
+                                  }
+                                } else {
+                                  final removeIndex = ids.indexOf(album.id);
+                                  if (removeIndex >= 0) {
+                                    ids.removeAt(removeIndex);
+                                    if (removeIndex < names.length) {
+                                      names.removeAt(removeIndex);
+                                    } else {
+                                      names.remove(album.name);
+                                    }
+                                  }
+                                }
+                                setLocal(
+                                  () => draft = draft.copy(
+                                    albumIds: ids,
+                                    albumNames: names,
+                                  ),
+                                );
+                              },
+                              title: Text('${album.name} (${album.assetCount})'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: manualAlbumIds,
+                    minLines: 1,
+                    maxLines: 3,
+                    onChanged: (_) => setLocal(() => localError = ''),
+                    decoration: const InputDecoration(
+                      labelText: 'Album IDs (manual fallback)',
+                      hintText: 'comma or newline separated album IDs',
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'If album loading times out, paste album IDs manually and save.',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  if (localError.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      localError,
+                      style: const TextStyle(color: Colors.orangeAccent),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await HomePreferences().saveSharedFamilyAlbumSettings(
+                  widget.profileId,
+                  const SharedFamilyAlbumSettings(),
+                );
+                if (!mounted) {
+                  return;
+                }
+                setState(
+                  () => sharedFamilyAlbumSettings =
+                      const SharedFamilyAlbumSettings(),
+                );
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                }
+              },
+              child: const Text('Clear'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final parsedSeconds =
+                    int.tryParse(seconds.text.trim()) ?? draft.seconds;
+                final parsedAlbumIds = manualAlbumIds.text
+                    .split(RegExp(r'[,\n]'))
+                    .map((entry) => entry.trim())
+                    .where((entry) => entry.isNotEmpty)
+                    .toList();
+                final resolvedIds = parsedAlbumIds.isEmpty
+                    ? draft.albumIds
+                    : parsedAlbumIds;
+                if (resolvedIds.isEmpty) {
+                  setLocal(
+                    () => localError =
+                        'Select at least one album or paste album IDs manually.',
+                  );
+                  return;
+                }
+                final nameById = <String, String>{
+                  for (final album in albums) album.id: album.name,
+                };
+                final resolvedNames = <String>[];
+                for (final id in resolvedIds) {
+                  final loadedName = nameById[id];
+                  if (loadedName != null && loadedName.isNotEmpty) {
+                    resolvedNames.add(loadedName);
+                    continue;
+                  }
+                  final previousIndex = draft.albumIds.indexOf(id);
+                  if (previousIndex >= 0 && previousIndex < draft.albumNames.length) {
+                    resolvedNames.add(draft.albumNames[previousIndex]);
+                    continue;
+                  }
+                  resolvedNames.add(id);
+                }
+                final next = draft.copy(
+                  proxyUrl: proxy.text.trim(),
+                  serverUrl: host.text.trim(),
+                  apiKey: key.text.trim(),
+                  albumIds: resolvedIds,
+                  albumNames: resolvedNames,
+                  seconds: parsedSeconds.clamp(3, 60),
+                );
+                try {
+                  await HomePreferences().saveSharedFamilyAlbumSettings(
+                    widget.profileId,
+                    next,
+                  );
+                  if (!mounted) {
+                    return;
+                  }
+                  setState(() => sharedFamilyAlbumSettings = next);
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                } catch (e) {
+                  setLocal(
+                    () => localError = e.toString().replaceFirst(
+                      'FormatException: ',
+                      '',
+                    ),
+                  );
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    host.dispose();
+    proxy.dispose();
+    key.dispose();
+    seconds.dispose();
+    manualAlbumIds.dispose();
   }
 
   Future<void> _editVisualTheme() async {
@@ -913,7 +1241,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         borderRadius: BorderRadius.circular(tokens.cardRadius),
         border: Border.all(color: tokens.panelBorder.withAlpha(128)),
       ),
-      child: child,
+      child: Material(type: MaterialType.transparency, child: child),
     );
   }
 
@@ -969,10 +1297,12 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                   color: context.millitopTheme.accentColor,
                 ),
                 SizedBox(width: 10),
-                Text(
+                Expanded(child: Text(
                   'Sleep timer',
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-                ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                )),
               ],
             ),
             const SizedBox(height: 8),
@@ -1008,36 +1338,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               leading: const Icon(Icons.music_note_outlined),
               title: const Text('Sleep sounds'),
               subtitle: const Text('Choose something relaxing for bedtime.'),
-              trailing: OutlinedButton(
-                onPressed: _openSleepPanel,
-                child: const Text('Open sounds'),
-              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _openSleepPanel,
             ),
           ],
-        ),
-      ),
-      const SizedBox(height: 14),
-      _settingsCard(
-        child: SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('Home screen'),
-          subtitle: const Text('Show Family Moments on Home.'),
-          value: familyMoments,
-          onChanged: (value) async {
-            try {
-              await HomePreferences().setFamilyMoments(widget.profileId, value);
-              await _syncLiveTvConfig();
-              if (mounted) {
-                setState(() => familyMoments = value);
-              }
-            } catch (_) {
-              if (mounted) {
-                setState(
-                  () => error = 'Could not save Family Moments preference.',
-                );
-              }
-            }
-          },
         ),
       ),
       const SizedBox(height: 14),
@@ -1073,6 +1377,23 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               style: TextStyle(color: Colors.white70),
             ),
             const SizedBox(height: 10),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.folder_outlined),
+              title: const Text('Files'),
+              subtitle: const Text('Manage your folders and browse local or network media'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => Scaffold(
+                    appBar: AppBar(title: const Text('Files')),
+                    body: SingleChildScrollView(
+                      child: MediaLibraryHome(profileId: widget.profileId),
+                    ),
+                  ),
+                ),
+              ),
+            ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.tv_outlined),
@@ -1145,6 +1466,19 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           trailing: const Icon(Icons.chevron_right),
           onTap: _editSubtitleProviders,
         ),
+        // Shared Family Album temporarily disabled.
+        if (_sharedFamilyAlbumEnabled)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Shared Family Album slideshow'),
+            subtitle: Text(
+              !sharedFamilyAlbumSettings.isConfigured
+                  ? 'Disabled until host, API key, and album are set.'
+                  : 'Enabled for ${sharedFamilyAlbumSettings.albumIds.length} album(s).',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _editSharedFamilyAlbum,
+          ),
       ],
     ),
   );
@@ -1256,18 +1590,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     ),
   );
 
-  Widget _advancedSection() => _settingsCard(
-    child: ListTile(
-      contentPadding: EdgeInsets.zero,
-      title: const Text('Family folders and slideshow'),
-      subtitle: const Text(
-        'Choose folders, photo interval, videos, sound, shuffle and repeat.',
-      ),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => editGallerySettings(context, widget.profileId),
-    ),
-  );
-
   Widget _sectionContent() {
     switch (section) {
       case _SettingsSection.general:
@@ -1278,8 +1600,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         return _musicSection();
       case _SettingsSection.websites:
         return _websitesSection();
-      case _SettingsSection.advanced:
-        return _advancedSection();
     }
   }
 
@@ -1288,7 +1608,41 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     final tokens = context.millitopTheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
-      body: Row(
+      body: LayoutBuilder(builder: (context, constraints) {
+        if (constraints.maxWidth < 700) {
+          return SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: DropdownButtonFormField<_SettingsSection>(
+                    initialValue: section,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: 'Settings category'),
+                    items: const [
+                      DropdownMenuItem(value: _SettingsSection.general, child: Text('General')),
+                      DropdownMenuItem(value: _SettingsSection.tvMovies, child: Text('TV & movies')),
+                      DropdownMenuItem(value: _SettingsSection.music, child: Text('Music')),
+                      DropdownMenuItem(value: _SettingsSection.websites, child: Text('Websites')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => section = value);
+                      }
+                    },
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [_sectionContent()],
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+        return Row(
         children: [
           Container(
             width: 220,
@@ -1296,8 +1650,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
             decoration: BoxDecoration(
               border: Border(right: BorderSide(color: tokens.panelBorder)),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+            child: ListView(
+              padding: EdgeInsets.zero,
               children: [
                 Text(
                   'MILLITOP',
@@ -1328,12 +1682,6 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                   label: 'Websites',
                   icon: Icons.public_outlined,
                 ),
-                const Divider(height: 30),
-                _sectionButton(
-                  value: _SettingsSection.advanced,
-                  label: 'Advanced',
-                  icon: Icons.tune,
-                ),
               ],
             ),
           ),
@@ -1344,7 +1692,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
             ),
           ),
         ],
-      ),
+        );
+      }),
     );
   }
 }

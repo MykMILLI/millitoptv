@@ -3,12 +3,12 @@ import 'services/sleep_mode.dart';
 import 'services/home_preferences.dart';
 import 'screens/sleep_mode_panel.dart';
 import 'screens/home_app_tiles.dart';
-import 'screens/gallery_panel.dart';
 import 'screens/app_settings_screen.dart';
 import 'screens/customer_account_panel.dart';
 import 'services/web_app_catalog.dart';
 import 'widgets/launcher_footer.dart';
 import 'screens/media_library_home.dart';
+import 'screens/playlists_screen.dart';
 import 'store/store_job.dart';
 import 'services/app_updates.dart';
 import 'screens/app_update_overlay.dart';
@@ -21,10 +21,15 @@ import 'services/live_tv_control.dart';
 import 'screens/device_setup_screen.dart';
 import 'profiles/profile_gate.dart';
 import 'services/pip_playback.dart';
+import 'services/music_mini_player.dart';
 import 'services/audio_background_service.dart';
 import 'services/deep_link_service.dart';
 import 'services/platform_shortcuts_service.dart';
+import 'services/shared_family_album_service.dart';
 import 'screens/music_screen.dart';
+import 'screens/podcasts_screen.dart';
+import 'services/podcast_playback.dart';
+import 'widgets/podcast_player_bar.dart';
 import 'screens/live_tv_screen.dart';
 import 'theme/millitop_visual_theme.dart';
 
@@ -34,7 +39,9 @@ import 'package:window_manager/window_manager.dart';
 
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'widgets/rotating_welcome_message.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 Future<void> main() async {
@@ -368,14 +375,16 @@ class Launcher extends StatefulWidget {
   State<Launcher> createState() => _LauncherState();
 }
 
-class _LauncherState extends State<Launcher> {
-  final pages = ['Home', 'Files', 'DVR', 'Account', 'Gallery', 'Updates'];
+class _LauncherState extends State<Launcher>
+    with SingleTickerProviderStateMixin {
+  static const bool _sharedFamilyAlbumEnabled = false;
+  final pages = ['Home', 'Playlists', 'DVR', 'Account', 'Updates'];
   final liveTvControl = LiveTvControlService();
   int page = 0;
   DateTime now = DateTime.now();
   Timer? clock;
   Timer? serviceAccessPoll;
-  bool familyMoments = true;
+  late final AnimationController musicMiniSpinController;
   bool serviceLocked = false;
   String serviceLockReason = '';
   Offset pipMiniPlayerOffset = const Offset(0, 0);
@@ -385,13 +394,26 @@ class _LauncherState extends State<Launcher> {
   Timer? welcomeRemoveTimer;
   bool showWelcomeSplash = true;
   bool welcomeVisible = true;
+  int welcomeSayingIndex = RotatingWelcomeMessage.nextInitialIndex();
   bool showLoginActionOverlay = false;
+  bool showMusicMiniQueuePanel = false;
+  final TextEditingController musicMiniSearch = TextEditingController();
   DateTime? loginPromptSnoozeUntilUtc;
   bool loginOverlayDismissed = false;
+  SharedFamilyAlbumSettings sharedFamilyAlbumSettings =
+      const SharedFamilyAlbumSettings();
+  List<SharedFamilyAsset> sharedFamilyAssets = const [];
+  int sharedFamilyIndex = 0;
+  bool sharedFamilyPlaying = true;
+  bool sharedFamilyVideoMuted = true;
+  String? sharedFamilyStatus;
+  Timer? sharedFamilyTimer;
+  Player? sharedFamilyPlayer;
+  VideoController? sharedFamilyVideoController;
+  final List<StreamSubscription<dynamic>> sharedFamilySubscriptions = [];
   Future<void> _loadHomePreferences() async {
     try {
       final prefs = HomePreferences();
-      final visible = await prefs.familyMoments(widget.profileId);
       await prefs.setLastActiveProfileId(widget.profileId);
       final savedThemeId = MillitopThemeController.fromStorage(
         await prefs.visualTheme(widget.profileId),
@@ -399,9 +421,20 @@ class _LauncherState extends State<Launcher> {
       loginPromptSnoozeUntilUtc = await prefs.launcherPromptSnoozeUntil(
         widget.profileId,
       );
+      if (_sharedFamilyAlbumEnabled) {
+        sharedFamilyAlbumSettings = await prefs.sharedFamilyAlbumSettings(
+          widget.profileId,
+        );
+      }
       MillitopThemeController.instance.setTheme(savedThemeId);
+      if (_sharedFamilyAlbumEnabled) {
+        await _refreshSharedFamilyAssets();
+      } else {
+        sharedFamilyAssets = const [];
+        sharedFamilyStatus = null;
+      }
       if (mounted) {
-        setState(() => familyMoments = visible);
+        setState(() {});
         _evaluateLoginActionOverlay();
       }
     } catch (_) {}
@@ -410,6 +443,11 @@ class _LauncherState extends State<Launcher> {
   @override
   void initState() {
     super.initState();
+    musicMiniSpinController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    );
+    MusicMiniPlayerService.instance.addListener(_onMusicMiniStateChanged);
     unawaited(_loadHomePreferences());
     DeviceConnection.instance.status.addListener(_onConnectionStatusChanged);
     unawaited(_refreshServiceAccess());
@@ -440,16 +478,327 @@ class _LauncherState extends State<Launcher> {
   }
 
   @override
+  void didUpdateWidget(covariant Launcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.profileId != widget.profileId) {
+      welcomeSayingIndex = RotatingWelcomeMessage.nextInitialIndex();
+      unawaited(_loadHomePreferences());
+    }
+  }
+
+  @override
   void dispose() {
+    if (PodcastPlayback.instance.profileId == widget.profileId) {
+      unawaited(
+        PodcastPlayback.instance.stop().catchError((Object error) {
+          debugPrint('Could not stop podcasts when leaving profile: $error');
+        }),
+      );
+    }
+    MusicMiniPlayerService.instance.removeListener(_onMusicMiniStateChanged);
+    musicMiniSpinController.dispose();
+    musicMiniSearch.dispose();
     clock?.cancel();
     serviceAccessPoll?.cancel();
     welcomeFadeTimer?.cancel();
     welcomeRemoveTimer?.cancel();
+    sharedFamilyTimer?.cancel();
+    for (final sub in sharedFamilySubscriptions) {
+      unawaited(sub.cancel());
+    }
+    sharedFamilySubscriptions.clear();
+    unawaited(sharedFamilyPlayer?.dispose());
     unawaited(shortcutSub?.cancel());
     unawaited(deepLinkSub?.cancel());
     RemoteInbox.instance.notices.removeListener(_onInboxUpdated);
     DeviceConnection.instance.status.removeListener(_onConnectionStatusChanged);
     super.dispose();
+  }
+
+  void _onMusicMiniStateChanged() {
+    final mini = MusicMiniPlayerService.instance;
+    if (mini.playing) {
+      if (!musicMiniSpinController.isAnimating) {
+        musicMiniSpinController.repeat();
+      }
+    } else {
+      musicMiniSpinController.stop();
+    }
+    if (!mini.visible && showMusicMiniQueuePanel && mounted) {
+      setState(() => showMusicMiniQueuePanel = false);
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _openMusicFromMiniPlayer() async {
+    MusicMiniPlayerService.instance.hideMini();
+    if (mounted) {
+      setState(() => showMusicMiniQueuePanel = false);
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => MusicScreen(profileId: widget.profileId),
+      ),
+    );
+  }
+
+  Map<String, String>? _sharedFamilyHeadersForUrl(String url) {
+    final parsed = Uri.tryParse(url);
+    final path = parsed?.path.toLowerCase() ?? '';
+    if (path.contains('/api/immich/assets/')) {
+      return null;
+    }
+    return {'x-api-key': sharedFamilyAlbumSettings.apiKey.trim()};
+  }
+
+  SharedFamilyAsset? get _activeSharedFamilyAsset =>
+      sharedFamilyAssets.isEmpty ? null : sharedFamilyAssets[sharedFamilyIndex];
+
+  Future<void> _ensureSharedFamilyPlayer() async {
+    if (sharedFamilyPlayer != null) {
+      return;
+    }
+    MediaKit.ensureInitialized();
+    final created = Player();
+    final controller = VideoController(created);
+    sharedFamilyPlayer = created;
+    sharedFamilyVideoController = controller;
+    sharedFamilySubscriptions.add(
+      created.stream.completed.listen((done) {
+        if (done) {
+          unawaited(_advanceSharedFamily(next: true));
+        }
+      }),
+    );
+    sharedFamilySubscriptions.add(
+      created.stream.error.listen((message) {
+        if (!mounted) {
+          return;
+        }
+        setState(
+          () => sharedFamilyStatus =
+              'Video could not play. Moving to the next item.',
+        );
+        unawaited(_advanceSharedFamily(next: true));
+      }),
+    );
+  }
+
+  void _scheduleSharedFamilyAdvance() {
+    sharedFamilyTimer?.cancel();
+    if (!sharedFamilyPlaying) {
+      return;
+    }
+    final active = _activeSharedFamilyAsset;
+    if (active == null || active.isVideo) {
+      return;
+    }
+    sharedFamilyTimer = Timer(
+      Duration(seconds: sharedFamilyAlbumSettings.seconds),
+      () => unawaited(_advanceSharedFamily(next: true)),
+    );
+  }
+
+  Future<void> _openSharedFamilyVideo(SharedFamilyAsset asset) async {
+    await _ensureSharedFamilyPlayer();
+    final player = sharedFamilyPlayer;
+    if (player == null) {
+      return;
+    }
+    await player.setVolume(sharedFamilyVideoMuted ? 0 : 100);
+    await player.open(
+      Media(
+        asset.playbackUrl,
+        httpHeaders: _sharedFamilyHeadersForUrl(asset.playbackUrl),
+      ),
+    );
+    if (!sharedFamilyPlaying) {
+      await player.pause();
+    }
+  }
+
+  Future<void> _prepareSharedFamilyActive() async {
+    final active = _activeSharedFamilyAsset;
+    sharedFamilyTimer?.cancel();
+    if (active == null) {
+      return;
+    }
+    if (active.isVideo) {
+      await _openSharedFamilyVideo(active);
+      return;
+    }
+    if (sharedFamilyPlayer != null) {
+      await sharedFamilyPlayer!.stop();
+    }
+    _scheduleSharedFamilyAdvance();
+    final nextIndex = sharedFamilyAssets.length <= 1
+        ? -1
+        : (sharedFamilyIndex + 1) % sharedFamilyAssets.length;
+    if (!mounted || nextIndex < 0) {
+      return;
+    }
+    final next = sharedFamilyAssets[nextIndex];
+    if (!next.isVideo) {
+      unawaited(
+        precacheImage(
+          NetworkImage(
+            next.thumbnailUrl,
+            headers: _sharedFamilyHeadersForUrl(next.thumbnailUrl),
+          ),
+          context,
+        ),
+      );
+    }
+  }
+
+  Future<void> _advanceSharedFamily({required bool next}) async {
+    if (sharedFamilyAssets.length <= 1) {
+      return;
+    }
+    final delta = next ? 1 : -1;
+    setState(() {
+      sharedFamilyIndex =
+          (sharedFamilyIndex + delta + sharedFamilyAssets.length) %
+          sharedFamilyAssets.length;
+      sharedFamilyStatus = null;
+    });
+    await _prepareSharedFamilyActive();
+  }
+
+  Future<void> _toggleSharedFamilyPlayPause() async {
+    final active = _activeSharedFamilyAsset;
+    if (active == null) {
+      return;
+    }
+    setState(() => sharedFamilyPlaying = !sharedFamilyPlaying);
+    if (active.isVideo) {
+      final player = sharedFamilyPlayer;
+      if (player == null) {
+        return;
+      }
+      if (sharedFamilyPlaying) {
+        await player.play();
+      } else {
+        await player.pause();
+      }
+      return;
+    }
+    _scheduleSharedFamilyAdvance();
+  }
+
+  Future<void> _toggleSharedFamilySound() async {
+    final player = sharedFamilyPlayer;
+    if (player == null) {
+      return;
+    }
+    setState(() => sharedFamilyVideoMuted = !sharedFamilyVideoMuted);
+    await player.setVolume(sharedFamilyVideoMuted ? 0 : 100);
+  }
+
+  Future<void> _refreshSharedFamilyAssets() async {
+    sharedFamilyTimer?.cancel();
+    if (!sharedFamilyAlbumSettings.isConfigured) {
+      if (sharedFamilyPlayer != null) {
+        await sharedFamilyPlayer!.stop();
+      }
+      if (mounted) {
+        setState(() {
+          sharedFamilyAssets = const [];
+          sharedFamilyIndex = 0;
+          sharedFamilyStatus = null;
+        });
+      }
+      return;
+    }
+    if (mounted) {
+      setState(() => sharedFamilyStatus = 'Loading Family slideshow...');
+    }
+    try {
+      final loaded = await const SharedFamilyAlbumService().assets(
+        proxyUrl: sharedFamilyAlbumSettings.proxyUrl,
+        host: sharedFamilyAlbumSettings.serverUrl,
+        apiKey: sharedFamilyAlbumSettings.apiKey,
+        albumIds: sharedFamilyAlbumSettings.albumIds,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (loaded.isEmpty) {
+        setState(() {
+          sharedFamilyAssets = const [];
+          sharedFamilyIndex = 0;
+          sharedFamilyStatus =
+              'No photos/videos found in the selected Immich album.';
+        });
+        return;
+      }
+      final ordered = List<SharedFamilyAsset>.from(loaded);
+      if (sharedFamilyAlbumSettings.shuffle) {
+        ordered.shuffle();
+      }
+      setState(() {
+        sharedFamilyAssets = ordered;
+        sharedFamilyIndex = 0;
+        sharedFamilyPlaying = true;
+        sharedFamilyVideoMuted = true;
+        sharedFamilyStatus = null;
+      });
+      await _prepareSharedFamilyActive();
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(
+        () => sharedFamilyStatus =
+            'Could not load Family slideshow. Check Immich host/key/album.',
+      );
+    }
+  }
+
+  Future<void> _openSharedFamilyFullscreen() async {
+    final active = _activeSharedFamilyAsset;
+    if (active == null) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog.fullscreen(
+        backgroundColor: Colors.black,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: active.isVideo
+                  ? (sharedFamilyVideoController == null
+                        ? const Center(child: CircularProgressIndicator())
+                        : Video(
+                            controller: sharedFamilyVideoController!,
+                            controls: NoVideoControls,
+                          ))
+                  : InteractiveViewer(
+                      child: Center(
+                        child: Image.network(
+                          active.originalUrl,
+                          headers: _sharedFamilyHeadersForUrl(
+                            active.originalUrl,
+                          ),
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+            ),
+            Positioned(
+              right: 16,
+              top: 16,
+              child: IconButton.filled(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _onInboxUpdated() {
@@ -717,7 +1066,7 @@ class _LauncherState extends State<Launcher> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Great to see you.',
+                welcomeSayings[welcomeSayingIndex],
                 style: TextStyle(fontSize: 22, color: muted),
               ),
             ],
@@ -734,6 +1083,149 @@ class _LauncherState extends State<Launcher> {
     );
   }
 
+  Widget _sharedFamilyCard({required bool compact}) {
+    final active = _activeSharedFamilyAsset;
+    final statusText = sharedFamilyStatus;
+    final controlsEnabled = active != null && sharedFamilyAssets.length > 1;
+    return card(
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            sharedFamilyAlbumSettings.albumLabel.isEmpty
+                ? 'Family Slideshow'
+                : sharedFamilyAlbumSettings.albumLabel,
+            style: TextStyle(
+              fontSize: compact ? 18 : 21,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 10),
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: DecoratedBox(
+                decoration: const BoxDecoration(color: Colors.black),
+                child: active == null
+                    ? Center(
+                        child: Text(
+                          statusText ??
+                              'Set Immich host, API key, and album in Settings.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: muted),
+                        ),
+                      )
+                    : Stack(
+                        children: [
+                          Positioned.fill(
+                            child: active.isVideo
+                                ? (sharedFamilyVideoController == null
+                                      ? const Center(
+                                          child: CircularProgressIndicator(),
+                                        )
+                                      : Video(
+                                          controller:
+                                              sharedFamilyVideoController!,
+                                          controls: NoVideoControls,
+                                        ))
+                                : Image.network(
+                                    active.thumbnailUrl,
+                                    fit: BoxFit.cover,
+                                    headers: _sharedFamilyHeadersForUrl(
+                                      active.thumbnailUrl,
+                                    ),
+                                    errorBuilder: (_, __, ___) => Center(
+                                      child: Text(
+                                        'Image unavailable',
+                                        style: TextStyle(color: muted),
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                          if (active.isVideo && sharedFamilyVideoMuted)
+                            Positioned(
+                              right: 10,
+                              bottom: 10,
+                              child: FilledButton.icon(
+                                onPressed: _toggleSharedFamilySound,
+                                icon: const Icon(Icons.volume_up),
+                                label: const Text('Play with sound'),
+                              ),
+                            ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            statusText ??
+                (active == null
+                    ? 'Not configured.'
+                    : '${active.type} • ${active.filename}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: muted),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              IconButton(
+                onPressed: controlsEnabled
+                    ? () => unawaited(_advanceSharedFamily(next: false))
+                    : null,
+                icon: const Icon(Icons.skip_previous),
+                tooltip: 'Previous',
+              ),
+              IconButton.filled(
+                onPressed: active == null
+                    ? null
+                    : () => unawaited(_toggleSharedFamilyPlayPause()),
+                icon: Icon(
+                  sharedFamilyPlaying ? Icons.pause : Icons.play_arrow,
+                ),
+                tooltip: sharedFamilyPlaying ? 'Pause' : 'Play',
+              ),
+              IconButton(
+                onPressed: controlsEnabled
+                    ? () => unawaited(_advanceSharedFamily(next: true))
+                    : null,
+                icon: const Icon(Icons.skip_next),
+                tooltip: 'Next',
+              ),
+              IconButton(
+                onPressed: active == null
+                    ? null
+                    : () => unawaited(_refreshSharedFamilyAssets()),
+                icon: const Icon(Icons.shuffle),
+                tooltip: 'Shuffle now',
+              ),
+              IconButton(
+                onPressed: active == null
+                    ? null
+                    : () => unawaited(_toggleSharedFamilySound()),
+                icon: Icon(
+                  sharedFamilyVideoMuted ? Icons.volume_off : Icons.volume_up,
+                ),
+                tooltip: 'Toggle sound',
+              ),
+              IconButton(
+                onPressed: active == null
+                    ? null
+                    : () => unawaited(_openSharedFamilyFullscreen()),
+                icon: const Icon(Icons.fullscreen),
+                tooltip: 'Fullscreen',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget home() {
     final compact = MediaQuery.sizeOf(context).width < 1000;
     final preset = context.millitopTheme.layoutPreset;
@@ -742,6 +1234,16 @@ class _LauncherState extends State<Launcher> {
     final greetingWithName = profileName.isEmpty
         ? greeting
         : '$greeting, $profileName';
+    Widget welcomeMessage() => Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: SizedBox(
+        height: compact ? 38 : 42,
+        child: RotatingWelcomeMessage(
+          initialIndex: welcomeSayingIndex,
+          style: TextStyle(fontSize: compact ? 15 : 18, color: muted),
+        ),
+      ),
+    );
     final hero = compact
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -750,6 +1252,7 @@ class _LauncherState extends State<Launcher> {
                 greetingWithName,
                 style: TextStyle(fontSize: 22, color: muted),
               ),
+              welcomeMessage(),
               const SizedBox(height: 6),
               Text(
                 time,
@@ -779,6 +1282,7 @@ class _LauncherState extends State<Launcher> {
                         greetingWithName,
                         style: TextStyle(fontSize: 28, color: muted),
                       ),
+                      welcomeMessage(),
                       const SizedBox(height: 6),
                       Text(
                         time,
@@ -801,6 +1305,7 @@ class _LauncherState extends State<Launcher> {
                         greetingWithName,
                         style: TextStyle(fontSize: 28, color: muted),
                       ),
+                      welcomeMessage(),
                       const SizedBox(height: 6),
                       Text(
                         time,
@@ -823,6 +1328,8 @@ class _LauncherState extends State<Launcher> {
 
     final infoBlocks = compact
         ? <Widget>[
+            // Family Album temporarily disabled.
+            if (_sharedFamilyAlbumEnabled) _sharedFamilyCard(compact: true),
             card(
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -851,53 +1358,23 @@ class _LauncherState extends State<Launcher> {
                   TvButton(
                     label: 'View messages',
                     icon: Icons.campaign_outlined,
-                    onPressed: () => setState(() => page = 5),
+                    onPressed: () => setState(() => page = 4),
                   ),
                 ],
               ),
             ),
-            if (familyMoments) ...[
-              const SizedBox(height: 14),
-              card(
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.photo_library_outlined, color: accent),
-                        const SizedBox(width: 12),
-                        const Text(
-                          'Family moments',
-                          style: TextStyle(fontSize: 18),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      'Browse your photos and videos, or start a slideshow.\n'
-                      'Your family folders are saved for this profile.',
-                      style: TextStyle(
-                        fontSize: 15,
-                        color: muted,
-                        height: 1.35,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    TvButton(
-                      label: 'Open gallery',
-                      onPressed: () => setState(() => page = 4),
-                    ),
-                  ],
-                ),
-              ),
-            ],
           ]
         : <Widget>[
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Family Album temporarily disabled.
+                if (_sharedFamilyAlbumEnabled) ...[
+                  Expanded(flex: 4, child: _sharedFamilyCard(compact: false)),
+                  const SizedBox(width: 18),
+                ],
                 Expanded(
-                  flex: 3,
+                  flex: _sharedFamilyAlbumEnabled ? 3 : 1,
                   child: card(
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -926,49 +1403,12 @@ class _LauncherState extends State<Launcher> {
                         TvButton(
                           label: 'View messages',
                           icon: Icons.campaign_outlined,
-                          onPressed: () => setState(() => page = 5),
+                          onPressed: () => setState(() => page = 4),
                         ),
                       ],
                     ),
                   ),
                 ),
-                if (familyMoments) const SizedBox(width: 22),
-                if (familyMoments)
-                  Expanded(
-                    flex: 2,
-                    child: card(
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(Icons.photo_library_outlined, color: accent),
-                              const SizedBox(width: 12),
-                              const Text(
-                                'Family moments',
-                                style: TextStyle(fontSize: 21),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          Text(
-                            'Browse your photos and videos, or start a slideshow.\n'
-                            'Your family folders are saved for this profile.',
-                            style: TextStyle(
-                              fontSize: 18,
-                              color: muted,
-                              height: 1.4,
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          TvButton(
-                            label: 'Open gallery',
-                            onPressed: () => setState(() => page = 4),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
               ],
             ),
           ];
@@ -1058,6 +1498,235 @@ class _LauncherState extends State<Launcher> {
     );
   }
 
+  Widget _buildMusicMiniPlayerOverlay() {
+    final mini = MusicMiniPlayerService.instance;
+    final active = mini.activeTrack;
+    if (!mini.visible || active == null) {
+      return const SizedBox.shrink();
+    }
+    final cover = mini.coverArtUrl(active);
+    final searchText = musicMiniSearch.text.trim();
+    final results = mini.searchSongs(searchText);
+    return Positioned(
+      right: 18,
+      bottom: 110,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (showMusicMiniQueuePanel)
+            Container(
+              width: 360,
+              height: 420,
+              margin: const EdgeInsets.only(right: 12),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: musicMiniSearch,
+                        decoration: const InputDecoration(
+                          labelText: 'Add song to queue',
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                        onChanged: (_) => setState(() {}),
+                      ),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: ListView(
+                          children: [
+                            const Text(
+                              'Now playing queue',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            const SizedBox(height: 6),
+                            const Divider(),
+                            for (int i = 0; i < mini.queue.length; i++)
+                              ListTile(
+                                dense: true,
+                                selected: i == mini.queueIndex,
+                                title: Text(
+                                  mini.queue[i].title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(
+                                  mini.queue[i].artist,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                onTap: () => unawaited(
+                                  MusicMiniPlayerService.instance.playAt(i),
+                                ),
+                              ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'Search to add',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            if (searchText.isEmpty)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: Text(
+                                  'Type in search to add more songs to this queue.',
+                                  style: TextStyle(color: Colors.white70),
+                                ),
+                              ),
+                            for (final track in results)
+                              ListTile(
+                                dense: true,
+                                title: Text(
+                                  track.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(
+                                  '${track.artist} • ${track.album}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                trailing: IconButton(
+                                  icon: const Icon(
+                                    Icons.queue_play_next_outlined,
+                                  ),
+                                  onPressed: () {
+                                    MusicMiniPlayerService.instance.addToQueue(
+                                      track,
+                                    );
+                                    setState(() {});
+                                  },
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          SizedBox(
+            width: 320,
+            child: Card(
+              elevation: 10,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        RotationTransition(
+                          turns: musicMiniSpinController,
+                          child: ClipOval(
+                            child: Container(
+                              width: 62,
+                              height: 62,
+                              color: const Color(0xFF141414),
+                              child: cover == null
+                                  ? const Icon(
+                                      Icons.album,
+                                      color: Colors.white70,
+                                    )
+                                  : Image.network(
+                                      cover,
+                                      fit: BoxFit.cover,
+                                      gaplessPlayback: true,
+                                      errorBuilder: (_, __, ___) => const Icon(
+                                        Icons.album,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                active.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                active.artist,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Close mini player',
+                          onPressed: () => unawaited(
+                            MusicMiniPlayerService.instance.closeMini(),
+                          ),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        IconButton(
+                          onPressed: () => unawaited(
+                            MusicMiniPlayerService.instance.playPrevious(),
+                          ),
+                          icon: const Icon(Icons.skip_previous),
+                        ),
+                        IconButton.filled(
+                          onPressed: () => unawaited(
+                            MusicMiniPlayerService.instance.togglePlayPause(),
+                          ),
+                          icon: Icon(
+                            mini.playing ? Icons.pause : Icons.play_arrow,
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => unawaited(
+                            MusicMiniPlayerService.instance.playNext(),
+                          ),
+                          icon: const Icon(Icons.skip_next),
+                        ),
+                        const Spacer(),
+                        OutlinedButton.icon(
+                          onPressed: () => setState(
+                            () => showMusicMiniQueuePanel =
+                                !showMusicMiniQueuePanel,
+                          ),
+                          icon: const Icon(Icons.queue_music),
+                          label: const Text('Queue'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () => unawaited(_openMusicFromMiniPlayer()),
+                        child: const Text('Go to Music'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _openSleepModeModal() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -1093,14 +1762,10 @@ class _LauncherState extends State<Launcher> {
     }
   }
 
-  Widget files() => MediaLibraryHome(profileId: widget.profileId);
-
   Widget dvr() =>
       MediaLibraryHome(profileId: widget.profileId, recordings: true);
 
   Widget updates() => MessageInbox(profileId: widget.profileId);
-
-  Widget gallery() => GalleryPanel(profileId: widget.profileId);
 
   Widget account() => CustomerAccountPanel(profileId: widget.profileId);
 
@@ -1280,7 +1945,7 @@ class _LauncherState extends State<Launcher> {
                         FilledButton.tonalIcon(
                           onPressed: () {
                             setState(() {
-                              page = 5;
+                              page = 4;
                               showLoginActionOverlay = false;
                               loginOverlayDismissed = true;
                             });
@@ -1643,7 +2308,13 @@ class _LauncherState extends State<Launcher> {
                       Expanded(
                         child: FocusTraversalGroup(
                           policy: ReadingOrderTraversalPolicy(),
-                          child: SingleChildScrollView(
+                          child: page == 1 && !serviceLocked
+                              ? PlaylistsScreen(
+                                  key: ValueKey(widget.profileId),
+                                  profileId: widget.profileId,
+                                  embedded: true,
+                                )
+                              : SingleChildScrollView(
                             key: ValueKey(page),
                             padding: const EdgeInsets.only(bottom: 20),
                             child: Stack(
@@ -1651,11 +2322,10 @@ class _LauncherState extends State<Launcher> {
                                 IgnorePointer(
                                   ignoring: serviceLocked && page != 3,
                                   child: switch (page) {
-                                    1 => files(),
+                                    1 => const SizedBox(height: 400),
                                     2 => dvr(),
                                     3 => account(),
-                                    4 => gallery(),
-                                    5 => updates(),
+                                    4 => updates(),
                                     _ => home(),
                                   },
                                 ),
@@ -1976,6 +2646,31 @@ class _LauncherState extends State<Launcher> {
             !showWelcomeSplash && showLoginActionOverlay
                 ? Positioned.fill(child: _loginActionOverlay())
                 : const SizedBox.shrink(),
+            _buildMusicMiniPlayerOverlay(),
+            AnimatedBuilder(
+              animation: PodcastPlayback.instance,
+              builder: (context, _) {
+                final podcasts = PodcastPlayback.instance;
+                if (podcasts.profileId != widget.profileId ||
+                    podcasts.active == null) {
+                  return const SizedBox.shrink();
+                }
+                return Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 76,
+                  child: PodcastPlayerBar(
+                    onOpenQueue: () => unawaited(showPodcastQueue(context)),
+                    onOpenPodcasts: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            PodcastsScreen(profileId: widget.profileId),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
           ],
         ),
       ),

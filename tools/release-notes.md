@@ -1,6 +1,9 @@
-Square-backed household Account page with server-verified invoices, balances, invoice-linked payment history, Square hosted checkout launch, PIN-gated account view, public project updates and HTTPS billing transport enforcement.
-Pairing-first household onboarding now blocks profile login until the device is paired, then automatically syncs household profiles (including pictures) before profile selection so new devices show the shared profile roster immediately.
-Added PiP mini-player continuity so backing out of active playback returns to Home while media keeps playing in a closable/expandable mini player.
-Added explicit DVR scheduling entry points in the DVR section and EPG-guide-first scheduling flow, plus schedule cancellation controls in Cloud DVR.
-Restored fullscreen controls for Movies/Series playback with on-screen and app-bar fullscreen toggle support.
-Introduced a native Music experience with Navidrome integration, including server setup/validation, library search, random picks, custom station creation from seed tracks, recently played tracking, and synced music profile state across household devices.
+Native Podcasts: Apple directory search, publisher RSS audio/video, follows, queue, resume, speed, sleep timer, video fullscreen, offline downloads and Home mini-player. Library/preferences participate in household profile sync; downloads stay on the device.
+Native YouTube: adapted GPLv3 PsTube engine with search, playback, quality/captions, channels, public playlists, local subscriptions/history/likes/Watch later, offline combined-stream downloads and profile sync. This is not Google's authenticated client: private/paid libraries, uploads and comment posting are not supported.
+Home now rotates eight welcome sayings. Factory Emby and VLC app tiles are removed; console-managed Emby and existing VLC file/DVR playback are preserved. Family Album remains disabled.
+Modern TV-style Live TV overlay with retained DVR/guide/split/fullscreen callbacks, and no redundant playback controls below the Live TV heading.
+Responsive Settings navigation, Live TV channel rail/filter controls, Podcast episode rows, Music setup/player controls and Movies/Series filters support compact phones and TV layouts. Regression tests cover 320/360/412 logical-pixel phones, phone landscape and 1280/1920 TV widths across six themes.
+Windows installer uses the existing application update signature. Android APK is a development-key-signed sideload/test build, not a production/store-signed package. Both are available from dashboard Quick downloads; automatic device rollout is not enabled by publication.
+GPLv3 corresponding source and build instructions are available alongside the binaries in dashboard Quick downloads.
+Android adds a TV launcher/banner, optional touchscreen support, weather-location permissions and corrected audio-service activity/foreground configuration.
+Physical Galaxy S9+/S25 Ultra and Android TV remote testing, and real cross-device podcast/YouTube sync verification, remain required before a broad production rollout.

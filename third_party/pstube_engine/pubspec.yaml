@@ -1,0 +1,9 @@
+name: pstube_engine
+description: PsTube engine adapted for MILLITOPTV without PsTube UI or global state.
+version: 1.0.0
+publish_to: none
+environment:
+  sdk: ^3.9.2
+dependencies:
+  youtube_explode_dart: ^3.1.0
+  http: ^1.2.1

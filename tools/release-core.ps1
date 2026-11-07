@@ -173,7 +173,7 @@ function Assert-PublisherKeyAccess {
 function Get-ReleaseFingerprint([string]$Project,$Config,[string]$Toolchain){
  $records=New-Object 'System.Collections.Generic.List[string]'
  $paths=New-Object 'System.Collections.Generic.List[string]'
- foreach($top in @('lib','assets','windows','test','tools')){
+ foreach($top in @('lib','assets','windows','android','third_party','test','tools')){
   $start=Join-Path $Project $top
   if(-not(Test-Path -LiteralPath $start)){continue}
   $stack=New-Object 'System.Collections.Generic.Stack[string]';$stack.Push($start)
@@ -182,12 +182,12 @@ function Get-ReleaseFingerprint([string]$Project,$Config,[string]$Toolchain){
    foreach($entry in Get-ChildItem -LiteralPath $directory -Force){
     if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Symlinked source detected outside generated directories. Extend/review the fingerprint before releasing.'}
     if($entry.PSIsContainer){
-     if($entry.Name -notin @('ephemeral','.dart_tool','.git','build','backups','.release')){$stack.Push($entry.FullName)}
-    }elseif($entry.FullName -notmatch '[\\/]windows[\\/]flutter[\\/]generated_(plugin_registrant\.(cc|h)|plugins\.cmake)$'){$paths.Add($entry.FullName)}
+     if($entry.Name -notin @('ephemeral','.dart_tool','.gradle','.kotlin','.cxx','.git','build','backups','.release')){$stack.Push($entry.FullName)}
+    }elseif($entry.Name -ne 'local.properties' -and $entry.FullName -notmatch '[\\/]windows[\\/]flutter[\\/]generated_(plugin_registrant\.(cc|h)|plugins\.cmake)$'){$paths.Add($entry.FullName)}
    }
   }
  }
- foreach($name in @('pubspec.yaml','pubspec.lock','analysis_options.yaml')){if(Test-Path -LiteralPath (Join-Path $Project $name)){$paths.Add((Join-Path $Project $name))}}
+ foreach($name in @('pubspec.yaml','pubspec.lock','analysis_options.yaml','LICENSE')){if(Test-Path -LiteralPath (Join-Path $Project $name)){$paths.Add((Join-Path $Project $name))}}
  foreach($field in @('vcRedist','webView2Installer','sqliteDll')){$paths.Add([string]$Config.$field)}
  foreach($path in ($paths|Sort-Object -Unique)){
   $relative=$path

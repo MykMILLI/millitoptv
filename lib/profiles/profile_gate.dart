@@ -514,7 +514,7 @@ class _ProfileGateState extends State<ProfileGate> {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final compact = width < 900;
-    final tileWidth = compact ? ((width - 64) / 2).clamp(150.0, 210.0) : 210.0;
+    final tileWidth = compact ? ((width - 44) / 2).clamp(120.0, 210.0) : 210.0;
     final tokens = context.millitopTheme;
     final current = selected;
 

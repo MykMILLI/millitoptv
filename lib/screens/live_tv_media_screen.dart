@@ -24,9 +24,108 @@ import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
 
 enum _MediaTab { movies, series }
-enum _MediaSortMode { relevance, title, source }
+
+enum _MediaSortMode { relevance, title, source, inTheaters, recentlyAdded }
 
 const String _managedSourcePrefix = 'managed:';
+
+/// A date-gated themed collection (e.g. Halloween, Thanksgiving, Christmas).
+/// Matches items either by genre name or by a title/description keyword.
+class _SeasonalCollection {
+  final String id;
+  final String label;
+  final IconData icon;
+  final int startMonth;
+  final int startDay;
+  final int endMonth;
+  final int endDay;
+  final Set<String> genres;
+  final List<String> keywords;
+  const _SeasonalCollection({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.startMonth,
+    required this.startDay,
+    required this.endMonth,
+    required this.endDay,
+    this.genres = const {},
+    this.keywords = const [],
+  });
+
+  bool isActiveOn(DateTime date) {
+    final start = DateTime(date.year, startMonth, startDay);
+    final end = DateTime(date.year, endMonth, endDay, 23, 59, 59);
+    final probe = DateTime(date.year, date.month, date.day);
+    return !probe.isBefore(start) && !probe.isAfter(end);
+  }
+
+  int daysUntilEnd(DateTime date) {
+    final end = DateTime(date.year, endMonth, endDay);
+    return end.difference(DateTime(date.year, date.month, date.day)).inDays;
+  }
+
+  bool matches(LiveTvMediaItem item) {
+    if (genres.isNotEmpty &&
+        item.genres.any(
+          (genre) => genres.any((g) => g.toLowerCase() == genre.toLowerCase()),
+        )) {
+      return true;
+    }
+    if (keywords.isEmpty) {
+      return false;
+    }
+    final haystack =
+        '${item.title} ${item.description ?? ''} ${item.group ?? ''}'
+            .toLowerCase();
+    return keywords.any((keyword) => haystack.contains(keyword));
+  }
+}
+
+const List<_SeasonalCollection> _seasonalCollections = [
+  _SeasonalCollection(
+    id: 'halloween',
+    label: 'Halloween',
+    icon: Icons.nightlight_round,
+    startMonth: 10,
+    startDay: 1,
+    endMonth: 11,
+    endDay: 15,
+    genres: {'Horror'},
+    keywords: ['halloween'],
+  ),
+  _SeasonalCollection(
+    id: 'thanksgiving',
+    label: 'Thanksgiving',
+    icon: Icons.restaurant,
+    startMonth: 11,
+    startDay: 1,
+    endMonth: 11,
+    endDay: 30,
+    keywords: ['thanksgiving'],
+  ),
+  _SeasonalCollection(
+    id: 'christmas',
+    label: 'Christmas',
+    icon: Icons.ac_unit,
+    startMonth: 11,
+    startDay: 15,
+    endMonth: 12,
+    endDay: 31,
+    keywords: ['christmas', 'xmas', 'holiday'],
+  ),
+  _SeasonalCollection(
+    id: 'romance',
+    label: 'Romance',
+    icon: Icons.favorite,
+    startMonth: 2,
+    startDay: 1,
+    endMonth: 2,
+    endDay: 28,
+    genres: {'Romance'},
+    keywords: ['valentine'],
+  ),
+];
 
 class _ManagedCatalogLibrary {
   final String id;
@@ -55,7 +154,8 @@ class _MediaItemSourceOrigin {
 }
 
 class _LiveTvMediaPaint {
-  static MillitopThemeSpec get _spec => MillitopThemeController.instance.current;
+  static MillitopThemeSpec get _spec =>
+      MillitopThemeController.instance.current;
   static ColorScheme get _scheme =>
       MillitopThemeController.instance.materialTheme.colorScheme;
   static Color get accent => _spec.accent;
@@ -73,12 +173,156 @@ class _LiveTvMediaPaint {
   static Color get transparent => onSurface.withAlpha(0);
 }
 
+class _CatalogLoadingModal extends StatefulWidget {
+  final String phase;
+  final String? sourceName;
+  final int stepsCompleted;
+  final int stepsTotal;
+  final int moviesLoaded;
+  final int seriesLoaded;
+
+  const _CatalogLoadingModal({
+    required this.phase,
+    required this.sourceName,
+    required this.stepsCompleted,
+    required this.stepsTotal,
+    required this.moviesLoaded,
+    required this.seriesLoaded,
+  });
+
+  @override
+  State<_CatalogLoadingModal> createState() => _CatalogLoadingModalState();
+}
+
+class _CatalogLoadingModalState extends State<_CatalogLoadingModal> {
+  final elapsed = Stopwatch();
+  Timer? ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    elapsed.start();
+    ticker = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    ticker?.cancel();
+    elapsed.stop();
+    super.dispose();
+  }
+
+  String _timeText(Duration value) =>
+      '${value.inMinutes}:${(value.inSeconds % 60).toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = widget.stepsTotal > 0
+        ? widget.stepsCompleted / widget.stepsTotal
+        : null;
+    final remaining = progress != null && progress > 0
+        ? Duration(
+            milliseconds:
+                (elapsed.elapsedMilliseconds * (1 - progress) / progress)
+                    .round(),
+          )
+        : null;
+    final theme = Theme.of(context);
+    return Stack(
+      key: const Key('catalog-loading-modal'),
+      children: [
+        ModalBarrier(
+          dismissible: false,
+          color: theme.colorScheme.scrim.withAlpha(166),
+        ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final large = constraints.maxWidth >= 1100;
+            final bodySize = large ? 20.0 : 16.0;
+            return Center(
+              child: SingleChildScrollView(
+                child: Dialog(
+                  insetPadding: const EdgeInsets.all(16),
+                  constraints: BoxConstraints(maxWidth: large ? 720 : 560),
+                  child: Padding(
+                    padding: EdgeInsets.all(large ? 32 : 20),
+                    child: DefaultTextStyle(
+                      style: theme.textTheme.bodyLarge!.copyWith(
+                        fontSize: bodySize,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Loading Movies & Series',
+                            style: theme.textTheme.headlineSmall!.copyWith(
+                              fontSize: large ? 32 : 24,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Semantics(
+                            liveRegion: true,
+                            child: Text(widget.phase),
+                          ),
+                          if (widget.sourceName != null) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              widget.sourceName!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                          const SizedBox(height: 20),
+                          LinearProgressIndicator(value: progress),
+                          const SizedBox(height: 16),
+                          Text(
+                            widget.stepsTotal == 0
+                                ? 'Discovering your libraries...'
+                                : 'Sources loaded: ${widget.stepsCompleted ~/ 2} / ${widget.stepsTotal ~/ 2}',
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 24,
+                            runSpacing: 8,
+                            children: [
+                              Text('Movies: ${widget.moviesLoaded}'),
+                              Text('Series: ${widget.seriesLoaded}'),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          Text('Elapsed: ${_timeText(elapsed.elapsed)}'),
+                          Text(
+                            remaining == null
+                                ? 'Estimated remaining: calculating...'
+                                : 'Estimated remaining: ${_timeText(remaining)}',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
 class LiveTvMediaScreen extends StatefulWidget {
   final int profileId;
   final String? initialSourceId;
   final String? initialMediaType;
   final String? initialMediaId;
   final bool autoResume;
+  final LiveTvLibraryItem? initialLibraryItem;
+  final LiveTvPlaylistService? playlistService;
+  final Future<List<LiveTvSource>> Function(int profileId)?
+  loadConfiguredSources;
+  final DateTime Function()? now;
   const LiveTvMediaScreen({
     super.key,
     required this.profileId,
@@ -86,6 +330,10 @@ class LiveTvMediaScreen extends StatefulWidget {
     this.initialMediaType,
     this.initialMediaId,
     this.autoResume = false,
+    this.initialLibraryItem,
+    this.playlistService,
+    this.loadConfiguredSources,
+    this.now,
   });
 
   @override
@@ -93,7 +341,7 @@ class LiveTvMediaScreen extends StatefulWidget {
 }
 
 class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
-  final service = const LiveTvPlaylistService();
+  late final LiveTvPlaylistService service;
   final liveTvControl = LiveTvControlService();
   final playbackMemory = VideoPlaybackMemory();
   final search = TextEditingController();
@@ -110,6 +358,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   _MediaTab tab = _MediaTab.movies;
   _MediaSortMode sortMode = _MediaSortMode.relevance;
   String groupFilter = 'All';
+  Set<String> selectedGenres = {};
+  String? activeCollectionId;
   bool versionAwareOnly = false;
   bool loading = true;
   bool resumedInitial = false;
@@ -117,6 +367,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   int catalogLoadGeneration = 0;
   String status = '';
   String error = '';
+  String catalogPhase = 'Syncing your profile and preparing sources...';
+  String? catalogSourceName;
+  int catalogStepsCompleted = 0;
+  int catalogStepsTotal = 0;
+  int catalogMoviesLoaded = 0;
+  int catalogSeriesLoaded = 0;
   String? focusedMediaId;
   Timer? profileSyncDebounce;
   PlaybackPerformanceSettings playbackPerformance =
@@ -125,6 +381,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   @override
   void initState() {
     super.initState();
+    service = widget.playlistService ?? const LiveTvPlaylistService();
     search.addListener(() => setState(() {}));
     unawaited(_initialize());
   }
@@ -137,12 +394,20 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     super.dispose();
   }
 
+  DateTime _now() => widget.now?.call() ?? DateTime.now();
+
   bool _isManagedSource(LiveTvSource item) =>
       item.id.startsWith(_managedSourcePrefix) || item.type == 'managed';
 
-  bool _isManagedSourceId(String value) => value.startsWith(_managedSourcePrefix);
+  Future<List<LiveTvSource>> _configuredSources() =>
+      widget.loadConfiguredSources?.call(widget.profileId) ??
+      HomePreferences().liveTvSources(widget.profileId);
 
-  String _managedSourceId(String libraryId) => '$_managedSourcePrefix$libraryId';
+  bool _isManagedSourceId(String value) =>
+      value.startsWith(_managedSourcePrefix);
+
+  String _managedSourceId(String libraryId) =>
+      '$_managedSourcePrefix$libraryId';
 
   String _managedPathToStreamUrl(String value) {
     final path = value.trim();
@@ -159,7 +424,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           uri.host.trim().isNotEmpty) {
         final sharePath = uri.pathSegments
             .where((item) => item.trim().isNotEmpty)
-            .map((item) => item.trim())
+            .map((item) => Uri.decodeComponent(item).trim())
             .join(r'\');
         if (sharePath.isNotEmpty) {
           final uncPath = r'\\' + uri.host + r'\' + sharePath;
@@ -169,6 +434,46 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return uri.toString();
     }
     return Uri.file(path, windows: true).toString();
+  }
+
+  List<String> _playbackUrlCandidates(String rawUrl) {
+    final candidates = <String>[];
+    final input = rawUrl.trim();
+    if (input.isEmpty) {
+      return candidates;
+    }
+    void addCandidate(String value) {
+      final normalized = value.trim();
+      if (normalized.isEmpty || candidates.contains(normalized)) {
+        return;
+      }
+      candidates.add(normalized);
+    }
+
+    addCandidate(input);
+    final parsed = Uri.tryParse(input);
+    if (parsed != null && parsed.scheme.toLowerCase() == 'file') {
+      final localPath = parsed.toFilePath(windows: Platform.isWindows);
+      addCandidate(localPath);
+      if (Platform.isWindows) {
+        addCandidate(Uri.file(localPath, windows: true).toString());
+      }
+    } else if (parsed != null &&
+        parsed.scheme.toLowerCase() == 'smb' &&
+        Platform.isWindows &&
+        parsed.host.trim().isNotEmpty) {
+      final sharePath = parsed.pathSegments
+          .where((item) => item.trim().isNotEmpty)
+          .map((item) => Uri.decodeComponent(item).trim())
+          .join(r'\');
+      if (sharePath.isNotEmpty) {
+        final uncPath = r'\\' + parsed.host + r'\' + sharePath;
+        addCandidate(uncPath);
+        addCandidate(Uri.file(uncPath, windows: true).toString());
+      }
+    }
+
+    return candidates;
   }
 
   String _seriesSlug(String value) {
@@ -228,7 +533,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               continue;
             }
             final item = Map<String, dynamic>.from(rawItem);
-            final mediaKind = item['mediaKind']?.toString().trim().toLowerCase();
+            final mediaKind = item['mediaKind']
+                ?.toString()
+                .trim()
+                .toLowerCase();
             if (mediaKind == 'series') {
               continue;
             }
@@ -299,7 +607,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       streamUrl: _managedPathToStreamUrl(path),
                       season: seasonNumber,
                       episode:
-                          int.tryParse(episodeMap['episode']?.toString() ?? '') ??
+                          int.tryParse(
+                            episodeMap['episode']?.toString() ?? '',
+                          ) ??
                           0,
                       posterUrl: episodeMap['posterUrl']?.toString(),
                       description: episodeMap['overview']?.toString(),
@@ -432,9 +742,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       playbackPerformance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
-      final configuredSources = await HomePreferences().liveTvSources(
-        widget.profileId,
-      );
+      final configuredSources = await _configuredSources();
       final managedSources = await _managedSources(widget.profileId);
       sources = [...configuredSources, ...managedSources];
       history = await HomePreferences().liveTvRecentMedia(widget.profileId);
@@ -474,47 +782,63 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _loadCatalog() async {
-    final configuredSources = await HomePreferences().liveTvSources(
-      widget.profileId,
-    );
-    final managedSources = await _managedSources(widget.profileId);
-    final previousSourceId = source?.id;
-    sources = [...configuredSources, ...managedSources];
-    if (sources.isEmpty) {
-      if (mounted) {
-        setState(() {
-          loading = false;
-          movies = const [];
-          series = const [];
-          error =
-              'No VOD sources are available. Add Live TV sources or enable SMB libraries in the dashboard.';
-        });
-      }
+    if (!mounted) {
       return;
     }
-    final selected =
-        previousSourceId == null
-            ? (source ?? sources.first)
-            : sources.firstWhere(
-                (item) => item.id == previousSourceId,
-                orElse: () => sources.first,
-              );
-    source = selected;
-    final activeSources = allSourcesSelected
-        ? List<LiveTvSource>.from(sources)
-        : <LiveTvSource>[selected];
     final generation = ++catalogLoadGeneration;
     setState(() {
       loading = true;
       error = '';
-      status = allSourcesSelected
-          ? 'Loading movies and series from ${activeSources.length} source(s)...'
-          : 'Loading movies and series from ${selected.name}...';
+      catalogPhase = 'Checking configured and dashboard sources...';
+      catalogSourceName = null;
+      catalogStepsCompleted = 0;
+      catalogStepsTotal = 0;
+      catalogMoviesLoaded = 0;
+      catalogSeriesLoaded = 0;
     });
     try {
+      final configuredSources = await _configuredSources();
+      final managedSources = await _managedSources(widget.profileId);
+      if (!mounted || generation != catalogLoadGeneration) {
+        return;
+      }
+      final previousSourceId = source?.id;
+      sources = [...configuredSources, ...managedSources];
+      if (sources.isEmpty) {
+        if (mounted) {
+          setState(() {
+            loading = false;
+            movies = const [];
+            series = const [];
+            error =
+                'No VOD sources are available. Add Live TV sources or enable SMB libraries in the dashboard.';
+          });
+        }
+        return;
+      }
+      final selected = previousSourceId == null
+          ? (source ?? sources.first)
+          : sources.firstWhere(
+              (item) => item.id == previousSourceId,
+              orElse: () => sources.first,
+            );
+      source = selected;
+      final activeSources = allSourcesSelected
+          ? List<LiveTvSource>.from(sources)
+          : <LiveTvSource>[selected];
+      setState(() {
+        catalogStepsTotal = activeSources.length * 2;
+        status = allSourcesSelected
+            ? 'Loading movies and series from ${activeSources.length} source(s)...'
+            : 'Loading movies and series from ${selected.name}...';
+      });
       final loadedMoviesBySource = <List<LiveTvMediaItem>>[];
       final loadedSeriesBySource = <List<LiveTvMediaItem>>[];
       for (final activeSource in activeSources) {
+        setState(() {
+          catalogSourceName = activeSource.name;
+          catalogPhase = 'Loading movies...';
+        });
         if (_isManagedSource(activeSource)) {
           final managed = managedCatalogBySourceId[activeSource.id];
           loadedMoviesBySource.add(
@@ -527,10 +851,30 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 ? const <LiveTvMediaItem>[]
                 : List<LiveTvMediaItem>.from(managed.series),
           );
+          setState(() {
+            catalogMoviesLoaded += loadedMoviesBySource.last.length;
+            catalogSeriesLoaded += loadedSeriesBySource.last.length;
+            catalogStepsCompleted += 2;
+          });
           continue;
         }
         loadedMoviesBySource.add(await service.loadMovies(activeSource));
+        if (!mounted || generation != catalogLoadGeneration) {
+          return;
+        }
+        setState(() {
+          catalogMoviesLoaded += loadedMoviesBySource.last.length;
+          catalogStepsCompleted++;
+          catalogPhase = 'Loading series...';
+        });
         loadedSeriesBySource.add(await service.loadSeries(activeSource));
+        if (!mounted || generation != catalogLoadGeneration) {
+          return;
+        }
+        setState(() {
+          catalogSeriesLoaded += loadedSeriesBySource.last.length;
+          catalogStepsCompleted++;
+        });
       }
       if (!mounted || generation != catalogLoadGeneration) {
         return;
@@ -574,7 +918,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       );
       await _tryAutoResume();
     } catch (e) {
-      if (mounted) {
+      if (mounted && generation == catalogLoadGeneration) {
         setState(() {
           loading = false;
           error = e.toString().replaceFirst('Bad state: ', '');
@@ -604,7 +948,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final sourceItem = activeSources[i];
       var sourceMovies = loadedMoviesBySource[i];
       var sourceSeries = loadedSeriesBySource[i];
-      if (sourceItem.isM3u || _isManagedSource(sourceItem)) {
+      final eligibleForEnrichment =
+          sourceItem.isM3u || _isManagedSource(sourceItem);
+      if (eligibleForEnrichment) {
         final maxMetadataItems = _isManagedSource(sourceItem) ? 1400 : 320;
         sourceMovies = await service.enrichM3uMetadata(
           items: sourceMovies,
@@ -618,9 +964,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           tmdbApiKey: tmdbApiKey,
           maxItems: maxMetadataItems,
         );
-      }
-      if (!mounted || generation != catalogLoadGeneration) {
-        return;
+        if (!mounted || generation != catalogLoadGeneration) {
+          return;
+        }
       }
       for (final item in sourceMovies) {
         mediaItemOrigins[item] = _MediaItemSourceOrigin(
@@ -651,6 +997,37 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _tryAutoResume() async {
+    final saved = widget.initialLibraryItem;
+    if (saved != null && !resumedInitial) {
+      resumedInitial = true;
+      if (!sources.any((s) => s.id == saved.sourceId)) {
+        throw StateError(
+          'The source for "${saved.title}" is unavailable. Reconnect it in TV settings.',
+        );
+      }
+      if (saved.mediaType == 'episode') {
+        if (saved.streamUrl?.trim().isNotEmpty != true) {
+          throw StateError(
+            'This saved episode has no playback address. Open its series and save it again.',
+          );
+        }
+        await _playLibraryItem(saved);
+        return;
+      }
+      final catalog = saved.mediaType == 'series' ? series : movies;
+      final matches = catalog.where((v) => v.id == saved.mediaId);
+      if (matches.isEmpty) {
+        throw StateError(
+          '"${saved.title}" is no longer available from ${saved.sourceName}.',
+        );
+      }
+      if (saved.mediaType == 'series') {
+        await _openSeries(matches.first);
+      } else {
+        await _openMovie(matches.first);
+      }
+      return;
+    }
     if (!widget.autoResume || resumedInitial) {
       return;
     }
@@ -684,16 +1061,74 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     return ['All', ...values];
   }
 
+  /// Distinct genres available for the current media tab, derived from
+  /// whatever TMDB metadata has been enriched so far.
+  List<String> get availableGenres {
+    final values =
+        (tab == _MediaTab.movies ? movies : series)
+            .expand((item) => item.genres)
+            .map((genre) => genre.trim())
+            .where((genre) => genre.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return values;
+  }
+
+  /// Seasonal/themed collections that are currently in their active date
+  /// window, soonest-ending first, so the most time-sensitive one is
+  /// suggested first.
+  List<_SeasonalCollection> get activeSeasonalCollections {
+    final now = _now();
+    final active =
+        _seasonalCollections
+            .where((collection) => collection.isActiveOn(now))
+            .toList()
+          ..sort((a, b) => a.daysUntilEnd(now).compareTo(b.daysUntilEnd(now)));
+    return active;
+  }
+
+  Map<String, int> get _versionCounts {
+    final input = tab == _MediaTab.movies ? movies : series;
+    final buckets = <String, int>{};
+    for (final item in input) {
+      final key = _versionTitleKey(item);
+      buckets.update(key, (value) => value + 1, ifAbsent: () => 1);
+    }
+    return buckets;
+  }
+
   List<LiveTvMediaItem> get visibleItems {
     final input = tab == _MediaTab.movies ? movies : series;
     final query = search.text.trim().toLowerCase();
+    final currentGroups = groups;
+    final effectiveGroupFilter = currentGroups.contains(groupFilter)
+        ? groupFilter
+        : 'All';
+    final versionCounts = versionAwareOnly ? _versionCounts : null;
+    final collection = activeCollectionId == null
+        ? null
+        : _seasonalCollections
+              .where((item) => item.id == activeCollectionId)
+              .firstOrNull;
     final filtered = input.where((item) {
-      if (groupFilter != 'All' &&
-          groups.contains(groupFilter) &&
-          (item.group ?? '') != groupFilter) {
+      if (effectiveGroupFilter != 'All' &&
+          (item.group ?? '') != effectiveGroupFilter) {
         return false;
       }
-      if (versionAwareOnly && (_versionCountFor(item) < 2)) {
+      if (versionCounts != null &&
+          (versionCounts[_versionTitleKey(item)] ?? 0) < 2) {
+        return false;
+      }
+      if (selectedGenres.isNotEmpty &&
+          !item.genres.any(
+            (genre) => selectedGenres.any(
+              (selected) => selected.toLowerCase() == genre.toLowerCase(),
+            ),
+          )) {
+        return false;
+      }
+      if (collection != null && !collection.matches(item)) {
         return false;
       }
       if (query.isEmpty) {
@@ -718,8 +1153,84 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         }
         return a.title.toLowerCase().compareTo(b.title.toLowerCase());
       });
+    } else if (sortMode == _MediaSortMode.inTheaters) {
+      final now = _now();
+      filtered.sort((a, b) {
+        final daysA = a.releaseDate == null
+            ? 999999
+            : now.difference(a.releaseDate!).inDays.abs();
+        final daysB = b.releaseDate == null
+            ? 999999
+            : now.difference(b.releaseDate!).inDays.abs();
+        final byRecency = daysA.compareTo(daysB);
+        if (byRecency != 0) {
+          return byRecency;
+        }
+        return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      });
+    } else if (sortMode == _MediaSortMode.recentlyAdded) {
+      filtered.sort((a, b) {
+        if (a.addedAt != null && b.addedAt != null) {
+          return b.addedAt!.compareTo(a.addedAt!);
+        }
+        if (a.addedAt != null) {
+          return -1;
+        }
+        if (b.addedAt != null) {
+          return 1;
+        }
+        return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      });
     }
     return filtered;
+  }
+
+  Future<void> _shuffleWithinFilters() async {
+    final candidates = visibleItems;
+    if (candidates.isEmpty) {
+      return;
+    }
+    final pick = candidates[Random().nextInt(candidates.length)];
+    setState(() => focusedMediaId = pick.id);
+    if (tab == _MediaTab.series) {
+      await _openSeries(pick);
+    } else {
+      await _openMovie(pick);
+    }
+  }
+
+  void _toggleCollection(String id) {
+    setState(() {
+      if (activeCollectionId == id) {
+        activeCollectionId = null;
+      } else {
+        activeCollectionId = id;
+      }
+    });
+  }
+
+  void _toggleGenre(String genre) {
+    setState(() {
+      if (selectedGenres.contains(genre)) {
+        selectedGenres = {...selectedGenres}..remove(genre);
+      } else {
+        selectedGenres = {...selectedGenres, genre};
+      }
+    });
+  }
+
+  Future<void> _showCategoryPicker(List<String> groups) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        final mediaQuery = MediaQuery.of(dialogContext);
+        final maxHeight = (mediaQuery.size.height * 0.7).clamp(320.0, 560.0);
+        return _CategoryPickerDialog(groups: groups, maxHeight: maxHeight);
+      },
+    );
+    if (selected != null && mounted) {
+      setState(() => groupFilter = selected);
+    }
   }
 
   String _versionTitleKey(LiveTvMediaItem item) {
@@ -767,7 +1278,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvMediaItem> _editionsFor(LiveTvMediaItem item) {
     final key = _normalizeEditionKey(item.title);
     final pool = item.series ? series : movies;
-    return pool.where((entry) => _normalizeEditionKey(entry.title) == key).toList();
+    return pool
+        .where((entry) => _normalizeEditionKey(entry.title) == key)
+        .toList();
   }
 
   List<LiveTvMediaItem> _relatedLocalTitlesFor(LiveTvMediaItem item) {
@@ -777,14 +1290,18 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return const [];
     }
     return pool
-        .where((entry) => entry.id != item.id && (entry.group ?? '').trim() == group)
+        .where(
+          (entry) => entry.id != item.id && (entry.group ?? '').trim() == group,
+        )
         .take(8)
         .toList();
   }
 
   String _qualityHint(LiveTvMediaItem item) {
     final source = '${item.title} ${item.group ?? ''}'.toLowerCase();
-    if (source.contains('2160') || source.contains('4k') || source.contains('uhd')) {
+    if (source.contains('2160') ||
+        source.contains('4k') ||
+        source.contains('uhd')) {
       return '4K / UHD';
     }
     if (source.contains('1080')) {
@@ -809,7 +1326,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   String _subtitleHint(LiveTvMediaItem item) {
     final source = '${item.title} ${item.group ?? ''}'.toLowerCase();
-    if (source.contains('sub') || source.contains('cc') || source.contains('sdh')) {
+    if (source.contains('sub') ||
+        source.contains('cc') ||
+        source.contains('sdh')) {
       return 'Subtitles likely included';
     }
     return 'Subtitle picker and search available in player';
@@ -1010,6 +1529,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             title: item.title,
             subtitle: item.subtitle ?? item.sourceName,
             streamUrl: stream,
+            streamUrlCandidates: _playbackUrlCandidates(stream),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
           ),
@@ -1058,10 +1578,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (switchedSource || series.isEmpty) {
       if (_isManagedSource(selectedSource)) {
         final managed = managedCatalogBySourceId[selectedSource.id];
-        candidates =
-            managed == null
-                ? const <LiveTvMediaItem>[]
-                : List<LiveTvMediaItem>.from(managed.series);
+        candidates = managed == null
+            ? const <LiveTvMediaItem>[]
+            : List<LiveTvMediaItem>.from(managed.series);
       } else {
         candidates = await service.loadSeries(selectedSource);
       }
@@ -1159,7 +1678,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     final runtime = metadata?.runtimeMinutes;
     final watchedState = await playbackMemory.loadProgress(item.streamUrl);
     final watched = watchedState['complete'] == true;
-    final resumeMs = int.tryParse(watchedState['positionMs']?.toString() ?? '') ?? 0;
+    final resumeMs =
+        int.tryParse(watchedState['positionMs']?.toString() ?? '') ?? 0;
     final editions = _editionsFor(item);
     final relatedLocal = _relatedLocalTitlesFor(item);
     final quality = _qualityHint(item);
@@ -1202,308 +1722,320 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             child: SizedBox(
               height: MediaQuery.of(ctx).size.height * .9,
               child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
-            children: [
-              if (backdrop != null && backdrop.trim().isNotEmpty)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: Image.network(
-                    backdrop,
-                    height: 260,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                  ),
-                ),
-              const SizedBox(height: 16),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: poster == null || poster.trim().isEmpty
-                        ? Container(
-                            width: 170,
-                            height: 240,
-                            color: context.millitopTheme.panelColor,
-                            alignment: Alignment.center,
-                            child: const Icon(Icons.movie, size: 52),
-                          )
-                        : Image.network(
-                            poster,
-                            width: 170,
-                            height: 240,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              width: 170,
-                              height: 240,
-                              color: context.millitopTheme.panelColor,
-                              alignment: Alignment.center,
-                              child: const Icon(Icons.movie, size: 52),
+                  if (backdrop != null && backdrop.trim().isNotEmpty)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Image.network(
+                        backdrop,
+                        height: 260,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: poster == null || poster.trim().isEmpty
+                            ? Container(
+                                width: 170,
+                                height: 240,
+                                color: context.millitopTheme.panelColor,
+                                alignment: Alignment.center,
+                                child: const Icon(Icons.movie, size: 52),
+                              )
+                            : Image.network(
+                                poster,
+                                width: 170,
+                                height: 240,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Container(
+                                  width: 170,
+                                  height: 240,
+                                  color: context.millitopTheme.panelColor,
+                                  alignment: Alignment.center,
+                                  child: const Icon(Icons.movie, size: 52),
+                                ),
+                              ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              year == null
+                                  ? item.title
+                                  : '${item.title} ($year)',
+                              style: const TextStyle(
+                                fontSize: 34,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
-                          ),
+                            if (item.group?.trim().isNotEmpty == true)
+                              Text(
+                                item.group!,
+                                style: TextStyle(
+                                  color: _LiveTvMediaPaint.onSurface70,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            const SizedBox(height: 14),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                FilledButton.icon(
+                                  onPressed: () {
+                                    Navigator.pop(ctx);
+                                    unawaited(
+                                      item.series
+                                          ? _openSeries(item)
+                                          : _openMovie(item),
+                                    );
+                                  },
+                                  icon: Icon(
+                                    item.series
+                                        ? Icons.list_alt_outlined
+                                        : Icons.play_arrow,
+                                  ),
+                                  label: Text(
+                                    item.series
+                                        ? 'Browse Episodes'
+                                        : 'Play Now',
+                                  ),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    Navigator.pop(ctx);
+                                    unawaited(_toggleFavorite(libraryItem));
+                                  },
+                                  icon: Icon(
+                                    watchlisted
+                                        ? Icons.favorite
+                                        : Icons.favorite_border,
+                                  ),
+                                  label: Text(
+                                    watchlisted ? 'In Watchlist' : 'Watchlist',
+                                  ),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    Navigator.pop(ctx);
+                                    unawaited(_addToPlaylist(libraryItem));
+                                  },
+                                  icon: const Icon(Icons.playlist_add),
+                                  label: const Text('Add to Playlist'),
+                                ),
+                                if (!item.series && resumeMs > 15000)
+                                  OutlinedButton.icon(
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      unawaited(
+                                        playbackMemory
+                                            .saveProgress(
+                                              item.streamUrl,
+                                              positionMs: 0,
+                                              durationMs: 0,
+                                              complete: false,
+                                            )
+                                            .then((_) => _openMovie(item)),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.replay),
+                                    label: const Text('Restart'),
+                                  ),
+                                if (!item.series && resumeMs > 15000)
+                                  OutlinedButton.icon(
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      unawaited(_openMovie(item));
+                                    },
+                                    icon: const Icon(Icons.play_arrow),
+                                    label: const Text('Resume'),
+                                  ),
+                                if (trailerUrl != null && trailerUrl.isNotEmpty)
+                                  TextButton.icon(
+                                    onPressed: () => FirefoxBrowser.open(
+                                      context,
+                                      profileId: widget.profileId,
+                                      url: trailerUrl,
+                                    ),
+                                    icon: const Icon(Icons.ondemand_video),
+                                    label: const Text('Watch Trailer'),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                if (runtime != null)
+                                  Chip(label: Text('Runtime ${runtime}m')),
+                                Chip(
+                                  label: Text(
+                                    watched ? 'Watched' : 'Not watched',
+                                  ),
+                                ),
+                                Chip(label: Text('Quality $quality')),
+                                if (metadata?.contentRating != null)
+                                  Chip(
+                                    label: Text(
+                                      '${metadata!.ratingSystem ?? 'Rating'} ${metadata.contentRating}',
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                  section('Synopsis', [
+                    Text(
+                      description,
+                      style: TextStyle(
+                        color: _LiveTvMediaPaint.onSurface70,
+                        height: 1.45,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ]),
+                  section('Playback capabilities', [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
                       children: [
-                        Text(
-                          year == null ? item.title : '${item.title} ($year)',
-                          style: const TextStyle(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        if (item.group?.trim().isNotEmpty == true)
-                          Text(
-                            item.group!,
-                            style: TextStyle(
-                              color: _LiveTvMediaPaint.onSurface70,
-                              fontSize: 16,
-                            ),
-                          ),
-                        const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: () {
-                                Navigator.pop(ctx);
-                                unawaited(
-                                  item.series
-                                      ? _openSeries(item)
-                                      : _openMovie(item),
-                                );
-                              },
-                              icon: Icon(
-                                item.series
-                                    ? Icons.list_alt_outlined
-                                    : Icons.play_arrow,
-                              ),
-                              label: Text(
-                                item.series ? 'Browse Episodes' : 'Play Now',
-                              ),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: () {
-                                Navigator.pop(ctx);
-                                unawaited(_toggleFavorite(libraryItem));
-                              },
-                              icon: Icon(
-                                watchlisted
-                                    ? Icons.favorite
-                                    : Icons.favorite_border,
-                              ),
-                              label: Text(watchlisted ? 'In Watchlist' : 'Watchlist'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: () {
-                                Navigator.pop(ctx);
-                                unawaited(_addToPlaylist(libraryItem));
-                              },
-                              icon: const Icon(Icons.playlist_add),
-                              label: const Text('Add to Playlist'),
-                            ),
-                            if (!item.series && resumeMs > 15000)
-                              OutlinedButton.icon(
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  unawaited(
-                                    playbackMemory
-                                        .saveProgress(
-                                          item.streamUrl,
-                                          positionMs: 0,
-                                          durationMs: 0,
-                                          complete: false,
-                                        )
-                                        .then((_) => _openMovie(item)),
-                                  );
-                                },
-                                icon: const Icon(Icons.replay),
-                                label: const Text('Restart'),
-                              ),
-                            if (!item.series && resumeMs > 15000)
-                              OutlinedButton.icon(
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  unawaited(_openMovie(item));
-                                },
-                                icon: const Icon(Icons.play_arrow),
-                                label: const Text('Resume'),
-                              ),
-                            if (trailerUrl != null && trailerUrl.isNotEmpty)
-                              TextButton.icon(
-                                onPressed: () => FirefoxBrowser.open(
-                                  context,
-                                  profileId: widget.profileId,
-                                  url: trailerUrl,
-                                ),
-                                icon: const Icon(Icons.ondemand_video),
-                                label: const Text('Watch Trailer'),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            if (runtime != null)
-                              Chip(label: Text('Runtime ${runtime}m')),
-                            Chip(
-                              label: Text(
-                                watched ? 'Watched' : 'Not watched',
-                              ),
-                            ),
-                            Chip(label: Text('Quality $quality')),
-                            if (metadata?.contentRating != null)
-                              Chip(
-                                label: Text(
-                                  '${metadata!.ratingSystem ?? 'Rating'} ${metadata.contentRating}',
-                                ),
-                              ),
-                          ],
-                        ),
+                        Chip(label: Text('Audio: $audioHint')),
+                        Chip(label: Text('Subtitles: $subtitleHint')),
                       ],
                     ),
-                  ),
-                ],
-              ),
-              section('Synopsis', [
-                Text(
-                  description,
-                  style: TextStyle(
-                    color: _LiveTvMediaPaint.onSurface70,
-                    height: 1.45,
-                    fontSize: 16,
-                  ),
-                ),
-              ]),
-              section('Playback capabilities', [
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    Chip(label: Text('Audio: $audioHint')),
-                    Chip(label: Text('Subtitles: $subtitleHint')),
+                  ]),
+                  if (genres.isNotEmpty) ...[
+                    section('Genres', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: genres
+                            .map((value) => Chip(label: Text(value)))
+                            .toList(),
+                      ),
+                    ]),
                   ],
-                ),
-              ]),
-              if (genres.isNotEmpty) ...[
-                section('Genres', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: genres.map((value) => Chip(label: Text(value))).toList(),
-                  ),
-                ]),
-              ],
-              if (advisories.isNotEmpty) ...[
-                section(
-                  'Content advisories',
-                  advisories
-                      .map(
-                        (value) => Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: Text(
-                              '• $value',
-                              style: const TextStyle(fontSize: 15),
-                          ),
-                        ),
-                      )
-                      .toList(),
-                ),
-              ],
-              if (cast.isNotEmpty) ...[
-                section('Cast', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: cast
-                        .map((name) => Chip(label: Text(name)))
-                        .toList(),
-                  ),
-                ]),
-              ],
-              if (crew.isNotEmpty) ...[
-                section('Crew', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: crew.map((name) => Chip(label: Text(name))).toList(),
-                  ),
-                ]),
-              ],
-              if (editions.length > 1) ...[
-                section('Available editions', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: editions
-                        .map((entry) => ActionChip(
+                  if (advisories.isNotEmpty) ...[
+                    section(
+                      'Content advisories',
+                      advisories
+                          .map(
+                            (value) => Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                '• $value',
+                                style: const TextStyle(fontSize: 15),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ],
+                  if (cast.isNotEmpty) ...[
+                    section('Cast', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: cast
+                            .map((name) => Chip(label: Text(name)))
+                            .toList(),
+                      ),
+                    ]),
+                  ],
+                  if (crew.isNotEmpty) ...[
+                    section('Crew', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: crew
+                            .map((name) => Chip(label: Text(name)))
+                            .toList(),
+                      ),
+                    ]),
+                  ],
+                  if (editions.length > 1) ...[
+                    section('Available editions', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: editions
+                            .map(
+                              (entry) => ActionChip(
                                 label: Text(entry.title),
                                 onPressed: () {
                                   Navigator.pop(ctx);
                                   unawaited(_showMediaDetails(entry));
                                 },
-                              ))
-                        .toList(),
-                  ),
-                ]),
-              ],
-              if (extras.isNotEmpty) ...[
-                section('Extras', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: extras
-                        .map(
-                          (entry) => ActionChip(
-                              label: Text(entry.label),
-                              onPressed: () => FirefoxBrowser.open(
-                                context,
-                                profileId: widget.profileId,
-                                url: entry.url,
                               ),
-                          ),
-                        )
-                        .toList(),
-                  ),
-                ]),
-              ],
-              if (relatedTmdb.isNotEmpty || relatedLocal.isNotEmpty) ...[
-                section('Related titles', [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      ...relatedLocal.map(
-                        (entry) => ActionChip(
-                          label: Text(entry.title),
-                          onPressed: () {
-                              Navigator.pop(ctx);
-                              unawaited(_showMediaDetails(entry));
-                          },
-                        ),
+                            )
+                            .toList(),
                       ),
-                      ...relatedTmdb
-                          .where(
-                              (title) => !relatedLocal
-                                  .map((entry) => entry.title.toLowerCase())
-                                  .contains(title.toLowerCase()),
-                          )
-                          .map((title) => Chip(label: Text(title))),
-                    ],
-                  ),
-                ]),
-              ],
-            ],
+                    ]),
+                  ],
+                  if (extras.isNotEmpty) ...[
+                    section('Extras', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: extras
+                            .map(
+                              (entry) => ActionChip(
+                                label: Text(entry.label),
+                                onPressed: () => FirefoxBrowser.open(
+                                  context,
+                                  profileId: widget.profileId,
+                                  url: entry.url,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ]),
+                  ],
+                  if (relatedTmdb.isNotEmpty || relatedLocal.isNotEmpty) ...[
+                    section('Related titles', [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          ...relatedLocal.map(
+                            (entry) => ActionChip(
+                              label: Text(entry.title),
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                unawaited(_showMediaDetails(entry));
+                              },
+                            ),
+                          ),
+                          ...relatedTmdb
+                              .where(
+                                (title) => !relatedLocal
+                                    .map((entry) => entry.title.toLowerCase())
+                                    .contains(title.toLowerCase()),
+                              )
+                              .map((title) => Chip(label: Text(title))),
+                        ],
+                      ),
+                    ]),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
-          ),
-        ),
     );
   }
 
@@ -1603,6 +2135,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             title: item.title,
             subtitle: item.group,
             streamUrl: item.streamUrl,
+            streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
           ),
@@ -1641,6 +2174,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               title: item.title,
               subtitle: item.group ?? 'Series',
               streamUrl: item.streamUrl,
+              streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
               posterUrl: item.posterUrl,
               playbackPerformance: playbackPerformance,
             ),
@@ -1697,7 +2231,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         );
     final followed = _isFavorite(origin.sourceId, 'series', item.id);
     final recent = history
-        .where((entry) => entry.mediaType == 'series' && entry.mediaId == item.id)
+        .where(
+          (entry) => entry.mediaType == 'series' && entry.mediaId == item.id,
+        )
         .toList();
     final nextUpLabel = () {
       if (recent.isEmpty) {
@@ -1811,6 +2347,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     subtitle:
                         'S${episode.season}E${episode.episode} · ${episode.title}',
                     streamUrl: episode.streamUrl,
+                    streamUrlCandidates: _playbackUrlCandidates(
+                      episode.streamUrl,
+                    ),
                     posterUrl: episode.posterUrl ?? seriesDetails.posterUrl,
                     playbackPerformance: playbackPerformance,
                     nextEpisodeStreamUrl: () {
@@ -2163,9 +2702,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               controller: controller,
               autofocus: true,
               textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(
-                labelText: 'Voice query',
-              ),
+              decoration: const InputDecoration(labelText: 'Voice query'),
               onSubmitted: (text) => Navigator.pop(ctx, text),
             ),
           ],
@@ -2199,6 +2736,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   @override
   Widget build(BuildContext context) {
     final items = visibleItems;
+    final viewport = MediaQuery.sizeOf(context);
+    final compact = viewport.width < 600;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -2236,10 +2775,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         const SingleActivator(LogicalKeyboardKey.keyV): () {
           unawaited(_openVoiceSearch());
         },
-        const SingleActivator(
-          LogicalKeyboardKey.keyF,
-          control: true,
-        ): () {
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
           searchFocus.requestFocus();
         },
       },
@@ -2248,443 +2784,784 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         child: PopScope(
           canPop: true,
           child: Scaffold(
-      appBar: AppBar(
-        title: const Text('Movies & Series'),
-        actions: [
-          IconButton(
-            tooltip: 'Playlists',
-            onPressed: _managePlaylists,
-            icon: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                const Icon(Icons.playlist_play),
-                if (playlists.isNotEmpty)
-                  Positioned(
-                    right: -6,
-                    top: -6,
-                    child: CircleAvatar(
-                      radius: 8,
-                      backgroundColor: _LiveTvMediaPaint.accent,
-                      child: Text(
-                        '${playlists.length}',
-                        style: const TextStyle(fontSize: 10),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          IconButton(onPressed: _loadCatalog, icon: const Icon(Icons.refresh)),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-        children: [
-          if (loading) const LinearProgressIndicator(),
-          if (status.isNotEmpty)
-            Padding(padding: const EdgeInsets.all(8), child: Text(status)),
-          if (error.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(
-                error,
-                style: TextStyle(color: _LiveTvMediaPaint.warning),
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: DropdownButtonFormField<String>(
-                    initialValue: allSourcesSelected ? 'all' : source?.id,
-                    decoration: const InputDecoration(
-                      labelText: 'Source',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      const DropdownMenuItem<String>(
-                        value: 'all',
-                        child: Text('All Sources'),
-                      ),
-                      ...sources.map(
-                        (item) => DropdownMenuItem<String>(
-                          value: item.id,
-                          child: Text(
-                            item.name,
-                            overflow: TextOverflow.ellipsis,
+            appBar: AppBar(
+              title: const Text('Movies & Series'),
+              actions: [
+                IconButton(
+                  tooltip: 'Playlists',
+                  onPressed: _managePlaylists,
+                  icon: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(Icons.playlist_play),
+                      if (playlists.isNotEmpty)
+                        Positioned(
+                          right: -6,
+                          top: -6,
+                          child: CircleAvatar(
+                            radius: 8,
+                            backgroundColor: _LiveTvMediaPaint.accent,
+                            child: Text(
+                              '${playlists.length}',
+                              style: const TextStyle(fontSize: 10),
+                            ),
                           ),
                         ),
-                      ),
                     ],
-                    onChanged: loading
-                        ? null
-                        : (value) async {
-                            if (value == 'all') {
-                              setState(() => allSourcesSelected = true);
-                              await _loadCatalog();
-                              return;
-                            }
-                            final next = sources.firstWhere(
-                              (item) => item.id == value,
-                              orElse: () => sources.first,
-                            );
-                            setState(() {
-                              source = next;
-                              allSourcesSelected = false;
-                            });
-                            await _loadCatalog();
-                          },
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 3,
-                  child: TextField(
-                    controller: search,
-                    focusNode: searchFocus,
-                    decoration: const InputDecoration(
-                      labelText: 'Search movies or series',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.search),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  tooltip: 'On-screen keyboard search',
-                  onPressed: () => unawaited(_openSearchKeyboard()),
-                  icon: const Icon(Icons.keyboard),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  tooltip: 'Voice search',
-                  onPressed: () => unawaited(_openVoiceSearch()),
-                  icon: const Icon(Icons.mic),
+                IconButton(
+                  tooltip: 'Reload library',
+                  onPressed: loading ? null : _loadCatalog,
+                  icon: const Icon(Icons.refresh),
                 ),
               ],
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: DropdownButtonFormField<_MediaTab>(
-                    initialValue: tab,
-                    decoration: const InputDecoration(
-                      labelText: 'Media Type',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: _MediaTab.movies,
-                        child: Text('Movies'),
-                      ),
-                      DropdownMenuItem(
-                        value: _MediaTab.series,
-                        child: Text('Series'),
-                      ),
-                    ],
-                    onChanged: (value) {
-                      if (value == null) {
-                        return;
-                      }
-                      setState(() {
-                        tab = value;
-                        groupFilter = 'All';
-                      });
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 3,
-                  child: DropdownButtonFormField<String>(
-                    key: ValueKey('media-group-$groupFilter-${groups.length}'),
-                    initialValue: groups.contains(groupFilter)
-                        ? groupFilter
-                        : groups.first,
-                    decoration: const InputDecoration(
-                      labelText: 'Category',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: groups
-                        .map(
-                          (group) => DropdownMenuItem<String>(
-                            value: group,
-                            child: Text(group, overflow: TextOverflow.ellipsis),
+            body: SafeArea(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ExcludeFocus(
+                    excluding: loading,
+                    child: Column(
+                      children: [
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight: viewport.height < 500
+                                ? 150
+                                : (compact
+                                      ? 340
+                                      : min(viewport.height * 0.55, 480.0)),
                           ),
-                        )
-                        .toList(),
-                    onChanged: (value) {
-                      if (value == null) {
-                        return;
-                      }
-                      setState(() => groupFilter = value);
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: DropdownButtonFormField<_MediaSortMode>(
-                    initialValue: sortMode,
-                    decoration: const InputDecoration(
-                      labelText: 'Sort',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: _MediaSortMode.relevance,
-                        child: Text('Relevance'),
-                      ),
-                      DropdownMenuItem(
-                        value: _MediaSortMode.title,
-                        child: Text('Title'),
-                      ),
-                      DropdownMenuItem(
-                        value: _MediaSortMode.source,
-                        child: Text('Source'),
-                      ),
-                    ],
-                    onChanged: (value) {
-                      if (value == null) {
-                        return;
-                      }
-                      setState(() => sortMode = value);
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 3,
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: FilterChip(
-                      selected: versionAwareOnly,
-                      onSelected: (selected) {
-                        setState(() => versionAwareOnly = selected);
-                      },
-                      avatar: const Icon(Icons.collections_bookmark_outlined),
-                      label: Text(
-                        _multiVersionCount == 0
-                            ? 'Multiple versions only'
-                            : 'Multiple versions only ($_multiVersionCount titles)',
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: _continueWatchingCard(),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: _historyPanel(),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: _favoritesPanel(),
-            ),
-          ),
-          Expanded(
-            child: items.isEmpty
-                ? const Center(
-                    child: Text('No items match the current filter.'),
-                  )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final width = constraints.maxWidth;
-                      final maxCardWidth = max(190.0, width / 5.2).toDouble();
-                      final titleLines = width > 1200 ? 3 : 2;
-                      return GridView.builder(
-                        padding: const EdgeInsets.all(12),
-                        gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: maxCardWidth,
-                          childAspectRatio: .70,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 14,
-                        ),
-                        itemCount: items.length,
-                        itemBuilder: (context, index) {
-                          final item = items[index];
-                          final origin = mediaItemOrigins[item];
-                          final favorite = origin == null
-                              ? false
-                              : _isFavorite(
-                                  origin.sourceId,
-                                  item.series ? 'series' : 'movie',
-                                  item.id,
-                                );
-                          final focused = focusedMediaId == item.id;
-                          return InkWell(
-                            onTap: () {
-                              setState(() => focusedMediaId = item.id);
-                              unawaited(_showMediaDetails(item));
-                            },
-                            child: FocusableActionDetector(
-                              onFocusChange: (value) {
-                                if (value) {
-                                  setState(() => focusedMediaId = item.id);
-                                }
-                              },
-                              child: Card(
-                                clipBehavior: Clip.antiAlias,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  side: BorderSide(
-                                    color: focused
-                                        ? _LiveTvMediaPaint.accent
-                                        : _LiveTvMediaPaint.transparent,
-                                    width: 2,
+                          child: SingleChildScrollView(
+                            child: Column(
+                              children: [
+                                if (status.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child: Text(status),
+                                  ),
+                                if (error.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
+                                    child: Text(
+                                      error,
+                                      style: TextStyle(
+                                        color: _LiveTvMediaPaint.warning,
+                                      ),
+                                    ),
+                                  ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    8,
+                                    12,
+                                    4,
+                                  ),
+                                  child: Wrap(
+                                    runSpacing: 8,
+                                    crossAxisAlignment:
+                                        WrapCrossAlignment.center,
+                                    children: [
+                                      SizedBox(
+                                        width: compact
+                                            ? viewport.width - 24
+                                            : (viewport.width - 148) * 0.6,
+                                        child: TextField(
+                                          controller: search,
+                                          focusNode: searchFocus,
+                                          decoration: const InputDecoration(
+                                            labelText:
+                                                'Search movies or series',
+                                            border: OutlineInputBorder(),
+                                            prefixIcon: Icon(Icons.search),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      IconButton.filledTonal(
+                                        tooltip: 'On-screen keyboard search',
+                                        onPressed: () =>
+                                            unawaited(_openSearchKeyboard()),
+                                        icon: const Icon(Icons.keyboard),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      IconButton.filledTonal(
+                                        tooltip: 'Voice search',
+                                        onPressed: () =>
+                                            unawaited(_openVoiceSearch()),
+                                        icon: const Icon(Icons.mic),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child:
-                                        item.posterUrl == null ||
-                                            item.posterUrl!.trim().isEmpty
-                                        ? ColoredBox(
-                                            color: _LiveTvMediaPaint.panel,
-                                            child: Center(
-                                              child: Icon(
-                                                Icons.live_tv,
-                                                size: 46,
-                                              ),
-                                            ),
-                                          )
-                                        : Image.network(
-                                            item.posterUrl!,
-                                            fit: BoxFit.cover,
-                                            width: double.infinity,
-                                            errorBuilder: (_, __, ___) =>
-                                                ColoredBox(
-                                                  color: _LiveTvMediaPaint.panel,
-                                                  child: Center(
-                                                    child: Icon(
-                                                      Icons.movie_outlined,
-                                                      size: 46,
-                                                    ),
-                                                  ),
-                                                ),
-                                          ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    4,
+                                    12,
+                                    4,
                                   ),
-                                  Padding(
-                                    padding: const EdgeInsets.all(10),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
                                       children: [
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                item.title,
-                                                maxLines: titleLines,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.w700,
-                                                  fontSize: 14,
-                                                ),
-                                              ),
-                                            ),
-                                            if (_versionCountFor(item) > 1) ...[
-                                              const SizedBox(width: 6),
-                                              DecoratedBox(
-                                                decoration: BoxDecoration(
-                                                  color: _LiveTvMediaPaint
-                                                      .onSurface
-                                                      .withAlpha(42),
-                                                  borderRadius:
-                                                      BorderRadius.circular(999),
-                                                ),
-                                                child: Padding(
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                    horizontal: 6,
-                                                    vertical: 2,
-                                                  ),
-                                                  child: Text(
-                                                    'x${_versionCountFor(item)}',
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      color: _LiveTvMediaPaint
-                                                          .onSurface70,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                            Icon(
-                                              favorite
-                                                  ? Icons.favorite
-                                                  : Icons.favorite_border,
-                                              size: 16,
-                                              color: favorite
-                                                  ? _LiveTvMediaPaint.error
-                                                  : _LiveTvMediaPaint.onSurface54,
-                                            ),
-                                          ],
+                                        ChoiceChip(
+                                          label: const Text('All Sources'),
+                                          selected: allSourcesSelected,
+                                          onSelected: loading
+                                              ? null
+                                              : (_) async {
+                                                  setState(
+                                                    () => allSourcesSelected =
+                                                        true,
+                                                  );
+                                                  await _loadCatalog();
+                                                },
                                         ),
-                                        if (item.group != null &&
-                                            item.group!.trim().isNotEmpty)
-                                          Text(
-                                            item.group!,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: _LiveTvMediaPaint.onSurface70,
-                                              fontSize: 12,
+                                        ...sources.map(
+                                          (item) => ChoiceChip(
+                                            label: Text(
+                                              item.name,
+                                              overflow: TextOverflow.ellipsis,
                                             ),
+                                            selected:
+                                                !allSourcesSelected &&
+                                                source?.id == item.id,
+                                            onSelected: loading
+                                                ? null
+                                                : (_) async {
+                                                    setState(() {
+                                                      source = item;
+                                                      allSourcesSelected =
+                                                          false;
+                                                    });
+                                                    await _loadCatalog();
+                                                  },
                                           ),
-                                        if (origin != null)
-                                          Text(
-                                            origin.sourceName,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: _LiveTvMediaPaint.onSurface54,
-                                              fontSize: 11,
-                                            ),
-                                          ),
+                                        ),
                                       ],
                                     ),
                                   ),
-                                ],
-                              ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    4,
+                                    12,
+                                    4,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        ChoiceChip(
+                                          label: const Text('Movies'),
+                                          selected: tab == _MediaTab.movies,
+                                          onSelected: (selected) {
+                                            if (!selected) {
+                                              return;
+                                            }
+                                            setState(() {
+                                              tab = _MediaTab.movies;
+                                              groupFilter = 'All';
+                                            });
+                                          },
+                                        ),
+                                        ChoiceChip(
+                                          label: const Text('Series'),
+                                          selected: tab == _MediaTab.series,
+                                          onSelected: (selected) {
+                                            if (!selected) {
+                                              return;
+                                            }
+                                            setState(() {
+                                              tab = _MediaTab.series;
+                                              groupFilter = 'All';
+                                            });
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                if (activeSeasonalCollections.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        children: activeSeasonalCollections.map(
+                                          (collection) {
+                                            return FilterChip(
+                                              avatar: Icon(
+                                                collection.icon,
+                                                size: 18,
+                                              ),
+                                              label: Text(collection.label),
+                                              selected:
+                                                  activeCollectionId ==
+                                                  collection.id,
+                                              onSelected: (_) =>
+                                                  _toggleCollection(
+                                                    collection.id,
+                                                  ),
+                                            );
+                                          },
+                                        ).toList(),
+                                      ),
+                                    ),
+                                  ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    4,
+                                    12,
+                                    4,
+                                  ),
+                                  child: InkWell(
+                                    key: ValueKey(
+                                      'media-group-$groupFilter-${groups.length}',
+                                    ),
+                                    borderRadius: BorderRadius.circular(4),
+                                    onTap: () => _showCategoryPicker(groups),
+                                    child: InputDecorator(
+                                      decoration: const InputDecoration(
+                                        labelText: 'Category',
+                                        border: OutlineInputBorder(),
+                                        isDense: true,
+                                        prefixIcon: Icon(
+                                          Icons.filter_alt_outlined,
+                                        ),
+                                        suffixIcon: Icon(Icons.arrow_drop_down),
+                                      ),
+                                      child: Text(
+                                        groups.contains(groupFilter)
+                                            ? groupFilter
+                                            : groups.first,
+                                        overflow: TextOverflow.ellipsis,
+                                        maxLines: 1,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (availableGenres.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        crossAxisAlignment:
+                                            WrapCrossAlignment.center,
+                                        children: [
+                                          ...availableGenres.map(
+                                            (genre) => FilterChip(
+                                              label: Text(genre),
+                                              selected: selectedGenres.contains(
+                                                genre,
+                                              ),
+                                              onSelected: (_) =>
+                                                  _toggleGenre(genre),
+                                            ),
+                                          ),
+                                          IconButton(
+                                            tooltip: 'Shuffle from selection',
+                                            onPressed: visibleItems.isEmpty
+                                                ? null
+                                                : () => unawaited(
+                                                    _shuffleWithinFilters(),
+                                                  ),
+                                            icon: const Icon(Icons.shuffle),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                const SizedBox(height: 8),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 2,
+                                        child:
+                                            DropdownButtonFormField<
+                                              _MediaSortMode
+                                            >(
+                                              isExpanded: true,
+                                              initialValue: sortMode,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Sort',
+                                                border: OutlineInputBorder(),
+                                              ),
+                                              items: const [
+                                                DropdownMenuItem(
+                                                  value:
+                                                      _MediaSortMode.relevance,
+                                                  child: Text('Relevance'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: _MediaSortMode.title,
+                                                  child: Text('Title'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: _MediaSortMode.source,
+                                                  child: Text('Source'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value:
+                                                      _MediaSortMode.inTheaters,
+                                                  child: Text('In Theaters'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: _MediaSortMode
+                                                      .recentlyAdded,
+                                                  child: Text('Recently Added'),
+                                                ),
+                                              ],
+                                              onChanged: (value) {
+                                                if (value == null) {
+                                                  return;
+                                                }
+                                                setState(
+                                                  () => sortMode = value,
+                                                );
+                                              },
+                                            ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        flex: 3,
+                                        child: Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: FilterChip(
+                                            selected: versionAwareOnly,
+                                            onSelected: (selected) {
+                                              setState(
+                                                () =>
+                                                    versionAwareOnly = selected,
+                                              );
+                                            },
+                                            avatar: const Icon(
+                                              Icons
+                                                  .collections_bookmark_outlined,
+                                            ),
+                                            label: Text(
+                                              _multiVersionCount == 0
+                                                  ? 'Multiple versions only'
+                                                  : 'Multiple versions only ($_multiVersionCount titles)',
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    0,
+                                    12,
+                                    8,
+                                  ),
+                                  child: _continueWatchingCard(),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    4,
+                                    12,
+                                    8,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: _historyPanel(),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    0,
+                                    12,
+                                    8,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: _favoritesPanel(),
+                                  ),
+                                ),
+                              ],
                             ),
-                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: items.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    'No items match the current filter.',
+                                  ),
+                                )
+                              : LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final width = constraints.maxWidth;
+                                    final maxCardWidth = max(
+                                      190.0,
+                                      width / 5.2,
+                                    ).toDouble();
+                                    final titleLines = width > 1200 ? 3 : 2;
+                                    return GridView.builder(
+                                      padding: const EdgeInsets.all(12),
+                                      gridDelegate:
+                                          SliverGridDelegateWithMaxCrossAxisExtent(
+                                            maxCrossAxisExtent: maxCardWidth,
+                                            childAspectRatio: .70,
+                                            crossAxisSpacing: 12,
+                                            mainAxisSpacing: 14,
+                                          ),
+                                      itemCount: items.length,
+                                      itemBuilder: (context, index) {
+                                        final item = items[index];
+                                        final origin = mediaItemOrigins[item];
+                                        final favorite = origin == null
+                                            ? false
+                                            : _isFavorite(
+                                                origin.sourceId,
+                                                item.series
+                                                    ? 'series'
+                                                    : 'movie',
+                                                item.id,
+                                              );
+                                        final focused =
+                                            focusedMediaId == item.id;
+                                        return InkWell(
+                                          onTap: () {
+                                            setState(
+                                              () => focusedMediaId = item.id,
+                                            );
+                                            unawaited(_showMediaDetails(item));
+                                          },
+                                          child: FocusableActionDetector(
+                                            onFocusChange: (value) {
+                                              if (value) {
+                                                setState(
+                                                  () =>
+                                                      focusedMediaId = item.id,
+                                                );
+                                              }
+                                            },
+                                            child: Card(
+                                              clipBehavior: Clip.antiAlias,
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                side: BorderSide(
+                                                  color: focused
+                                                      ? _LiveTvMediaPaint.accent
+                                                      : _LiveTvMediaPaint
+                                                            .transparent,
+                                                  width: 2,
+                                                ),
+                                              ),
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Expanded(
+                                                    child:
+                                                        item.posterUrl ==
+                                                                null ||
+                                                            item.posterUrl!
+                                                                .trim()
+                                                                .isEmpty
+                                                        ? ColoredBox(
+                                                            color:
+                                                                _LiveTvMediaPaint
+                                                                    .panel,
+                                                            child: Center(
+                                                              child: Icon(
+                                                                Icons.live_tv,
+                                                                size: 46,
+                                                              ),
+                                                            ),
+                                                          )
+                                                        : Image.network(
+                                                            item.posterUrl!,
+                                                            fit: BoxFit.cover,
+                                                            width:
+                                                                double.infinity,
+                                                            errorBuilder:
+                                                                (
+                                                                  _,
+                                                                  __,
+                                                                  ___,
+                                                                ) => ColoredBox(
+                                                                  color:
+                                                                      _LiveTvMediaPaint
+                                                                          .panel,
+                                                                  child: Center(
+                                                                    child: Icon(
+                                                                      Icons
+                                                                          .movie_outlined,
+                                                                      size: 46,
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                          ),
+                                                  ),
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.all(
+                                                          10,
+                                                        ),
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: Text(
+                                                                item.title,
+                                                                maxLines:
+                                                                    titleLines,
+                                                                overflow:
+                                                                    TextOverflow
+                                                                        .ellipsis,
+                                                                style: const TextStyle(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w700,
+                                                                  fontSize: 14,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                            if (_versionCountFor(
+                                                                  item,
+                                                                ) >
+                                                                1) ...[
+                                                              const SizedBox(
+                                                                width: 6,
+                                                              ),
+                                                              DecoratedBox(
+                                                                decoration: BoxDecoration(
+                                                                  color: _LiveTvMediaPaint
+                                                                      .onSurface
+                                                                      .withAlpha(
+                                                                        42,
+                                                                      ),
+                                                                  borderRadius:
+                                                                      BorderRadius.circular(
+                                                                        999,
+                                                                      ),
+                                                                ),
+                                                                child: Padding(
+                                                                  padding:
+                                                                      const EdgeInsets.symmetric(
+                                                                        horizontal:
+                                                                            6,
+                                                                        vertical:
+                                                                            2,
+                                                                      ),
+                                                                  child: Text(
+                                                                    'x${_versionCountFor(item)}',
+                                                                    style: TextStyle(
+                                                                      fontSize:
+                                                                          11,
+                                                                      color: _LiveTvMediaPaint
+                                                                          .onSurface70,
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ],
+                                                            Icon(
+                                                              favorite
+                                                                  ? Icons
+                                                                        .favorite
+                                                                  : Icons
+                                                                        .favorite_border,
+                                                              size: 16,
+                                                              color: favorite
+                                                                  ? _LiveTvMediaPaint
+                                                                        .error
+                                                                  : _LiveTvMediaPaint
+                                                                        .onSurface54,
+                                                            ),
+                                                          ],
+                                                        ),
+                                                        if (item.group !=
+                                                                null &&
+                                                            item.group!
+                                                                .trim()
+                                                                .isNotEmpty)
+                                                          Text(
+                                                            item.group!,
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                            style: TextStyle(
+                                                              color: _LiveTvMediaPaint
+                                                                  .onSurface70,
+                                                              fontSize: 12,
+                                                            ),
+                                                          ),
+                                                        if (origin != null)
+                                                          Text(
+                                                            origin.sourceName,
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                            style: TextStyle(
+                                                              color: _LiveTvMediaPaint
+                                                                  .onSurface54,
+                                                              fontSize: 11,
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (loading)
+                    Positioned.fill(
+                      child: _CatalogLoadingModal(
+                        phase: catalogPhase,
+                        sourceName: catalogSourceName,
+                        stepsCompleted: catalogStepsCompleted,
+                        stepsTotal: catalogStepsTotal,
+                        moviesLoaded: catalogMoviesLoaded,
+                        seriesLoaded: catalogSeriesLoaded,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryPickerDialog extends StatefulWidget {
+  const _CategoryPickerDialog({required this.groups, required this.maxHeight});
+
+  final List<String> groups;
+  final double maxHeight;
+
+  @override
+  State<_CategoryPickerDialog> createState() => _CategoryPickerDialogState();
+}
+
+class _CategoryPickerDialogState extends State<_CategoryPickerDialog> {
+  final TextEditingController _search = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _query.isEmpty
+        ? widget.groups
+        : widget.groups
+              .where((group) => group.toLowerCase().contains(_query))
+              .toList();
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 420, maxHeight: widget.maxHeight),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Category', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              TextField(
+                key: const ValueKey('category-picker-search'),
+                controller: _search,
+                autofocus: true,
+                decoration: InputDecoration(
+                  hintText: 'Filter categories',
+                  prefixIcon: const Icon(Icons.search),
+                  isDense: true,
+                  border: const OutlineInputBorder(),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () {
+                            _search.clear();
+                            setState(() => _query = '');
+                          },
+                        ),
+                ),
+                onChanged: (value) =>
+                    setState(() => _query = value.trim().toLowerCase()),
+              ),
+              const SizedBox(height: 8),
+              Flexible(
+                child: filtered.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Center(child: Text('No matching categories')),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: filtered.length,
+                        itemBuilder: (context, index) {
+                          final group = filtered[index];
+                          return ListTile(
+                            dense: true,
+                            title: Text(group, overflow: TextOverflow.ellipsis),
+                            onTap: () => Navigator.of(context).pop(group),
                           );
                         },
-                      );
-                    },
-                  ),
+                      ),
+              ),
+            ],
           ),
-        ],
-      ),
-      ),
-    ),
         ),
       ),
     );
@@ -2696,6 +3573,7 @@ class _MediaPlayerScreen extends StatefulWidget {
   final String title;
   final String? subtitle;
   final String streamUrl;
+  final List<String> streamUrlCandidates;
   final String? posterUrl;
   final PlaybackPerformanceSettings playbackPerformance;
   final String? nextEpisodeStreamUrl;
@@ -2705,6 +3583,7 @@ class _MediaPlayerScreen extends StatefulWidget {
     required this.title,
     this.subtitle,
     required this.streamUrl,
+    this.streamUrlCandidates = const <String>[],
     this.posterUrl,
     required this.playbackPerformance,
     this.nextEpisodeStreamUrl,
@@ -2833,8 +3712,27 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
   }
 
-  Future<void> _openWithPolicy(Player created, {required bool compatibleMode}) async {
-    await created.open(Media(widget.streamUrl), play: true);
+  Future<void> _openWithPolicy(
+    Player created, {
+    required bool compatibleMode,
+  }) async {
+    final candidates = <String>[
+      ...widget.streamUrlCandidates,
+      widget.streamUrl,
+    ];
+    Object? lastError;
+    for (final candidate in candidates) {
+      try {
+        await created.open(Media(candidate), play: true);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError != null) {
+      throw lastError;
+    }
     if (qualityAdaptive) {
       try {
         await created.setVideoTrack(VideoTrack.auto());
@@ -3083,7 +3981,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
     final octets = lower.split('.');
     final secondOctet = octets.length > 1 ? int.tryParse(octets[1]) : null;
-    if (lower.startsWith('172.') && secondOctet != null && secondOctet >= 16 && secondOctet <= 31) {
+    if (lower.startsWith('172.') &&
+        secondOctet != null &&
+        secondOctet >= 16 &&
+        secondOctet <= 31) {
       return true;
     }
     return false;
@@ -3104,13 +4005,17 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   String _detectOutputEnvironment() {
     if (defaultTargetPlatform == TargetPlatform.android) {
-      return fullscreen ? 'Android fullscreen output' : 'Android embedded output';
+      return fullscreen
+          ? 'Android fullscreen output'
+          : 'Android embedded output';
     }
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return 'iOS output';
     }
     if (defaultTargetPlatform == TargetPlatform.windows) {
-      return fullscreen ? 'Windows fullscreen output' : 'Windows windowed output';
+      return fullscreen
+          ? 'Windows fullscreen output'
+          : 'Windows windowed output';
     }
     if (defaultTargetPlatform == TargetPlatform.linux) {
       return fullscreen ? 'Linux fullscreen output' : 'Linux windowed output';
@@ -3142,7 +4047,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
     final prior = prefs['provenCompatibleHosts'];
     final values = <String>{
-      if (prior is List) ...prior.map((item) => item.toString().trim()).where((item) => item.isNotEmpty),
+      if (prior is List)
+        ...prior
+            .map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty),
       host,
     };
     prefs['provenCompatibleHosts'] = values.toList();
@@ -3216,13 +4124,34 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       return;
     }
     try {
-      await platform.setProperty('sub-font-size', subtitleFontSize.toStringAsFixed(0));
-      await platform.setProperty('sub-color', _toMpvHex(subtitleForeground, opacity: subtitleOpacity));
-      await platform.setProperty('sub-back-color', _toMpvHex(subtitleBackground, opacity: subtitleOpacity));
-      await platform.setProperty('sub-border-color', _toMpvHex(subtitleOutline, opacity: subtitleOpacity));
-      await platform.setProperty('sub-pos', subtitlePosition.toStringAsFixed(0));
-      await platform.setProperty('sub-delay', subtitleDelaySeconds.toStringAsFixed(2));
-      await platform.setProperty('sub-shadow-offset', reducedMotion ? '0' : '1');
+      await platform.setProperty(
+        'sub-font-size',
+        subtitleFontSize.toStringAsFixed(0),
+      );
+      await platform.setProperty(
+        'sub-color',
+        _toMpvHex(subtitleForeground, opacity: subtitleOpacity),
+      );
+      await platform.setProperty(
+        'sub-back-color',
+        _toMpvHex(subtitleBackground, opacity: subtitleOpacity),
+      );
+      await platform.setProperty(
+        'sub-border-color',
+        _toMpvHex(subtitleOutline, opacity: subtitleOpacity),
+      );
+      await platform.setProperty(
+        'sub-pos',
+        subtitlePosition.toStringAsFixed(0),
+      );
+      await platform.setProperty(
+        'sub-delay',
+        subtitleDelaySeconds.toStringAsFixed(2),
+      );
+      await platform.setProperty(
+        'sub-shadow-offset',
+        reducedMotion ? '0' : '1',
+      );
       await platform.setProperty('sub-ass-override', 'force');
     } catch (_) {}
   }
@@ -3268,8 +4197,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     final widthPattern = RegExp(r'(\d{3,4})p', caseSensitive: false);
     final kbpsPattern = RegExp(r'(\d{3,6})\s?kbps', caseSensitive: false);
     for (final track in tracks.video) {
-      final label = '${track.title ?? ''} ${track.language ?? ''}'.toLowerCase();
-      final width = int.tryParse(widthPattern.firstMatch(label)?.group(1) ?? '');
+      final label = '${track.title ?? ''} ${track.language ?? ''}'
+          .toLowerCase();
+      final width = int.tryParse(
+        widthPattern.firstMatch(label)?.group(1) ?? '',
+      );
       final kbps = int.tryParse(kbpsPattern.firstMatch(label)?.group(1) ?? '');
       final score = kbps ?? ((width ?? 0) * 8);
       if (score <= limitKbps && score > bestScore) {
@@ -3279,7 +4211,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
     if (best != null) {
       await current.setVideoTrack(best);
-      qualityRoute = best == selectedTrack.video ? 'original' : 'compatibility-constrained';
+      qualityRoute = best == selectedTrack.video
+          ? 'original'
+          : 'compatibility-constrained';
       if (qualityRoute == 'compatibility-constrained') {
         transcodeReason =
             'Bandwidth policy ($playbackRoute <= ${limitKbps}kbps) selected a lower compatible quality.';
@@ -3310,12 +4244,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       final lang = (track.language ?? '').toLowerCase();
       return lang.contains(preferredAudioLanguage.toLowerCase());
     }).toList();
-    AudioTrack chosen = byLanguage.isNotEmpty ? byLanguage.first : tracks.audio.first;
+    AudioTrack chosen = byLanguage.isNotEmpty
+        ? byLanguage.first
+        : tracks.audio.first;
     if (preferAudioDescription) {
       for (final track in byLanguage.isNotEmpty ? byLanguage : tracks.audio) {
-        if (_trackKindLabel(track.title ?? '').toLowerCase().contains(
-          'audio description',
-        )) {
+        if (_trackKindLabel(
+          track.title ?? '',
+        ).toLowerCase().contains('audio description')) {
           chosen = track;
           break;
         }
@@ -3351,7 +4287,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               lower.contains('closed caption'))) {
         sdh = track;
       }
-      if (language == null && lang.contains(preferredSubtitleLanguage.toLowerCase())) {
+      if (language == null &&
+          lang.contains(preferredSubtitleLanguage.toLowerCase())) {
         language = track;
       }
     }
@@ -3384,10 +4321,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _loadPlayerPreferences() async {
     final prefs = await memory.loadPrefs(widget.profileKey);
-    seekIncrementSeconds = int.tryParse(
-          prefs['seekIncrementSeconds']?.toString() ?? '',
-        ) ??
-        10;
+    seekIncrementSeconds =
+        int.tryParse(prefs['seekIncrementSeconds']?.toString() ?? '') ?? 10;
     if (seekIncrementSeconds < 5) {
       seekIncrementSeconds = 5;
     }
@@ -3399,7 +4334,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     pauseHistory = prefs['pauseHistory'] == true;
     aspectMode = prefs['aspectMode']?.toString() ?? 'contain';
     audioOutputProfile = prefs['audioOutputProfile']?.toString() ?? 'auto';
-    preferredAudioLanguage = prefs['preferredAudioLanguage']?.toString() ?? 'en';
+    preferredAudioLanguage =
+        prefs['preferredAudioLanguage']?.toString() ?? 'en';
     preferredSubtitleLanguage =
         prefs['preferredSubtitleLanguage']?.toString() ?? 'en';
     preferSdh = prefs['preferSdh'] == true;
@@ -3494,7 +4430,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     final durationMs = duration.inMilliseconds;
     final positionMs = position.inMilliseconds;
     final complete =
-        durationMs > 0 && positionMs >= (durationMs - const Duration(seconds: 8).inMilliseconds);
+        durationMs > 0 &&
+        positionMs >= (durationMs - const Duration(seconds: 8).inMilliseconds);
     await memory.saveProgress(
       widget.streamUrl,
       positionMs: positionMs,
@@ -3542,7 +4479,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       return;
     }
     if (duration.inMilliseconds > 0 &&
-        resumeMs >= duration.inMilliseconds - const Duration(seconds: 12).inMilliseconds) {
+        resumeMs >=
+            duration.inMilliseconds -
+                const Duration(seconds: 12).inMilliseconds) {
       return;
     }
     showingResumePrompt = true;
@@ -3620,8 +4559,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       }
       if (mounted) {
         setState(
-          () => error =
-              'Playback could not recover automatically. Please retry.',
+          () =>
+              error = 'Playback could not recover automatically. Please retry.',
         );
       } else {
         error = 'Playback could not recover automatically. Please retry.';
@@ -4171,7 +5110,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Future<void> _showCapabilitiesReport() async {
-    final sourceScheme = Uri.tryParse(widget.streamUrl)?.scheme.toLowerCase() ?? 'unknown';
+    final sourceScheme =
+        Uri.tryParse(widget.streamUrl)?.scheme.toLowerCase() ?? 'unknown';
     final canSelectAudio = tracks.audio.isNotEmpty;
     final canSelectSubtitle = tracks.subtitle.isNotEmpty;
     final canSelectQuality = tracks.video.isNotEmpty;
@@ -4240,7 +5180,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                 SwitchListTile(
                   value: preferForcedSubtitles,
                   title: const Text('Prefer forced subtitles'),
-                  onChanged: (value) => setLocalState(() => preferForcedSubtitles = value),
+                  onChanged: (value) =>
+                      setLocalState(() => preferForcedSubtitles = value),
                 ),
                 SwitchListTile(
                   value: preferSdh,
@@ -4250,22 +5191,26 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                 SwitchListTile(
                   value: preferAudioDescription,
                   title: const Text('Prefer audio description'),
-                  onChanged: (value) => setLocalState(() => preferAudioDescription = value),
+                  onChanged: (value) =>
+                      setLocalState(() => preferAudioDescription = value),
                 ),
                 SwitchListTile(
                   value: highContrastInterface,
                   title: const Text('High-contrast interface'),
-                  onChanged: (value) => setLocalState(() => highContrastInterface = value),
+                  onChanged: (value) =>
+                      setLocalState(() => highContrastInterface = value),
                 ),
                 SwitchListTile(
                   value: reducedMotion,
                   title: const Text('Reduced motion'),
-                  onChanged: (value) => setLocalState(() => reducedMotion = value),
+                  onChanged: (value) =>
+                      setLocalState(() => reducedMotion = value),
                 ),
                 SwitchListTile(
                   value: screenReaderHints,
                   title: const Text('Screen-reader hints'),
-                  onChanged: (value) => setLocalState(() => screenReaderHints = value),
+                  onChanged: (value) =>
+                      setLocalState(() => screenReaderHints = value),
                 ),
                 ListTile(
                   title: const Text('Preferred audio language'),
@@ -4290,7 +5235,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                       for (final option in colorOptions)
                         ChoiceChip(
                           label: Text(option.key),
-                          selected: subtitleForeground.value == option.value.value,
+                          selected:
+                              subtitleForeground.value == option.value.value,
                           onSelected: (_) => setLocalState(
                             () => subtitleForeground = option.value,
                           ),
@@ -4307,7 +5253,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                       for (final option in colorOptions)
                         ChoiceChip(
                           label: Text(option.key),
-                          selected: subtitleBackground.value == option.value.value,
+                          selected:
+                              subtitleBackground.value == option.value.value,
                           onSelected: (_) => setLocalState(
                             () => subtitleBackground = option.value,
                           ),
@@ -4333,48 +5280,63 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                   ),
                 ),
                 ListTile(
-                  title: Text('Subtitle font size: ${subtitleFontSize.toStringAsFixed(0)}'),
+                  title: Text(
+                    'Subtitle font size: ${subtitleFontSize.toStringAsFixed(0)}',
+                  ),
                   subtitle: Slider(
                     value: subtitleFontSize.clamp(26, 82),
                     min: 26,
                     max: 82,
-                    onChanged: (value) => setLocalState(() => subtitleFontSize = value),
+                    onChanged: (value) =>
+                        setLocalState(() => subtitleFontSize = value),
                   ),
                 ),
                 ListTile(
-                  title: Text('Subtitle opacity: ${(subtitleOpacity * 100).round()}%'),
+                  title: Text(
+                    'Subtitle opacity: ${(subtitleOpacity * 100).round()}%',
+                  ),
                   subtitle: Slider(
                     value: subtitleOpacity.clamp(0.2, 1.0),
                     min: 0.2,
                     max: 1.0,
-                    onChanged: (value) => setLocalState(() => subtitleOpacity = value),
+                    onChanged: (value) =>
+                        setLocalState(() => subtitleOpacity = value),
                   ),
                 ),
                 ListTile(
-                  title: Text('Subtitle position: ${subtitlePosition.toStringAsFixed(0)}'),
+                  title: Text(
+                    'Subtitle position: ${subtitlePosition.toStringAsFixed(0)}',
+                  ),
                   subtitle: Slider(
                     value: subtitlePosition.clamp(10, 100),
                     min: 10,
                     max: 100,
-                    onChanged: (value) => setLocalState(() => subtitlePosition = value),
+                    onChanged: (value) =>
+                        setLocalState(() => subtitlePosition = value),
                   ),
                 ),
                 ListTile(
-                  title: Text('Subtitle timing offset: ${subtitleDelaySeconds.toStringAsFixed(2)}s'),
+                  title: Text(
+                    'Subtitle timing offset: ${subtitleDelaySeconds.toStringAsFixed(2)}s',
+                  ),
                   subtitle: Slider(
                     value: subtitleDelaySeconds.clamp(-5, 5),
                     min: -5,
                     max: 5,
-                    onChanged: (value) => setLocalState(() => subtitleDelaySeconds = value),
+                    onChanged: (value) =>
+                        setLocalState(() => subtitleDelaySeconds = value),
                   ),
                 ),
                 ListTile(
-                  title: Text('Text scaling: ${playerTextScale.toStringAsFixed(2)}x'),
+                  title: Text(
+                    'Text scaling: ${playerTextScale.toStringAsFixed(2)}x',
+                  ),
                   subtitle: Slider(
                     value: playerTextScale.clamp(0.8, 1.8),
                     min: 0.8,
                     max: 1.8,
-                    onChanged: (value) => setLocalState(() => playerTextScale = value),
+                    onChanged: (value) =>
+                        setLocalState(() => playerTextScale = value),
                   ),
                 ),
                 Align(
@@ -4428,7 +5390,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (platform is! NativePlayer) {
       if (mounted) {
         setState(() {
-          error = 'User-provided subtitle files are not supported on this platform.';
+          error =
+              'User-provided subtitle files are not supported on this platform.';
         });
       }
       return;
@@ -4464,9 +5427,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         title: const Text('Subtitle quality report'),
         content: SizedBox(
           width: 460,
-          child: SingleChildScrollView(
-            child: Text(summary.join('\n')),
-          ),
+          child: SingleChildScrollView(child: Text(summary.join('\n'))),
         ),
         actions: [
           TextButton(
@@ -4677,10 +5638,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                   }
                                 } catch (e) {
                                   setLocalState(
-                                    () => localError = e.toString().replaceFirst(
-                                      'Bad state: ',
-                                      '',
-                                    ),
+                                    () => localError = e
+                                        .toString()
+                                        .replaceFirst('Bad state: ', ''),
                                   );
                                 }
                               },
@@ -4711,7 +5671,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     final source = TextEditingController(text: preferredSubtitleLanguage);
     final target = TextEditingController(text: preferredAudioLanguage);
     final endpoint = TextEditingController(
-      text: prefs['translateEndpoint']?.toString() ?? 'https://libretranslate.com/translate',
+      text:
+          prefs['translateEndpoint']?.toString() ??
+          'https://libretranslate.com/translate',
     );
     final apiKey = TextEditingController(
       text: prefs['translateApiKey']?.toString() ?? '',
@@ -4743,14 +5705,18 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                       Expanded(
                         child: TextField(
                           controller: source,
-                          decoration: const InputDecoration(labelText: 'From (lang code)'),
+                          decoration: const InputDecoration(
+                            labelText: 'From (lang code)',
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: TextField(
                           controller: target,
-                          decoration: const InputDecoration(labelText: 'To (lang code)'),
+                          decoration: const InputDecoration(
+                            labelText: 'To (lang code)',
+                          ),
                         ),
                       ),
                     ],
@@ -4782,19 +5748,21 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                   translated = '';
                                 });
                                 try {
-                                  translated = await subtitleProviders.translateText(
-                                    text: textInput.text,
-                                    fromLanguage: source.text.trim().isEmpty
-                                        ? 'auto'
-                                        : source.text.trim(),
-                                    toLanguage: target.text.trim().isEmpty
-                                        ? 'en'
-                                        : target.text.trim(),
-                                    providerConfig: {
-                                      'translateEndpoint': endpoint.text.trim(),
-                                      'translateApiKey': apiKey.text.trim(),
-                                    },
-                                  );
+                                  translated = await subtitleProviders
+                                      .translateText(
+                                        text: textInput.text,
+                                        fromLanguage: source.text.trim().isEmpty
+                                            ? 'auto'
+                                            : source.text.trim(),
+                                        toLanguage: target.text.trim().isEmpty
+                                            ? 'en'
+                                            : target.text.trim(),
+                                        providerConfig: {
+                                          'translateEndpoint': endpoint.text
+                                              .trim(),
+                                          'translateApiKey': apiKey.text.trim(),
+                                        },
+                                      );
                                   await _saveSubtitleProviderPrefs({
                                     'translateEndpoint': endpoint.text.trim(),
                                     'translateApiKey': apiKey.text.trim(),
@@ -5035,7 +6003,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                   try {
                     await current.setSubtitleTrack(track);
                     final subtitleLabel =
-                        '${track.title ?? ''} ${track.language ?? ''}'.toLowerCase();
+                        '${track.title ?? ''} ${track.language ?? ''}'
+                            .toLowerCase();
                     final likelyImageSubtitle =
                         subtitleLabel.contains('pgs') ||
                         subtitleLabel.contains('dvd') ||
@@ -5047,7 +6016,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                               'Selected subtitle may require provider-side burn-in on some servers.';
                           qualityRoute = 'compatibility-constrained';
                         } else {
-                          transcodeReason = 'Subtitle track switched without forced transcoding.';
+                          transcodeReason =
+                              'Subtitle track switched without forced transcoding.';
                         }
                       });
                     }
@@ -5082,7 +6052,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     await current.seek(Duration(milliseconds: target));
   }
 
-  Future<void> _seekByConfigured(int direction, {bool accelerated = false}) async {
+  Future<void> _seekByConfigured(
+    int direction, {
+    bool accelerated = false,
+  }) async {
     final step = seekIncrementSeconds * (accelerated ? 3 : 1);
     await _seekRelative(Duration(seconds: step * direction));
   }
@@ -5236,870 +6209,1048 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
             onTap: _registerControlsInteraction,
             onPanStart: (_) => _registerControlsInteraction(),
             child: MediaQuery(
-      data: MediaQuery.of(context).copyWith(
-        textScaler: TextScaler.linear(playerTextScale.clamp(0.8, 1.8)),
-      ),
-      child: Scaffold(
-      appBar: fullscreen
-          ? null
-          : AppBar(
-              title: Text(widget.title),
-              leading: IconButton(
-                tooltip: 'Home (PiP)',
-                onPressed: () => unawaited(_minimizeToPipAndGoHome()),
-                icon: const Icon(Icons.arrow_back),
+              data: MediaQuery.of(context).copyWith(
+                textScaler: TextScaler.linear(playerTextScale.clamp(0.8, 1.8)),
               ),
-              actions: [
-                IconButton(
-                  tooltip: fullscreen ? 'Exit fullscreen' : 'Fullscreen',
-                  onPressed: () => unawaited(_toggleFullscreen()),
-                  icon: Icon(
-                    fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Subtitles',
-                  onPressed: _pickSubtitle,
-                  icon: const Icon(Icons.subtitles),
-                ),
-                IconButton(
-                  tooltip: subtitlesEnabled ? 'Disable subtitles' : 'Enable subtitles',
-                  onPressed: () => unawaited(_toggleSubtitles(!subtitlesEnabled)),
-                  icon: Icon(
-                    subtitlesEnabled
-                        ? Icons.closed_caption
-                        : Icons.closed_caption_disabled,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Audio track',
-                  onPressed: _pickAudioTrack,
-                  icon: const Icon(Icons.audiotrack),
-                ),
-                IconButton(
-                  tooltip: 'Quality',
-                  onPressed: _pickVideoTrackQuality,
-                  icon: const Icon(Icons.hd),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: 'Playback options',
-                  onSelected: (value) async {
-                    switch (value) {
-                      case 'speed_05':
-                        await _setPlaybackSpeed(0.5);
-                        break;
-                      case 'speed_10':
-                        await _setPlaybackSpeed(1.0);
-                        break;
-                      case 'speed_125':
-                        await _setPlaybackSpeed(1.25);
-                        break;
-                      case 'speed_150':
-                        await _setPlaybackSpeed(1.5);
-                        break;
-                      case 'speed_200':
-                        await _setPlaybackSpeed(2.0);
-                        break;
-                      case 'bookmark_add':
-                        await _addBookmark();
-                        break;
-                      case 'bookmark_open':
-                        await _openBookmarks();
-                        break;
-                      case 'chapters':
-                        await _openChapters();
-                        break;
-                      case 'restart':
-                        await _restartPlayback();
-                        break;
-                      case 'resume_saved':
-                        await _resumeSavedPosition();
-                        break;
-                      case 'seek_10':
-                        seekIncrementSeconds = 10;
-                        await _savePlayerPreferences();
-                        break;
-                      case 'seek_30':
-                        seekIncrementSeconds = 30;
-                        await _savePlayerPreferences();
-                        break;
-                      case 'seek_45':
-                        seekIncrementSeconds = 45;
-                        await _savePlayerPreferences();
-                        break;
-                      case 'aspect_contain':
-                        await _setAspectMode('contain');
-                        break;
-                      case 'aspect_cover':
-                        await _setAspectMode('cover');
-                        break;
-                      case 'aspect_fill':
-                        await _setAspectMode('fill');
-                        break;
-                      case 'aspect_fit_width':
-                        await _setAspectMode('fitWidth');
-                        break;
-                      case 'aspect_fit_height':
-                        await _setAspectMode('fitHeight');
-                        break;
-                      case 'autoplay':
-                        setState(() => autoplayNext = !autoplayNext);
-                        await _savePlayerPreferences();
-                        break;
-                      case 'output_auto':
-                        await _setAudioOutputProfile('auto');
-                        break;
-                      case 'output_theater':
-                        await _setAudioOutputProfile('theater');
-                        break;
-                      case 'output_night':
-                        await _setAudioOutputProfile('night');
-                        break;
-                      case 'history_pause':
-                        setState(() => pauseHistory = !pauseHistory);
-                        await _savePlayerPreferences();
-                        break;
-                      case 'handoff_create':
-                        await _createSessionHandoff();
-                        break;
-                      case 'handoff_consume':
-                        await _consumeSessionHandoff();
-                        break;
-                      case 'external':
-                        await _openExternalPlayer();
-                        break;
-                      case 'step_back':
-                        await _stepFrame(-1);
-                        break;
-                      case 'step_forward':
-                        await _stepFrame(1);
-                        break;
-                      case 'stats':
-                        await _showPlaybackStats();
-                        break;
-                      case 'capabilities':
-                        await _showCapabilitiesReport();
-                        break;
-                      case 'try_compatible':
-                        await _tryCompatiblePlayback();
-                        break;
-                      case 'subtitle_access':
-                        await _openSubtitleAccessibilitySettings();
-                        break;
-                      case 'subtitle_import':
-                        await _importSubtitleFile();
-                        break;
-                      case 'subtitle_quality':
-                        await _subtitleQualityReport();
-                        break;
-                      case 'subtitle_search':
-                        await _subtitleSearchAuthorizedWorkflow();
-                        break;
-                      case 'subtitle_translate':
-                        await _translationAuthorizedWorkflow();
-                        break;
-                      case 'subtitle_secondary':
-                        await _pickSecondarySubtitleTrack();
-                        break;
-                    }
-                  },
-                  itemBuilder: (context) => [
-                    const PopupMenuItem(
-                      value: 'subtitle_access',
-                      child: Text('Subtitle & accessibility settings'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'chapters',
-                      child: Text('Chapters'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'bookmark_add',
-                      child: Text('Add bookmark'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'bookmark_open',
-                      child: Text('Go to bookmark'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'restart',
-                      child: Text('Restart from beginning'),
-                    ),
-                    if ((resumePositionMs ?? 0) > 0)
-                      const PopupMenuItem(
-                        value: 'resume_saved',
-                        child: Text('Resume saved progress'),
-                      ),
-                    const PopupMenuDivider(),
-                    CheckedPopupMenuItem(
-                      value: 'autoplay',
-                      checked: autoplayNext,
-                      child: const Text('Autoplay next episode'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'history_pause',
-                      checked: pauseHistory,
-                      child: const Text('Pause history collection'),
-                    ),
-                    const PopupMenuDivider(),
-                    CheckedPopupMenuItem(
-                      value: 'output_auto',
-                      checked: audioOutputProfile == 'auto',
-                      child: const Text('Output: auto'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'output_theater',
-                      checked: audioOutputProfile == 'theater',
-                      child: const Text('Output: theater'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'output_night',
-                      checked: audioOutputProfile == 'night',
-                      child: const Text('Output: night'),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'seek_10',
-                      child: Text('Seek increment: 10s'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'seek_30',
-                      child: Text('Seek increment: 30s'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'seek_45',
-                      child: Text('Seek increment: 45s'),
-                    ),
-                    const PopupMenuDivider(),
-                    CheckedPopupMenuItem(
-                      value: 'aspect_contain',
-                      checked: aspectMode == 'contain',
-                      child: Text('Aspect: contain'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'aspect_cover',
-                      checked: aspectMode == 'cover',
-                      child: Text('Aspect: cover'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'aspect_fill',
-                      checked: aspectMode == 'fill',
-                      child: Text('Aspect: fill'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'aspect_fit_width',
-                      checked: aspectMode == 'fitWidth',
-                      child: Text('Aspect: fit width'),
-                    ),
-                    CheckedPopupMenuItem(
-                      value: 'aspect_fit_height',
-                      checked: aspectMode == 'fitHeight',
-                      child: Text('Aspect: fit height'),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'speed_05',
-                      child: Text('Speed 0.5x'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'speed_10',
-                      child: Text('Speed 1.0x'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'speed_125',
-                      child: Text('Speed 1.25x'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'speed_150',
-                      child: Text('Speed 1.5x'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'speed_200',
-                      child: Text('Speed 2.0x'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'step_back',
-                      child: Text('Step frame backward'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'step_forward',
-                      child: Text('Step frame forward'),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'handoff_create',
-                      child: Text('Create session handoff'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'handoff_consume',
-                      child: Text('Continue from handoff'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'external',
-                      child: Text('Open in external player'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'stats',
-                      child: Text('Playback stats'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'capabilities',
-                      child: Text('Capability report'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'try_compatible',
-                      child: Text('Try compatible playback'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'subtitle_import',
-                      child: Text('Import subtitle file'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'subtitle_quality',
-                      child: Text('Subtitle quality report'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'subtitle_search',
-                      child: Text('Search subtitles (authorized)'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'subtitle_translate',
-                      child: Text('Translate subtitles (authorized)'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'subtitle_secondary',
-                      child: Text('Secondary subtitle track'),
-                    ),
-                  ],
-                ),
-              ],
-              bottom: widget.subtitle == null
-                  ? null
-                  : PreferredSize(
-                      preferredSize: const Size.fromHeight(30),
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          widget.subtitle!,
-                          style: TextStyle(color: _LiveTvMediaPaint.onSurface70),
+              child: Scaffold(
+                appBar: fullscreen
+                    ? null
+                    : AppBar(
+                        title: Text(widget.title),
+                        leading: IconButton(
+                          tooltip: 'Home (PiP)',
+                          onPressed: () => unawaited(_minimizeToPipAndGoHome()),
+                          icon: const Icon(Icons.arrow_back),
                         ),
-                      ),
-                    ),
-            ),
-      body: video == null
-          ? const Center(child: CircularProgressIndicator())
-          : Stack(
-              children: [
-                ColoredBox(
-                  color: Theme.of(context).colorScheme.surface,
-                  child: Center(
-                    child: AspectRatio(
-                      aspectRatio: 16 / 9,
-                      child: FittedBox(
-                        fit: _aspectFit(),
-                        child: SizedBox(
-                          width: 1920,
-                          height: 1080,
-                          child: Video(
-                            controller: video!,
-                            controls: NoVideoControls,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                if (buffering)
-                  const Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    child: LinearProgressIndicator(),
-                  ),
-                if (statusMessage.isNotEmpty)
-                  Positioned(
-                    top: buffering ? 8 : 0,
-                    left: 12,
-                    child: SafeArea(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: highContrastInterface
-                              ? Theme.of(context).colorScheme.surface
-                              : _LiveTvMediaPaint.overlayMuted,
-                          borderRadius: BorderRadius.circular(999),
-                          border: highContrastInterface
-                              ? Border.all(color: _LiveTvMediaPaint.onSurface)
-                              : null,
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
-                          ),
-                          child: Text(
-                            statusMessage,
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                if (!fullscreen || controlsVisible)
-                  Positioned(
-                    top: 6,
-                    right: 6,
-                    child: SafeArea(
-                    child: Wrap(
-                      alignment: WrapAlignment.end,
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        IconButton.filledTonal(
-                          tooltip: fullscreen ? 'Exit fullscreen' : 'Fullscreen',
-                          onPressed: () => unawaited(_toggleFullscreen()),
-                          icon: Icon(
-                            fullscreen
-                                ? Icons.fullscreen_exit
-                                : Icons.fullscreen,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton.filledTonal(
-                          tooltip: 'Subtitles',
-                          onPressed: _pickSubtitle,
-                          icon: const Icon(Icons.subtitles),
-                        ),
-                        const SizedBox(width: 8),
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: _LiveTvMediaPaint.overlayMuted,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            child: Text(
-                              playbackEngineStatus,
-                              style: const TextStyle(fontSize: 11),
+                        actions: [
+                          IconButton(
+                            tooltip: fullscreen
+                                ? 'Exit fullscreen'
+                                : 'Fullscreen',
+                            onPressed: () => unawaited(_toggleFullscreen()),
+                            icon: Icon(
+                              fullscreen
+                                  ? Icons.fullscreen_exit
+                                  : Icons.fullscreen,
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: _LiveTvMediaPaint.overlayMuted,
-                            borderRadius: BorderRadius.circular(10),
+                          IconButton(
+                            tooltip: 'Subtitles',
+                            onPressed: _pickSubtitle,
+                            icon: const Icon(Icons.subtitles),
                           ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            child: Text(
-                              '$playbackRoute · $qualityRoute',
-                              style: const TextStyle(fontSize: 11),
+                          IconButton(
+                            tooltip: subtitlesEnabled
+                                ? 'Disable subtitles'
+                                : 'Enable subtitles',
+                            onPressed: () =>
+                                unawaited(_toggleSubtitles(!subtitlesEnabled)),
+                            icon: Icon(
+                              subtitlesEnabled
+                                  ? Icons.closed_caption
+                                  : Icons.closed_caption_disabled,
                             ),
                           ),
-                        ),
-                        if (transcodeReason != 'None')
-                          DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: _LiveTvMediaPaint.overlayMuted,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
+                          IconButton(
+                            tooltip: 'Audio track',
+                            onPressed: _pickAudioTrack,
+                            icon: const Icon(Icons.audiotrack),
+                          ),
+                          IconButton(
+                            tooltip: 'Quality',
+                            onPressed: _pickVideoTrackQuality,
+                            icon: const Icon(Icons.hd),
+                          ),
+                          PopupMenuButton<String>(
+                            tooltip: 'Playback options',
+                            onSelected: (value) async {
+                              switch (value) {
+                                case 'speed_05':
+                                  await _setPlaybackSpeed(0.5);
+                                  break;
+                                case 'speed_10':
+                                  await _setPlaybackSpeed(1.0);
+                                  break;
+                                case 'speed_125':
+                                  await _setPlaybackSpeed(1.25);
+                                  break;
+                                case 'speed_150':
+                                  await _setPlaybackSpeed(1.5);
+                                  break;
+                                case 'speed_200':
+                                  await _setPlaybackSpeed(2.0);
+                                  break;
+                                case 'bookmark_add':
+                                  await _addBookmark();
+                                  break;
+                                case 'bookmark_open':
+                                  await _openBookmarks();
+                                  break;
+                                case 'chapters':
+                                  await _openChapters();
+                                  break;
+                                case 'restart':
+                                  await _restartPlayback();
+                                  break;
+                                case 'resume_saved':
+                                  await _resumeSavedPosition();
+                                  break;
+                                case 'seek_10':
+                                  seekIncrementSeconds = 10;
+                                  await _savePlayerPreferences();
+                                  break;
+                                case 'seek_30':
+                                  seekIncrementSeconds = 30;
+                                  await _savePlayerPreferences();
+                                  break;
+                                case 'seek_45':
+                                  seekIncrementSeconds = 45;
+                                  await _savePlayerPreferences();
+                                  break;
+                                case 'aspect_contain':
+                                  await _setAspectMode('contain');
+                                  break;
+                                case 'aspect_cover':
+                                  await _setAspectMode('cover');
+                                  break;
+                                case 'aspect_fill':
+                                  await _setAspectMode('fill');
+                                  break;
+                                case 'aspect_fit_width':
+                                  await _setAspectMode('fitWidth');
+                                  break;
+                                case 'aspect_fit_height':
+                                  await _setAspectMode('fitHeight');
+                                  break;
+                                case 'autoplay':
+                                  setState(() => autoplayNext = !autoplayNext);
+                                  await _savePlayerPreferences();
+                                  break;
+                                case 'output_auto':
+                                  await _setAudioOutputProfile('auto');
+                                  break;
+                                case 'output_theater':
+                                  await _setAudioOutputProfile('theater');
+                                  break;
+                                case 'output_night':
+                                  await _setAudioOutputProfile('night');
+                                  break;
+                                case 'history_pause':
+                                  setState(() => pauseHistory = !pauseHistory);
+                                  await _savePlayerPreferences();
+                                  break;
+                                case 'handoff_create':
+                                  await _createSessionHandoff();
+                                  break;
+                                case 'handoff_consume':
+                                  await _consumeSessionHandoff();
+                                  break;
+                                case 'external':
+                                  await _openExternalPlayer();
+                                  break;
+                                case 'step_back':
+                                  await _stepFrame(-1);
+                                  break;
+                                case 'step_forward':
+                                  await _stepFrame(1);
+                                  break;
+                                case 'stats':
+                                  await _showPlaybackStats();
+                                  break;
+                                case 'capabilities':
+                                  await _showCapabilitiesReport();
+                                  break;
+                                case 'try_compatible':
+                                  await _tryCompatiblePlayback();
+                                  break;
+                                case 'subtitle_access':
+                                  await _openSubtitleAccessibilitySettings();
+                                  break;
+                                case 'subtitle_import':
+                                  await _importSubtitleFile();
+                                  break;
+                                case 'subtitle_quality':
+                                  await _subtitleQualityReport();
+                                  break;
+                                case 'subtitle_search':
+                                  await _subtitleSearchAuthorizedWorkflow();
+                                  break;
+                                case 'subtitle_translate':
+                                  await _translationAuthorizedWorkflow();
+                                  break;
+                                case 'subtitle_secondary':
+                                  await _pickSecondarySubtitleTrack();
+                                  break;
+                              }
+                            },
+                            itemBuilder: (context) => [
+                              const PopupMenuItem(
+                                value: 'subtitle_access',
+                                child: Text(
+                                  'Subtitle & accessibility settings',
+                                ),
                               ),
-                              child: Text(
-                                'Why transcoding: $transcodeReason',
-                                style: const TextStyle(fontSize: 11),
+                              const PopupMenuItem(
+                                value: 'chapters',
+                                child: Text('Chapters'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'bookmark_add',
+                                child: Text('Add bookmark'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'bookmark_open',
+                                child: Text('Go to bookmark'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'restart',
+                                child: Text('Restart from beginning'),
+                              ),
+                              if ((resumePositionMs ?? 0) > 0)
+                                const PopupMenuItem(
+                                  value: 'resume_saved',
+                                  child: Text('Resume saved progress'),
+                                ),
+                              const PopupMenuDivider(),
+                              CheckedPopupMenuItem(
+                                value: 'autoplay',
+                                checked: autoplayNext,
+                                child: const Text('Autoplay next episode'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'history_pause',
+                                checked: pauseHistory,
+                                child: const Text('Pause history collection'),
+                              ),
+                              const PopupMenuDivider(),
+                              CheckedPopupMenuItem(
+                                value: 'output_auto',
+                                checked: audioOutputProfile == 'auto',
+                                child: const Text('Output: auto'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'output_theater',
+                                checked: audioOutputProfile == 'theater',
+                                child: const Text('Output: theater'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'output_night',
+                                checked: audioOutputProfile == 'night',
+                                child: const Text('Output: night'),
+                              ),
+                              const PopupMenuDivider(),
+                              const PopupMenuItem(
+                                value: 'seek_10',
+                                child: Text('Seek increment: 10s'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'seek_30',
+                                child: Text('Seek increment: 30s'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'seek_45',
+                                child: Text('Seek increment: 45s'),
+                              ),
+                              const PopupMenuDivider(),
+                              CheckedPopupMenuItem(
+                                value: 'aspect_contain',
+                                checked: aspectMode == 'contain',
+                                child: Text('Aspect: contain'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'aspect_cover',
+                                checked: aspectMode == 'cover',
+                                child: Text('Aspect: cover'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'aspect_fill',
+                                checked: aspectMode == 'fill',
+                                child: Text('Aspect: fill'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'aspect_fit_width',
+                                checked: aspectMode == 'fitWidth',
+                                child: Text('Aspect: fit width'),
+                              ),
+                              CheckedPopupMenuItem(
+                                value: 'aspect_fit_height',
+                                checked: aspectMode == 'fitHeight',
+                                child: Text('Aspect: fit height'),
+                              ),
+                              const PopupMenuDivider(),
+                              const PopupMenuItem(
+                                value: 'speed_05',
+                                child: Text('Speed 0.5x'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'speed_10',
+                                child: Text('Speed 1.0x'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'speed_125',
+                                child: Text('Speed 1.25x'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'speed_150',
+                                child: Text('Speed 1.5x'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'speed_200',
+                                child: Text('Speed 2.0x'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'step_back',
+                                child: Text('Step frame backward'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'step_forward',
+                                child: Text('Step frame forward'),
+                              ),
+                              const PopupMenuDivider(),
+                              const PopupMenuItem(
+                                value: 'handoff_create',
+                                child: Text('Create session handoff'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'handoff_consume',
+                                child: Text('Continue from handoff'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'external',
+                                child: Text('Open in external player'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'stats',
+                                child: Text('Playback stats'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'capabilities',
+                                child: Text('Capability report'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'try_compatible',
+                                child: Text('Try compatible playback'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'subtitle_import',
+                                child: Text('Import subtitle file'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'subtitle_quality',
+                                child: Text('Subtitle quality report'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'subtitle_search',
+                                child: Text('Search subtitles (authorized)'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'subtitle_translate',
+                                child: Text('Translate subtitles (authorized)'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'subtitle_secondary',
+                                child: Text('Secondary subtitle track'),
+                              ),
+                            ],
+                          ),
+                        ],
+                        bottom: widget.subtitle == null
+                            ? null
+                            : PreferredSize(
+                                preferredSize: const Size.fromHeight(30),
+                                child: Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: Text(
+                                    widget.subtitle!,
+                                    style: TextStyle(
+                                      color: _LiveTvMediaPaint.onSurface70,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                      ),
+                body: video == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : Stack(
+                        children: [
+                          ColoredBox(
+                            color: Theme.of(context).colorScheme.surface,
+                            child: Center(
+                              child: AspectRatio(
+                                aspectRatio: 16 / 9,
+                                child: FittedBox(
+                                  fit: _aspectFit(),
+                                  child: SizedBox(
+                                    width: 1920,
+                                    height: 1080,
+                                    child: Video(
+                                      controller: video!,
+                                      controls: NoVideoControls,
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: _LiveTvMediaPaint.overlayMuted,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
+                          if (buffering)
+                            const Positioned(
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              child: LinearProgressIndicator(),
                             ),
-                            child: Text(
-                              outputEnvironment,
-                              style: const TextStyle(fontSize: 11),
+                          if (statusMessage.isNotEmpty)
+                            Positioned(
+                              top: buffering ? 8 : 0,
+                              left: 12,
+                              child: SafeArea(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    color: highContrastInterface
+                                        ? Theme.of(context).colorScheme.surface
+                                        : _LiveTvMediaPaint.overlayMuted,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: highContrastInterface
+                                        ? Border.all(
+                                            color: _LiveTvMediaPaint.onSurface,
+                                          )
+                                        : null,
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    child: Text(
+                                      statusMessage,
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                        IconButton.filledTonal(
-                          tooltip: 'Remote controls help',
-                          onPressed: () => unawaited(_showRemoteControlHelp()),
-                          icon: const Icon(Icons.keyboard),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (!fullscreen || controlsVisible)
-                  Positioned(
-                    left: 10,
-                    right: 10,
-                    bottom: 10,
-                    child: SafeArea(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: highContrastInterface
-                            ? Theme.of(context).colorScheme.surface
-                            : _LiveTvMediaPaint.overlayStrong,
-                        borderRadius: BorderRadius.circular(12),
-                        border: highContrastInterface
-                            ? Border.all(color: _LiveTvMediaPaint.onSurface)
-                            : null,
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: MediaQuery.sizeOf(context).width < 760
-                            ? Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Wrap(
-                                    alignment: WrapAlignment.center,
-                                    spacing: 6,
-                                    runSpacing: 6,
-                                    children: [
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(
-                                          _seekByConfigured(-1, accelerated: true),
+                          if (!fullscreen || controlsVisible)
+                            Positioned(
+                              top: 6,
+                              right: 6,
+                              child: SafeArea(
+                                child: Wrap(
+                                  alignment: WrapAlignment.end,
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    IconButton.filledTonal(
+                                      tooltip: fullscreen
+                                          ? 'Exit fullscreen'
+                                          : 'Fullscreen',
+                                      onPressed: () =>
+                                          unawaited(_toggleFullscreen()),
+                                      icon: Icon(
+                                        fullscreen
+                                            ? Icons.fullscreen_exit
+                                            : Icons.fullscreen,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    IconButton.filledTonal(
+                                      tooltip: 'Subtitles',
+                                      onPressed: _pickSubtitle,
+                                      icon: const Icon(Icons.subtitles),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: _LiveTvMediaPaint.overlayMuted,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
                                         ),
-                                        icon: const Icon(Icons.replay_30),
-                                        tooltip: 'Rewind',
-                                      ),
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(
-                                          _seekByConfigured(-1),
+                                        child: Text(
+                                          playbackEngineStatus,
+                                          style: const TextStyle(fontSize: 11),
                                         ),
-                                        icon: const Icon(Icons.replay_10),
-                                        tooltip: 'Rewind step',
                                       ),
-                                      IconButton.filled(
-                                        onPressed: () =>
-                                            unawaited(_togglePlayPause()),
-                                        icon: Icon(
-                                          playing
-                                              ? Icons.pause
-                                              : Icons.play_arrow,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: _LiveTvMediaPaint.overlayMuted,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
                                         ),
-                                        tooltip: playing ? 'Pause' : 'Play',
-                                      ),
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(
-                                          _seekByConfigured(1),
+                                        child: Text(
+                                          '$playbackRoute · $qualityRoute',
+                                          style: const TextStyle(fontSize: 11),
                                         ),
-                                        icon: const Icon(Icons.forward_10),
-                                        tooltip: 'Forward step',
                                       ),
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(
-                                          _seekByConfigured(1, accelerated: true),
-                                        ),
-                                        icon: const Icon(Icons.forward_30),
-                                        tooltip: 'Forward',
-                                      ),
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(_seekRelative(const Duration(seconds: 90))),
-                                        icon: const Icon(Icons.skip_next_outlined),
-                                        tooltip: 'Skip intro',
-                                      ),
-                                      IconButton.filledTonal(
-                                        onPressed: () => unawaited(_seekRelative(const Duration(seconds: 30))),
-                                        icon: const Icon(Icons.fast_forward_outlined),
-                                        tooltip: 'Skip recap',
-                                      ),
-                                    ],
-                                  ),
-                                  Slider(
-                                    value: duration.inMilliseconds <= 0
-                                        ? 0
-                                        : position.inMilliseconds
-                                              .clamp(0, duration.inMilliseconds)
-                                              .toDouble(),
-                                    min: 0,
-                                    max: duration.inMilliseconds <= 0
-                                        ? 1
-                                        : duration.inMilliseconds.toDouble(),
-                                    onChanged: duration.inMilliseconds <= 0
-                                        ? null
-                                        : (value) => setState(
-                                            () => scrubPreviewMs = value,
+                                    ),
+                                    if (transcodeReason != 'None')
+                                      DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          color: _LiveTvMediaPaint.overlayMuted,
+                                          borderRadius: BorderRadius.circular(
+                                            10,
                                           ),
-                                    onChangeEnd: duration.inMilliseconds <= 0
-                                        ? null
-                                        : (value) => unawaited(
-                                            _seekToPreview(value),
+                                        ),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 10,
+                                            vertical: 6,
                                           ),
-                                  ),
-                                  if (scrubPreviewMs != null && !reducedMotion)
-                                    Padding(
-                                      padding: const EdgeInsets.only(bottom: 6),
-                                      child: _seekThumbnailPreview(),
-                                    ),
-                                  if (duration.inMilliseconds > 0)
-                                    Wrap(
-                                      alignment: WrapAlignment.center,
-                                      spacing: 12,
-                                      runSpacing: 4,
-                                      children: [
-                                        Text(
-                                          _clockText(position),
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          '-${_clockText(_remainingDuration())}',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          'Runtime ${_runtimeText(duration)}',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          'End ${_endTimeText(_remainingDuration())}',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          'Step ${seekIncrementSeconds}s',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                        Text(
-                                          'Speed ${playbackSpeed.toStringAsFixed(2)}x',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                      ],
-                                    ),
-                                ],
-                              )
-                            : Row(
-                                children: [
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _seekByConfigured(-1, accelerated: true),
-                                    ),
-                                    icon: const Icon(Icons.replay_30),
-                                    tooltip: 'Rewind',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _seekByConfigured(-1),
-                                    ),
-                                    icon: const Icon(Icons.replay_10),
-                                    tooltip: 'Rewind step',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _togglePlayPause(),
-                                    ),
-                                    icon: Icon(
-                                      playing ? Icons.pause : Icons.play_arrow,
-                                    ),
-                                    tooltip: playing ? 'Pause' : 'Play',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _seekByConfigured(1),
-                                    ),
-                                    icon: const Icon(Icons.forward_10),
-                                    tooltip: 'Forward step',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _seekByConfigured(1, accelerated: true),
-                                    ),
-                                    icon: const Icon(Icons.forward_30),
-                                    tooltip: 'Forward',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(_seekRelative(const Duration(seconds: 90))),
-                                    icon: const Icon(Icons.skip_next_outlined),
-                                    tooltip: 'Skip intro',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(_seekRelative(const Duration(seconds: 30))),
-                                    icon: const Icon(Icons.fast_forward_outlined),
-                                    tooltip: 'Skip recap',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(_toggleMute()),
-                                    icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
-                                    tooltip: muted ? 'Unmute' : 'Mute',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _setVolume((volume - 10).clamp(0, 100).toDouble()),
-                                    ),
-                                    icon: const Icon(Icons.volume_down),
-                                    tooltip: 'Volume down',
-                                  ),
-                                  IconButton(
-                                    onPressed: () => unawaited(
-                                      _setVolume((volume + 10).clamp(0, 100).toDouble()),
-                                    ),
-                                    icon: const Icon(Icons.volume_up),
-                                    tooltip: 'Volume up',
-                                  ),
-                                  Expanded(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Slider(
-                                          value: duration.inMilliseconds <= 0
-                                              ? 0
-                                              : position.inMilliseconds
-                                                    .clamp(
-                                                      0,
-                                                      duration.inMilliseconds,
-                                                    )
-                                                    .toDouble(),
-                                          min: 0,
-                                          max: duration.inMilliseconds <= 0
-                                              ? 1
-                                              : duration.inMilliseconds
-                                                    .toDouble(),
-                                          onChanged:
-                                              duration.inMilliseconds <= 0
-                                              ? null
-                                              : (value) => setState(
-                                                  () => scrubPreviewMs = value,
-                                                ),
-                                          onChangeEnd:
-                                              duration.inMilliseconds <= 0
-                                              ? null
-                                              : (value) => unawaited(
-                                                  _seekToPreview(value),
-                                                ),
-                                        ),
-                                        if (scrubPreviewMs != null && !reducedMotion)
-                                          Padding(
-                                            padding: const EdgeInsets.only(
-                                              bottom: 6,
+                                          child: Text(
+                                            'Why transcoding: $transcodeReason',
+                                            style: const TextStyle(
+                                              fontSize: 11,
                                             ),
-                                            child: _seekThumbnailPreview(),
                                           ),
-                                        if (duration.inMilliseconds > 0)
-                                          Wrap(
-                                            spacing: 12,
-                                            runSpacing: 4,
+                                        ),
+                                      ),
+                                    DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: _LiveTvMediaPaint.overlayMuted,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        child: Text(
+                                          outputEnvironment,
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton.filledTonal(
+                                      tooltip: 'Remote controls help',
+                                      onPressed: () =>
+                                          unawaited(_showRemoteControlHelp()),
+                                      icon: const Icon(Icons.keyboard),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          if (!fullscreen || controlsVisible)
+                            Positioned(
+                              left: 10,
+                              right: 10,
+                              bottom: 10,
+                              child: SafeArea(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    color: highContrastInterface
+                                        ? Theme.of(context).colorScheme.surface
+                                        : _LiveTvMediaPaint.overlayStrong,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: highContrastInterface
+                                        ? Border.all(
+                                            color: _LiveTvMediaPaint.onSurface,
+                                          )
+                                        : null,
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child:
+                                        MediaQuery.sizeOf(context).width < 760
+                                        ? Column(
+                                            mainAxisSize: MainAxisSize.min,
                                             children: [
-                                              Text(
-                                                _clockText(position),
-                                                style: const TextStyle(
-                                                  fontSize: 11,
-                                                ),
+                                              Wrap(
+                                                alignment: WrapAlignment.center,
+                                                spacing: 6,
+                                                runSpacing: 6,
+                                                children: [
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekByConfigured(
+                                                        -1,
+                                                        accelerated: true,
+                                                      ),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons.replay_30,
+                                                    ),
+                                                    tooltip: 'Rewind',
+                                                  ),
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekByConfigured(-1),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons.replay_10,
+                                                    ),
+                                                    tooltip: 'Rewind step',
+                                                  ),
+                                                  IconButton.filled(
+                                                    onPressed: () => unawaited(
+                                                      _togglePlayPause(),
+                                                    ),
+                                                    icon: Icon(
+                                                      playing
+                                                          ? Icons.pause
+                                                          : Icons.play_arrow,
+                                                    ),
+                                                    tooltip: playing
+                                                        ? 'Pause'
+                                                        : 'Play',
+                                                  ),
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekByConfigured(1),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons.forward_10,
+                                                    ),
+                                                    tooltip: 'Forward step',
+                                                  ),
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekByConfigured(
+                                                        1,
+                                                        accelerated: true,
+                                                      ),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons.forward_30,
+                                                    ),
+                                                    tooltip: 'Forward',
+                                                  ),
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekRelative(
+                                                        const Duration(
+                                                          seconds: 90,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons.skip_next_outlined,
+                                                    ),
+                                                    tooltip: 'Skip intro',
+                                                  ),
+                                                  IconButton.filledTonal(
+                                                    onPressed: () => unawaited(
+                                                      _seekRelative(
+                                                        const Duration(
+                                                          seconds: 30,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    icon: const Icon(
+                                                      Icons
+                                                          .fast_forward_outlined,
+                                                    ),
+                                                    tooltip: 'Skip recap',
+                                                  ),
+                                                ],
                                               ),
-                                              Text(
-                                                '-${_clockText(_remainingDuration())}',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
-                                                ),
+                                              Slider(
+                                                value:
+                                                    duration.inMilliseconds <= 0
+                                                    ? 0
+                                                    : position.inMilliseconds
+                                                          .clamp(
+                                                            0,
+                                                            duration
+                                                                .inMilliseconds,
+                                                          )
+                                                          .toDouble(),
+                                                min: 0,
+                                                max:
+                                                    duration.inMilliseconds <= 0
+                                                    ? 1
+                                                    : duration.inMilliseconds
+                                                          .toDouble(),
+                                                onChanged:
+                                                    duration.inMilliseconds <= 0
+                                                    ? null
+                                                    : (value) => setState(
+                                                        () => scrubPreviewMs =
+                                                            value,
+                                                      ),
+                                                onChangeEnd:
+                                                    duration.inMilliseconds <= 0
+                                                    ? null
+                                                    : (value) => unawaited(
+                                                        _seekToPreview(value),
+                                                      ),
                                               ),
-                                              Text(
-                                                'Runtime ${_runtimeText(duration)}',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
+                                              if (scrubPreviewMs != null &&
+                                                  !reducedMotion)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        bottom: 6,
+                                                      ),
+                                                  child:
+                                                      _seekThumbnailPreview(),
                                                 ),
-                                              ),
-                                              Text(
-                                                'End ${_endTimeText(_remainingDuration())}',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
+                                              if (duration.inMilliseconds > 0)
+                                                Wrap(
+                                                  alignment:
+                                                      WrapAlignment.center,
+                                                  spacing: 12,
+                                                  runSpacing: 4,
+                                                  children: [
+                                                    Text(
+                                                      _clockText(position),
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      '-${_clockText(_remainingDuration())}',
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      'Runtime ${_runtimeText(duration)}',
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      'End ${_endTimeText(_remainingDuration())}',
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      'Step ${seekIncrementSeconds}s',
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      'Speed ${playbackSpeed.toStringAsFixed(2)}x',
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                  ],
                                                 ),
-                                              ),
-                                              Text(
-                                                'Step ${seekIncrementSeconds}s',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
+                                            ],
+                                          )
+                                        : Row(
+                                            children: [
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekByConfigured(
+                                                    -1,
+                                                    accelerated: true,
+                                                  ),
                                                 ),
+                                                icon: const Icon(
+                                                  Icons.replay_30,
+                                                ),
+                                                tooltip: 'Rewind',
                                               ),
-                                              Text(
-                                                'Speed ${playbackSpeed.toStringAsFixed(2)}x',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekByConfigured(-1),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.replay_10,
+                                                ),
+                                                tooltip: 'Rewind step',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _togglePlayPause(),
+                                                ),
+                                                icon: Icon(
+                                                  playing
+                                                      ? Icons.pause
+                                                      : Icons.play_arrow,
+                                                ),
+                                                tooltip: playing
+                                                    ? 'Pause'
+                                                    : 'Play',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekByConfigured(1),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.forward_10,
+                                                ),
+                                                tooltip: 'Forward step',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekByConfigured(
+                                                    1,
+                                                    accelerated: true,
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.forward_30,
+                                                ),
+                                                tooltip: 'Forward',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekRelative(
+                                                    const Duration(seconds: 90),
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.skip_next_outlined,
+                                                ),
+                                                tooltip: 'Skip intro',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _seekRelative(
+                                                    const Duration(seconds: 30),
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.fast_forward_outlined,
+                                                ),
+                                                tooltip: 'Skip recap',
+                                              ),
+                                              IconButton(
+                                                onPressed: () =>
+                                                    unawaited(_toggleMute()),
+                                                icon: Icon(
+                                                  muted
+                                                      ? Icons.volume_off
+                                                      : Icons.volume_up,
+                                                ),
+                                                tooltip: muted
+                                                    ? 'Unmute'
+                                                    : 'Mute',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _setVolume(
+                                                    (volume - 10)
+                                                        .clamp(0, 100)
+                                                        .toDouble(),
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.volume_down,
+                                                ),
+                                                tooltip: 'Volume down',
+                                              ),
+                                              IconButton(
+                                                onPressed: () => unawaited(
+                                                  _setVolume(
+                                                    (volume + 10)
+                                                        .clamp(0, 100)
+                                                        .toDouble(),
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.volume_up,
+                                                ),
+                                                tooltip: 'Volume up',
+                                              ),
+                                              Expanded(
+                                                child: Column(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    Slider(
+                                                      value:
+                                                          duration.inMilliseconds <=
+                                                              0
+                                                          ? 0
+                                                          : position
+                                                                .inMilliseconds
+                                                                .clamp(
+                                                                  0,
+                                                                  duration
+                                                                      .inMilliseconds,
+                                                                )
+                                                                .toDouble(),
+                                                      min: 0,
+                                                      max:
+                                                          duration.inMilliseconds <=
+                                                              0
+                                                          ? 1
+                                                          : duration
+                                                                .inMilliseconds
+                                                                .toDouble(),
+                                                      onChanged:
+                                                          duration.inMilliseconds <=
+                                                              0
+                                                          ? null
+                                                          : (value) => setState(
+                                                              () =>
+                                                                  scrubPreviewMs =
+                                                                      value,
+                                                            ),
+                                                      onChangeEnd:
+                                                          duration.inMilliseconds <=
+                                                              0
+                                                          ? null
+                                                          : (
+                                                              value,
+                                                            ) => unawaited(
+                                                              _seekToPreview(
+                                                                value,
+                                                              ),
+                                                            ),
+                                                    ),
+                                                    if (scrubPreviewMs !=
+                                                            null &&
+                                                        !reducedMotion)
+                                                      Padding(
+                                                        padding:
+                                                            const EdgeInsets.only(
+                                                              bottom: 6,
+                                                            ),
+                                                        child:
+                                                            _seekThumbnailPreview(),
+                                                      ),
+                                                    if (duration
+                                                            .inMilliseconds >
+                                                        0)
+                                                      Wrap(
+                                                        spacing: 12,
+                                                        runSpacing: 4,
+                                                        children: [
+                                                          Text(
+                                                            _clockText(
+                                                              position,
+                                                            ),
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                          Text(
+                                                            '-${_clockText(_remainingDuration())}',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                          Text(
+                                                            'Runtime ${_runtimeText(duration)}',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                          Text(
+                                                            'End ${_endTimeText(_remainingDuration())}',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                          Text(
+                                                            'Step ${seekIncrementSeconds}s',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                          Text(
+                                                            'Speed ${playbackSpeed.toStringAsFixed(2)}x',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 11,
+                                                                ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                  ],
                                                 ),
                                               ),
                                             ],
                                           ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          if (creditsVisible &&
+                              widget.nextEpisodeStreamUrl?.trim().isNotEmpty ==
+                                  true)
+                            Positioned(
+                              right: 12,
+                              bottom: 124,
+                              child: SafeArea(
+                                child: FilledButton.icon(
+                                  onPressed: () =>
+                                      unawaited(_handlePlaybackCompleted()),
+                                  icon: const Icon(Icons.skip_next),
+                                  label: Text(
+                                    widget.nextEpisodeTitle == null
+                                        ? 'Next episode'
+                                        : 'Next: ${widget.nextEpisodeTitle}',
+                                  ),
+                                ),
+                              ),
+                            ),
+                          if (error.isNotEmpty)
+                            Positioned(
+                              left: 12,
+                              right: 12,
+                              top: 40,
+                              child: SafeArea(
+                                child: Card(
+                                  color: highContrastInterface
+                                      ? Theme.of(context).colorScheme.surface
+                                      : _LiveTvMediaPaint.overlayOpaque,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(10),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.error_outline,
+                                          color: _LiveTvMediaPaint.warning,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(
+                                            error,
+                                            style: TextStyle(
+                                              color: _LiveTvMediaPaint.warning,
+                                            ),
+                                          ),
+                                        ),
+                                        TextButton(
+                                          onPressed: () =>
+                                              setState(() => error = ''),
+                                          child: const Text('Dismiss'),
+                                        ),
+                                        FilledButton(
+                                          onPressed: () => unawaited(
+                                            _attemptStreamRecovery(),
+                                          ),
+                                          child: const Text('Retry'),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        FilledButton.tonal(
+                                          onPressed: () => unawaited(
+                                            _tryCompatiblePlayback(),
+                                          ),
+                                          child: const Text('Try compatible'),
+                                        ),
                                       ],
                                     ),
                                   ),
-                                ],
-                              ),
-                      ),
-                    ),
-                  ),
-                ),
-                if (creditsVisible && widget.nextEpisodeStreamUrl?.trim().isNotEmpty == true)
-                  Positioned(
-                    right: 12,
-                    bottom: 124,
-                    child: SafeArea(
-                      child: FilledButton.icon(
-                        onPressed: () => unawaited(_handlePlaybackCompleted()),
-                        icon: const Icon(Icons.skip_next),
-                        label: Text(
-                          widget.nextEpisodeTitle == null
-                              ? 'Next episode'
-                              : 'Next: ${widget.nextEpisodeTitle}',
-                        ),
-                      ),
-                    ),
-                  ),
-                if (error.isNotEmpty)
-                  Positioned(
-                    left: 12,
-                    right: 12,
-                    top: 40,
-                    child: SafeArea(
-                      child: Card(
-                        color: highContrastInterface
-                            ? Theme.of(context).colorScheme.surface
-                            : _LiveTvMediaPaint.overlayOpaque,
-                        child: Padding(
-                          padding: const EdgeInsets.all(10),
-                          child: Row(
-                            children: [
-                              Icon(Icons.error_outline, color: _LiveTvMediaPaint.warning),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  error,
-                                  style: TextStyle(color: _LiveTvMediaPaint.warning),
                                 ),
                               ),
-                              TextButton(
-                                onPressed: () => setState(() => error = ''),
-                                child: const Text('Dismiss'),
-                              ),
-                              FilledButton(
-                                onPressed: () => unawaited(_attemptStreamRecovery()),
-                                child: const Text('Retry'),
-                              ),
-                              const SizedBox(width: 6),
-                              FilledButton.tonal(
-                                onPressed: () => unawaited(_tryCompatiblePlayback()),
-                                child: const Text('Try compatible'),
-                              ),
-                            ],
-                          ),
-                        ),
+                            ),
+                        ],
                       ),
-                    ),
-                  ),
-              ],
+              ),
             ),
-      ),
-    ),
           ),
         ),
       ),
@@ -6175,10 +7326,14 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                 setState(() => followed = !followed);
               }
             },
-            icon: Icon(followed ? Icons.notifications_active : Icons.notifications_none),
+            icon: Icon(
+              followed ? Icons.notifications_active : Icons.notifications_none,
+            ),
           ),
           IconButton(
-            tooltip: spoilerSafe ? 'Disable spoiler-safe mode' : 'Enable spoiler-safe mode',
+            tooltip: spoilerSafe
+                ? 'Disable spoiler-safe mode'
+                : 'Enable spoiler-safe mode',
             onPressed: () => setState(() => spoilerSafe = !spoilerSafe),
             icon: Icon(spoilerSafe ? Icons.visibility_off : Icons.visibility),
           ),
@@ -6186,203 +7341,196 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
       ),
       body: SafeArea(
         child: Column(
-        children: [
-          SizedBox(
-            height: 270,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (widget.details.backdropUrl != null &&
-                    widget.details.backdropUrl!.trim().isNotEmpty)
-                  Image.network(
-                    widget.details.backdropUrl!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) =>
-                        ColoredBox(color: context.millitopTheme.panelColor),
-                  )
-                else
-                  ColoredBox(color: context.millitopTheme.panelColor),
-                Container(
-                  color: Theme.of(context).colorScheme.surface.withAlpha(170),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child:
-                            widget.details.posterUrl == null ||
-                                widget.details.posterUrl!.trim().isEmpty
-                            ? Container(
-                                width: 160,
-                                height: 220,
-                                color: context.millitopTheme.panelColor,
-                                alignment: Alignment.center,
-                                child: const Icon(Icons.tv, size: 52),
-                              )
-                            : Image.network(
-                                widget.details.posterUrl!,
-                                width: 160,
-                                height: 220,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => Container(
+          children: [
+            SizedBox(
+              height: 270,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (widget.details.backdropUrl != null &&
+                      widget.details.backdropUrl!.trim().isNotEmpty)
+                    Image.network(
+                      widget.details.backdropUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          ColoredBox(color: context.millitopTheme.panelColor),
+                    )
+                  else
+                    ColoredBox(color: context.millitopTheme.panelColor),
+                  Container(
+                    color: Theme.of(context).colorScheme.surface.withAlpha(170),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child:
+                              widget.details.posterUrl == null ||
+                                  widget.details.posterUrl!.trim().isEmpty
+                              ? Container(
                                   width: 160,
                                   height: 220,
                                   color: context.millitopTheme.panelColor,
                                   alignment: Alignment.center,
                                   child: const Icon(Icons.tv, size: 52),
-                                ),
-                              ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              widget.details.title,
-                              style: const TextStyle(
-                                fontSize: 34,
-                                fontWeight: FontWeight.w700,
-                              ),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 6),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                if (widget.status?.trim().isNotEmpty == true)
-                                  Chip(label: Text('Status: ${widget.status!}')),
-                                if (widget.contentRating?.trim().isNotEmpty == true)
-                                  Chip(label: Text('Rating: ${widget.contentRating!}')),
-                                Chip(
-                                  label: Text(
-                                    widget.hasNewEpisode
-                                        ? 'New episodes available'
-                                        : 'Up to date',
+                                )
+                              : Image.network(
+                                  widget.details.posterUrl!,
+                                  width: 160,
+                                  height: 220,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    width: 160,
+                                    height: 220,
+                                    color: context.millitopTheme.panelColor,
+                                    alignment: Alignment.center,
+                                    child: const Icon(Icons.tv, size: 52),
                                   ),
                                 ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
-                            LinearProgressIndicator(
-                              value: widget.seriesProgress.clamp(0.0, 1.0),
-                              minHeight: 6,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Series progress ${(widget.seriesProgress * 100).toStringAsFixed(0)}%',
-                              style: TextStyle(
-                                color: _LiveTvMediaPaint.onSurface70,
-                                fontSize: 12,
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                widget.details.title,
+                                style: const TextStyle(
+                                  fontSize: 34,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                            ),
-                            if (widget.nextUpLabel != null) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  if (widget.status?.trim().isNotEmpty == true)
+                                    Chip(
+                                      label: Text('Status: ${widget.status!}'),
+                                    ),
+                                  if (widget.contentRating?.trim().isNotEmpty ==
+                                      true)
+                                    Chip(
+                                      label: Text(
+                                        'Rating: ${widget.contentRating!}',
+                                      ),
+                                    ),
+                                  Chip(
+                                    label: Text(
+                                      widget.hasNewEpisode
+                                          ? 'New episodes available'
+                                          : 'Up to date',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              LinearProgressIndicator(
+                                value: widget.seriesProgress.clamp(0.0, 1.0),
+                                minHeight: 6,
+                              ),
                               const SizedBox(height: 4),
                               Text(
-                                'Next Up: ${widget.nextUpLabel}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                                'Series progress ${(widget.seriesProgress * 100).toStringAsFixed(0)}%',
                                 style: TextStyle(
                                   color: _LiveTvMediaPaint.onSurface70,
                                   fontSize: 12,
                                 ),
                               ),
-                            ],
-                            if (widget.genres.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Wrap(
-                                spacing: 6,
-                                runSpacing: 6,
-                                children: widget.genres
-                                    .map((genre) => Chip(label: Text(genre)))
-                                    .toList(),
+                              if (widget.nextUpLabel != null) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Next Up: ${widget.nextUpLabel}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: _LiveTvMediaPaint.onSurface70,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                              if (widget.genres.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: widget.genres
+                                      .map((genre) => Chip(label: Text(genre)))
+                                      .toList(),
+                                ),
+                              ],
+                              const SizedBox(height: 10),
+                              Text(
+                                widget.details.description?.trim().isNotEmpty ==
+                                        true
+                                    ? widget.details.description!
+                                    : 'Series details are not provided by this source.',
+                                maxLines: 4,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: _LiveTvMediaPaint.onSurface70,
+                                  fontSize: 15,
+                                  height: 1.35,
+                                ),
                               ),
                             ],
-                            const SizedBox(height: 10),
-                            Text(
-                              widget.details.description?.trim().isNotEmpty ==
-                                      true
-                                  ? widget.details.description!
-                                  : 'Series details are not provided by this source.',
-                              maxLines: 4,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: _LiveTvMediaPaint.onSurface70,
-                                fontSize: 15,
-                                height: 1.35,
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: sectionCardDecoration,
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final value in seasons)
-                    ChoiceChip(
-                      label: Text('Season $value'),
-                      selected: season == value,
-                      onSelected: (_) => setState(() => season = value),
+                      ],
                     ),
+                  ),
                 ],
               ),
             ),
-          ),
-          Expanded(
-            child: ListView.separated(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              itemCount: visible.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final episode = visible[index];
-                return Card(
-                  elevation: 1,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => unawaited(widget.onEpisodeDetails(episode)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child:
-                                spoilerSafe ||
-                                    episode.posterUrl == null ||
-                                    episode.posterUrl!.trim().isEmpty
-                                ? Container(
-                                    width: 130,
-                                    height: 74,
-                                    color: _LiveTvMediaPaint.panel,
-                                    alignment: Alignment.center,
-                                    child: const Icon(
-                                      Icons.ondemand_video_outlined,
-                                    ),
-                                  )
-                                : Image.network(
-                                    episode.posterUrl!,
-                                    width: 130,
-                                    height: 74,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: sectionCardDecoration,
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final value in seasons)
+                      ChoiceChip(
+                        label: Text('Season $value'),
+                        selected: season == value,
+                        onSelected: (_) => setState(() => season = value),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.separated(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                itemCount: visible.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, index) {
+                  final episode = visible[index];
+                  return Card(
+                    elevation: 1,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () => unawaited(widget.onEpisodeDetails(episode)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child:
+                                  spoilerSafe ||
+                                      episode.posterUrl == null ||
+                                      episode.posterUrl!.trim().isEmpty
+                                  ? Container(
                                       width: 130,
                                       height: 74,
                                       color: _LiveTvMediaPaint.panel,
@@ -6390,51 +7538,68 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                                       child: const Icon(
                                         Icons.ondemand_video_outlined,
                                       ),
+                                    )
+                                  : Image.network(
+                                      episode.posterUrl!,
+                                      width: 130,
+                                      height: 74,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        width: 130,
+                                        height: 74,
+                                        color: _LiveTvMediaPaint.panel,
+                                        alignment: Alignment.center,
+                                        child: const Icon(
+                                          Icons.ondemand_video_outlined,
+                                        ),
+                                      ),
+                                    ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'E${episode.episode.toString().padLeft(2, '0')} · ${episode.title}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 16,
                                     ),
                                   ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'E${episode.episode.toString().padLeft(2, '0')} · ${episode.title}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 16,
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    spoilerSafe
+                                        ? 'Spoiler-safe mode is on.'
+                                        : episode.description
+                                                  ?.trim()
+                                                  .isNotEmpty ==
+                                              true
+                                        ? episode.description!
+                                        : 'No episode synopsis available from source.',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: _LiveTvMediaPaint.onSurface70,
+                                      fontSize: 13,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  spoilerSafe
-                                      ? 'Spoiler-safe mode is on.'
-                                      : episode.description?.trim().isNotEmpty == true
-                                      ? episode.description!
-                                      : 'No episode synopsis available from source.',
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: _LiveTvMediaPaint.onSurface70,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
-                          ),
-                          const Icon(Icons.play_circle_fill, size: 28),
-                        ],
+                            const Icon(Icons.play_circle_fill, size: 28),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
   }

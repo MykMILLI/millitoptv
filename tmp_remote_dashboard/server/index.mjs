@@ -8,6 +8,7 @@ import { registerMessageRoutes } from './message-routes.mjs';
 import { registerDeviceRoutes } from './device-routes.mjs';
 import { registerLiveTvRoutes } from './live-tv-routes.mjs';
 import { registerMediaLibraryRoutes } from './media-library-routes.mjs';
+import { registerListeningSessionRoutes } from './listening-session-routes.mjs';
 import express from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
@@ -83,6 +84,7 @@ app.use(helmet({
 
 app.use('/api/admin/content/articles', express.json({ limit: '256kb' }));
 app.use('/api/device/profile-sync/push', express.json({ limit: '1mb' }));
+app.use('/api/device/live-tv/config', express.json({ limit: '1mb' }));
 app.use(express.json({ limit: '32kb' }));
 
 app.use('/api', (req, res, next) => {
@@ -331,6 +333,17 @@ registerTmdbDiscoveryRoutes(app,tmdbDiscovery);
 
 registerMessageRoutes(app, pool);
 registerUpdateRoutes(app, pool);
+registerListeningSessionRoutes(
+  app,
+  pool,
+  rateLimit({
+    windowMs: 60000,
+    limit: 120,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false
+  }),
+  { publicOrigin: process.env.PUBLIC_ORIGIN ?? null }
+);
 registerBillingRoutes(app, pool, {device:rateLimit({windowMs:60000,limit:120,standardHeaders:'draft-8',legacyHeaders:false}),unlock:rateLimit({windowMs:900000,limit:10,keyGenerator:billingRateKey,standardHeaders:'draft-8',legacyHeaders:false})});
 registerWebAppRoutes(app, pool, rateLimit({windowMs:60000,limit:120,standardHeaders:'draft-8',legacyHeaders:false}));
 

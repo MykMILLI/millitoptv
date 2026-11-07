@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as p;
 import 'package:millitop_tv/library/library_models.dart';
 import 'package:millitop_tv/library/library_file_service.dart';
@@ -18,6 +19,7 @@ class RecordingFiles extends LibraryFileService {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
   testWidgets('DVR uses friendly labels and passes the original path to VLC', (
     tester,
   ) async {
@@ -38,6 +40,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: LibraryBrowserScreen(
+          profileId: 1,
           folder: folder,
           files: RecordingFiles(item),
           playRecording: (context, path) async {
@@ -53,7 +56,7 @@ void main() {
     expect(find.text(name), findsNothing);
     expect(find.text(root), findsNothing);
     await tester.tap(find.text('A&E (East) US'));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(opened, item.path);
     expect(find.byType(LibraryMediaScreen), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());

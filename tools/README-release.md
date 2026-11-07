@@ -5,6 +5,32 @@ Run the installer on the development PC as the Windows user who owns the existin
 
 The installer runs syntax validation and offline self-tests. It does not edit lib/, assets/, the updater or the signing key. Keep tools/, release.cmd, tools/release-notes.md and tools/release.config.json with the project. Do not commit .release/.
 
+## Android sideload and corresponding source
+
+**Required paired deployment:** every dashboard Windows release must include an
+Android APK with the same version/build. Build and validate Android first; the
+existing Windows pipeline below handles only the Windows portion. A deployment
+is not complete until both public downloads are verified and the deployed
+dashboard exposes the matching APK in Quick downloads. Report either-platform
+failures as a blocked paired deployment, not a successful Windows-only release.
+
+Android builds use the existing development keystore only when explicitly approved
+for sideload testing. Keep the current package identity/signing key for compatible
+updates; do not label this as production/store signing. Build ARM32 and ARM64 for
+phones and Android TV (the universal APK also includes x86_64). Publish APKs in the dashboard's standalone download panel,
+not as Windows installer update assignments.
+
+Before distributing the GPLv3 PsTube-derived application, package the corresponding
+source with `tools\package-release-source.ps1 -Version <version> -Build <build>`.
+The ZIP includes the license, README build instructions and a per-file hash manifest,
+including the local engine package. It excludes SDK paths, environment files,
+keystores and generated caches. Existing source ZIPs cannot be overwritten with
+different contents. Publish the ZIP next to the binaries and verify public hashes.
+Run `tools\test-release-source.ps1` to verify archive/fingerprint behavior.
+
+The Windows fingerprint covers Android and local `third_party` source as well.
+Do not modify source or build Android concurrently while the Windows pipeline runs.
+
 ## Dashboard credential setup (explicit, once)
 From the project root:
 
@@ -28,7 +54,7 @@ Remove the saved dashboard credential without touching the signing key:
 
     .\release.cmd
 
-Default version is 1.2.2. Build numbers start at 13 and advance beyond both the registered build high-water mark and local reserved/failed runs. Symlinked application/tool sources outside generated directories are rejected; external path dependencies require a fingerprint review. The current working tree is built, including uncommitted changes; commit/review changes according to your own policy. Set meaningful release notes in tools/release-notes.md before the next release. To deliberately bump the version:
+Default version is configured in release.config.json. Build numbers start at 13 and advance beyond both the registered build high-water mark and local reserved/failed runs. Symlinked application/tool sources outside generated directories are rejected; external path dependencies require a fingerprint review. The current working tree is built, including uncommitted changes; commit/review changes according to your own policy. Set meaningful release notes in tools/release-notes.md before the next release. To deliberately bump the version:
 
     .\release.cmd -Version 1.2.3 -Notes "Release notes"
 

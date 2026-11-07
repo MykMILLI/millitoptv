@@ -298,7 +298,7 @@ void main() {
       ]);
       await tester.pumpWidget(
         MaterialApp(
-          home: LibraryBrowserScreen(folder: folder(root), files: service),
+          home: LibraryBrowserScreen(profileId: 1, folder: folder(root), files: service),
         ),
       );
       await tester.pump();

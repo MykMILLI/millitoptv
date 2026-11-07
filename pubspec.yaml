@@ -61,6 +61,9 @@ dependencies:
   flutter_chrome_cast: ^1.4.6
   multicast_dns: ^0.3.3
   wakelock_plus: ^1.4.0
+  xml: ^6.6.1
+  pstube_engine:
+    path: third_party/pstube_engine
 
 dev_dependencies:
   flutter_test:
@@ -83,6 +86,7 @@ dependency_overrides:
 flutter:
   assets:
     - assets/native/
+    - third_party/pstube_engine/LICENSE
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.

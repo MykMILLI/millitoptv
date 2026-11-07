@@ -11,6 +11,40 @@ import './style.css';
 
 const TOKEN_STORAGE_KEY = 'millitop.dashboard.admin.token';
 const EMAIL_STORAGE_KEY = 'millitop.dashboard.admin.email';
+const DASHBOARD_THEME_STORAGE_KEY = 'millitop.dashboard.admin.theme';
+const DASHBOARD_THEMES = [
+  {
+    id: 'aurora-glass',
+    label: 'Aurora Glass',
+    summary: 'Glass panels, floating focus, cinematic spacing.'
+  },
+  {
+    id: 'velocity-redline',
+    label: 'Velocity Redline',
+    summary: 'Broadcast-style rails with high-contrast action cues.'
+  },
+  {
+    id: 'cobalt-horizon',
+    label: 'Cobalt Horizon',
+    summary: 'Structured side navigation with calm information density.'
+  },
+  {
+    id: 'emby-emerald',
+    label: 'Emby Emerald',
+    summary: 'Crisp emerald highlights with modern media-panel balance.'
+  },
+  {
+    id: 'satellite-command',
+    label: 'Satellite Command',
+    summary: 'Dense utility-first controls with command-line rhythm.'
+  },
+  {
+    id: 'ember-canvas',
+    label: 'Ember Canvas',
+    summary: 'Warm gradient highlights with bold card-first navigation.'
+  }
+];
+const DASHBOARD_THEME_IDS = new Set(DASHBOARD_THEMES.map(theme => theme.id));
 
 function App() {
   const [token, setToken] = useState(() => {
@@ -36,6 +70,15 @@ function App() {
   const [households, setHouseholds] = useState([]);
   const [name, setName] = useState('');
   const [page, setPage] = useState('overview');
+  const [dashboardTheme, setDashboardTheme] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(DASHBOARD_THEME_STORAGE_KEY) ?? '';
+      return DASHBOARD_THEME_IDS.has(stored) ? stored : 'aurora-glass';
+    } catch (exception) {
+      console.warn('Unable to load stored dashboard theme.', exception);
+      return 'aurora-glass';
+    }
+  });
 
   function clearSession() {
     setToken('');
@@ -114,6 +157,18 @@ function App() {
       console.warn('Unable to persist dashboard email.', exception);
     }
   }, [email]);
+
+  useEffect(() => {
+    const selected = DASHBOARD_THEME_IDS.has(dashboardTheme)
+      ? dashboardTheme
+      : 'aurora-glass';
+    document.documentElement.dataset.dashboardTheme = selected;
+    try {
+      window.localStorage.setItem(DASHBOARD_THEME_STORAGE_KEY, selected);
+    } catch (exception) {
+      console.warn('Unable to persist dashboard theme.', exception);
+    }
+  }, [dashboardTheme]);
 
   async function login(event) {
     event.preventDefault();
@@ -201,7 +256,28 @@ function App() {
     <a className="skip-link" href="#workspace">Skip to workspace</a>
     <aside className="sidebar"><div className="sidebar-brand">MILLITOP TV<small>ADMIN CONSOLE</small></div>
       <nav aria-label="Dashboard sections">{navigation.map(([id,label])=><button type="button" key={id} aria-current={page===id?'page':undefined} className={'nav-item '+(page===id?'selected':'')} onClick={()=>{setPage(id);setError('');}}>{label}</button>)}</nav>
-      <div className="sidebar-session"><small>ADMIN SESSION</small><span>{overview?.admin?.email}</span><small>{overview?.admin?.role}</small><button className="secondary" onClick={()=>{clearSession();setError('');setPage('overview');}}>Sign out</button></div>
+      <div className="sidebar-session">
+        <small>ADMIN SESSION</small>
+        <span>{overview?.admin?.email}</span>
+        <small>{overview?.admin?.role}</small>
+        <label className="sidebar-theme">
+          <small>Interface theme</small>
+          <select
+            value={dashboardTheme}
+            onChange={event => setDashboardTheme(event.target.value)}
+          >
+            {DASHBOARD_THEMES.map(theme => (
+              <option key={theme.id} value={theme.id}>
+                {theme.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="sidebar-theme-summary">
+          {DASHBOARD_THEMES.find(theme => theme.id === dashboardTheme)?.summary}
+        </p>
+        <button className="secondary" onClick={()=>{clearSession();setError('');setPage('overview');}}>Sign out</button>
+      </div>
     </aside>
     <div className="workspace-shell"><header className="workspace-header"><div><h1>{navigation.find(([id])=>id===page)?.[1]}</h1><p>{page==='billing'?'Square customer links, account access and project progress':'Millitop TV administration'}</p></div><button className="secondary" onClick={()=>refresh().catch(e=>setError(e.message))}>Refresh summary</button></header>
     <main id="workspace" className="workspace" tabIndex={-1}>

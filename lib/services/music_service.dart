@@ -399,7 +399,8 @@ class MusicService {
   static const _collabPlaylistsKeyPrefix = 'music.social.collab-playlists.v1.';
   static const _sharedMixesKeyPrefix = 'music.social.shared-mixes.v1.';
   static const _sharedSessionsKeyPrefix = 'music.social.shared-sessions.v1.';
-  static const _queueInvitationsKeyPrefix = 'music.social.queue-invitations.v1.';
+  static const _queueInvitationsKeyPrefix =
+      'music.social.queue-invitations.v1.';
   static const _activityFeedKeyPrefix = 'music.social.activity.v1.';
   static const _reactionsKeyPrefix = 'music.social.reactions.v1.';
   static const _commentsKeyPrefix = 'music.social.comments.v1.';
@@ -410,7 +411,8 @@ class MusicService {
   static const _inviteControlsKeyPrefix = 'music.social.invite-controls.v1.';
   static const _playEventsKeyPrefix = 'music.history.play-events.v1.';
   static const _historyPausedKeyPrefix = 'music.history.paused.v1.';
-  static const _excludedSessionsKeyPrefix = 'music.history.excluded-sessions.v1.';
+  static const _excludedSessionsKeyPrefix =
+      'music.history.excluded-sessions.v1.';
   static const _sessionHistoryKeyPrefix = 'music.history.sessions.v1.';
   static const _scrobbleConfigKeyPrefix = 'music.history.scrobble.config.v1.';
   static const _scrobbleQueueKeyPrefix = 'music.history.scrobble.queue.v1.';
@@ -453,7 +455,10 @@ class MusicService {
     return values;
   }
 
-  Future<void> _saveMapList(String key, List<Map<String, dynamic>> values) async {
+  Future<void> _saveMapList(
+    String key,
+    List<Map<String, dynamic>> values,
+  ) async {
     if (!await (await SharedPreferences.getInstance()).setString(
       key,
       jsonEncode(values),
@@ -528,7 +533,9 @@ class MusicService {
   }
 
   Future<bool> historyCollectionPaused(int profileId) async {
-    final value = (await _jsonObject('$_historyPausedKeyPrefix$profileId'))['paused'];
+    final value = (await _jsonObject(
+      '$_historyPausedKeyPrefix$profileId',
+    ))['paused'];
     return value == true;
   }
 
@@ -558,17 +565,26 @@ class MusicService {
   }) async {
     final normalized = sessionId.trim();
     if (normalized.isEmpty) {
-      throw const FormatException('Session id is required for exclusion policy.');
+      throw const FormatException(
+        'Session id is required for exclusion policy.',
+      );
     }
-    final current = await _mapListByKey('$_excludedSessionsKeyPrefix$profileId');
-    final next = current.where((item) => item['sessionId']?.toString() != normalized).toList();
+    final current = await _mapListByKey(
+      '$_excludedSessionsKeyPrefix$profileId',
+    );
+    final next = current
+        .where((item) => item['sessionId']?.toString() != normalized)
+        .toList();
     if (excluded) {
       next.insert(0, {
         'sessionId': normalized,
         'excludedAtUtc': DateTime.now().toUtc().toIso8601String(),
       });
     }
-    await _saveMapList('$_excludedSessionsKeyPrefix$profileId', next.take(2000).toList());
+    await _saveMapList(
+      '$_excludedSessionsKeyPrefix$profileId',
+      next.take(2000).toList(),
+    );
   }
 
   Future<MusicPlayEvent> recordPlayEvent(
@@ -592,9 +608,14 @@ class MusicService {
     final normalizedSessionId = _normalizedSessionId(sessionId);
     final started = (startedAtUtc ?? now).toUtc();
     final ended = (endedAtUtc ?? now).toUtc();
-    final adjustedEnded = ended.add(Duration(milliseconds: deviceClockOffsetMs));
+    final adjustedEnded = ended.add(
+      Duration(milliseconds: deviceClockOffsetMs),
+    );
     final safeDuration = max(0, trackDurationMs);
-    final safeListened = max(0, min(listenedMs, safeDuration <= 0 ? listenedMs : safeDuration));
+    final safeListened = max(
+      0,
+      min(listenedMs, safeDuration <= 0 ? listenedMs : safeDuration),
+    );
     final threshold = _playThresholdMs(safeDuration);
     final countedAsPlay = safeListened >= threshold;
     final excludedSessions = await excludedRecommendationSessions(profileId);
@@ -616,8 +637,12 @@ class MusicService {
       title: track.title,
       artist: track.artist,
       album: track.album,
-      playlistId: playlistId?.trim().isEmpty ?? true ? null : playlistId!.trim(),
-      playlistName: playlistName?.trim().isEmpty ?? true ? null : playlistName!.trim(),
+      playlistId: playlistId?.trim().isEmpty ?? true
+          ? null
+          : playlistId!.trim(),
+      playlistName: playlistName?.trim().isEmpty ?? true
+          ? null
+          : playlistName!.trim(),
       sessionId: normalizedSessionId,
       listenedMs: safeListened,
       trackDurationMs: safeDuration,
@@ -788,12 +813,20 @@ class MusicService {
     final rows = await _mapListByKey('$_playEventsKeyPrefix$profileId');
     await _saveMapList(
       '$_playEventsKeyPrefix$profileId',
-      rows.where((entry) => entry['eventId']?.toString() != normalized).toList(),
+      rows
+          .where((entry) => entry['eventId']?.toString() != normalized)
+          .toList(),
     );
     final sessions = await _mapListByKey('$_sessionHistoryKeyPrefix$profileId');
     await _saveMapList(
       '$_sessionHistoryKeyPrefix$profileId',
-      sessions.where((entry) => entry['id']?.toString() != normalized && entry['eventId']?.toString() != normalized).toList(),
+      sessions
+          .where(
+            (entry) =>
+                entry['id']?.toString() != normalized &&
+                entry['eventId']?.toString() != normalized,
+          )
+          .toList(),
     );
   }
 
@@ -805,10 +838,16 @@ class MusicService {
     final now = (referenceUtc ?? DateTime.now()).toUtc();
     final start = switch (period) {
       'daily' => DateTime.utc(now.year, now.month, now.day),
-      'weekly' => DateTime.utc(now.year, now.month, now.day).subtract(Duration(days: now.weekday - 1)),
+      'weekly' => DateTime.utc(
+        now.year,
+        now.month,
+        now.day,
+      ).subtract(Duration(days: now.weekday - 1)),
       'monthly' => DateTime.utc(now.year, now.month, 1),
       'annual' => DateTime.utc(now.year, 1, 1),
-      _ => throw const FormatException('Period must be daily, weekly, monthly, or annual.'),
+      _ => throw const FormatException(
+        'Period must be daily, weekly, monthly, or annual.',
+      ),
     };
     final events = await playEvents(
       profileId,
@@ -838,6 +877,7 @@ class MusicService {
           .map((entry) => {'name': entry.key, 'plays': entry.value})
           .toList();
     }
+
     return {
       'period': period,
       'fromUtc': start.toIso8601String(),
@@ -868,23 +908,36 @@ class MusicService {
     final days = <String, Map<String, dynamic>>{};
     for (final event in events) {
       final day = event.endedAtUtc.toIso8601String().substring(0, 10);
-      final row = days.putIfAbsent(day, () => {
-        'day': day,
-        'plays': 0,
-        'listeningTimeMs': 0,
-        'tracks': <String>{},
-      });
+      final row = days.putIfAbsent(
+        day,
+        () => {
+          'day': day,
+          'plays': 0,
+          'listeningTimeMs': 0,
+          'tracks': <String>{},
+        },
+      );
       row['plays'] = (row['plays'] as int) + (event.countedAsPlay ? 1 : 0);
-      row['listeningTimeMs'] = (row['listeningTimeMs'] as int) + max(0, event.listenedMs);
+      row['listeningTimeMs'] =
+          (row['listeningTimeMs'] as int) + max(0, event.listenedMs);
       (row['tracks'] as Set<String>).add(event.trackId);
     }
-    final rows = days.values.map((row) => {
-      'day': row['day'],
-      'plays': row['plays'],
-      'listeningTimeMs': row['listeningTimeMs'],
-      'uniqueTracks': (row['tracks'] as Set<String>).length,
-    }).toList()
-      ..sort((a, b) => (a['day']?.toString() ?? '').compareTo(b['day']?.toString() ?? ''));
+    final rows =
+        days.values
+            .map(
+              (row) => {
+                'day': row['day'],
+                'plays': row['plays'],
+                'listeningTimeMs': row['listeningTimeMs'],
+                'uniqueTracks': (row['tracks'] as Set<String>).length,
+              },
+            )
+            .toList()
+          ..sort(
+            (a, b) => (a['day']?.toString() ?? '').compareTo(
+              b['day']?.toString() ?? '',
+            ),
+          );
     return {
       'fromUtc': from.toIso8601String(),
       'toUtc': to.toIso8601String(),
@@ -897,16 +950,28 @@ class MusicService {
     required int year,
   }) async {
     final start = DateTime.utc(year, 1, 1);
-    final end = DateTime.utc(year + 1, 1, 1).subtract(const Duration(milliseconds: 1));
+    final end = DateTime.utc(
+      year + 1,
+      1,
+      1,
+    ).subtract(const Duration(milliseconds: 1));
     final events = await playEvents(
       profileId,
       includeExcluded: true,
       fromUtc: start,
       toUtc: end,
     );
-    final stats = await listeningStatistics(profileId, period: 'annual', referenceUtc: end);
-    final uniqueArtists = <String>{for (final event in events) event.artist}.length;
-    final uniqueAlbums = <String>{for (final event in events) event.album}.length;
+    final stats = await listeningStatistics(
+      profileId,
+      period: 'annual',
+      referenceUtc: end,
+    );
+    final uniqueArtists = <String>{
+      for (final event in events) event.artist,
+    }.length;
+    final uniqueAlbums = <String>{
+      for (final event in events) event.album,
+    }.length;
     return {
       'year': year,
       'listeningTimeMs': stats['listeningTimeMs'],
@@ -948,7 +1013,11 @@ class MusicService {
         });
       }
     }
-    entries.sort((a, b) => (a['atUtc']?.toString() ?? '').compareTo(b['atUtc']?.toString() ?? ''));
+    entries.sort(
+      (a, b) => (a['atUtc']?.toString() ?? '').compareTo(
+        b['atUtc']?.toString() ?? '',
+      ),
+    );
     return entries;
   }
 
@@ -965,8 +1034,15 @@ class MusicService {
       if (years <= 0) {
         continue;
       }
-      final anniversary = DateTime.utc(now.year, event.startedAtUtc.month, event.startedAtUtc.day);
-      final delta = anniversary.difference(DateTime.utc(now.year, now.month, now.day)).inDays.abs();
+      final anniversary = DateTime.utc(
+        now.year,
+        event.startedAtUtc.month,
+        event.startedAtUtc.day,
+      );
+      final delta = anniversary
+          .difference(DateTime.utc(now.year, now.month, now.day))
+          .inDays
+          .abs();
       if (delta > windowDays) {
         continue;
       }
@@ -1003,12 +1079,15 @@ class MusicService {
     );
     final counts = <String, Map<String, dynamic>>{};
     for (final event in events.where((item) => item.countedAsPlay)) {
-      final row = counts.putIfAbsent(event.trackId, () => {
-        'trackId': event.trackId,
-        'title': event.title,
-        'artist': event.artist,
-        'plays': 0,
-      });
+      final row = counts.putIfAbsent(
+        event.trackId,
+        () => {
+          'trackId': event.trackId,
+          'title': event.title,
+          'artist': event.artist,
+          'plays': 0,
+        },
+      );
       row['plays'] = (row['plays'] as int) + 1;
     }
     final values = counts.values.toList()
@@ -1029,7 +1108,8 @@ class MusicService {
     }
     final candidates = <Map<String, dynamic>>[];
     for (final entry in byTrack.entries) {
-      final list = entry.value..sort((a, b) => b.endedAtUtc.compareTo(a.endedAtUtc));
+      final list = entry.value
+        ..sort((a, b) => b.endedAtUtc.compareTo(a.endedAtUtc));
       final latest = list.first;
       final daysSince = now.difference(latest.endedAtUtc).inDays;
       if (daysSince < dormancyDays) {
@@ -1061,7 +1141,8 @@ class MusicService {
         .toList();
     return MusicPlaylist(
       id: const Uuid().v4(),
-      name: 'Rediscovery · ${DateTime.now().toLocal().toIso8601String().substring(0, 10)}',
+      name:
+          'Rediscovery · ${DateTime.now().toLocal().toIso8601String().substring(0, 10)}',
       createdAtUtc: DateTime.now().toUtc(),
       tracks: tracks,
     );
@@ -1070,9 +1151,15 @@ class MusicService {
   Future<List<Map<String, dynamic>>> listeningMilestones(int profileId) async {
     final events = await playEvents(profileId, includeExcluded: true);
     final counted = events.where((event) => event.countedAsPlay).toList();
-    final minutes = events.fold<int>(0, (sum, event) => sum + max(0, event.listenedMs)) ~/ 60000;
-    final uniqueTracks = <String>{for (final event in counted) event.trackId}.length;
-    final uniqueArtists = <String>{for (final event in counted) event.artist}.length;
+    final minutes =
+        events.fold<int>(0, (sum, event) => sum + max(0, event.listenedMs)) ~/
+        60000;
+    final uniqueTracks = <String>{
+      for (final event in counted) event.trackId,
+    }.length;
+    final uniqueArtists = <String>{
+      for (final event in counted) event.artist,
+    }.length;
     final milestones = <Map<String, dynamic>>[];
     void addIfReached(String key, int current, List<int> thresholds) {
       for (final threshold in thresholds) {
@@ -1085,11 +1172,22 @@ class MusicService {
         }
       }
     }
-    addIfReached('countedPlays', counted.length, const [100, 500, 1000, 5000, 10000]);
+
+    addIfReached('countedPlays', counted.length, const [
+      100,
+      500,
+      1000,
+      5000,
+      10000,
+    ]);
     addIfReached('listeningMinutes', minutes, const [1000, 5000, 10000, 50000]);
     addIfReached('uniqueTracks', uniqueTracks, const [100, 500, 1000, 3000]);
     addIfReached('uniqueArtists', uniqueArtists, const [25, 100, 250, 500]);
-    milestones.sort((a, b) => (a['metric']?.toString() ?? '').compareTo(b['metric']?.toString() ?? ''));
+    milestones.sort(
+      (a, b) => (a['metric']?.toString() ?? '').compareTo(
+        b['metric']?.toString() ?? '',
+      ),
+    );
     return milestones;
   }
 
@@ -1101,8 +1199,8 @@ class MusicService {
     final events = await playEvents(profileId, includeExcluded: true);
     final directory =
         outputDirectoryPath == null || outputDirectoryPath.trim().isEmpty
-            ? await getApplicationDocumentsDirectory()
-            : Directory(outputDirectoryPath.trim());
+        ? await getApplicationDocumentsDirectory()
+        : Directory(outputDirectoryPath.trim());
     if (!await directory.exists()) {
       await directory.create(recursive: true);
     }
@@ -1156,7 +1254,10 @@ class MusicService {
     });
   }
 
-  Future<void> _enqueueScrobbleEvent(int profileId, MusicPlayEvent event) async {
+  Future<void> _enqueueScrobbleEvent(
+    int profileId,
+    MusicPlayEvent event,
+  ) async {
     final cfg = await scrobbleConfig(profileId);
     if (cfg['enabled'] != true) {
       return;
@@ -1168,7 +1269,10 @@ class MusicService {
       'attempts': 0,
       'queuedAtUtc': DateTime.now().toUtc().toIso8601String(),
     });
-    await _saveMapList('$_scrobbleQueueKeyPrefix$profileId', queue.take(5000).toList());
+    await _saveMapList(
+      '$_scrobbleQueueKeyPrefix$profileId',
+      queue.take(5000).toList(),
+    );
   }
 
   Future<Map<String, dynamic>> syncScrobbles(int profileId) async {
@@ -1185,7 +1289,8 @@ class MusicService {
     if (queue.isEmpty) {
       return const {'synced': 0, 'remaining': 0, 'status': 'ok'};
     }
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
     final remaining = <Map<String, dynamic>>[];
     var synced = 0;
     try {
@@ -1200,9 +1305,15 @@ class MusicService {
         }
         try {
           final request = await client.postUrl(uri);
-          request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+          request.headers.set(
+            HttpHeaders.contentTypeHeader,
+            'application/json',
+          );
           if (token.trim().isNotEmpty) {
-            request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+            request.headers.set(
+              HttpHeaders.authorizationHeader,
+              'Bearer $token',
+            );
           }
           request.add(utf8.encode(jsonEncode({'playEvent': payload})));
           final response = await request.close();
@@ -1210,10 +1321,12 @@ class MusicService {
             synced += 1;
             continue;
           }
-          final attempts = (int.tryParse(item['attempts']?.toString() ?? '') ?? 0) + 1;
+          final attempts =
+              (int.tryParse(item['attempts']?.toString() ?? '') ?? 0) + 1;
           remaining.add({...item, 'attempts': attempts});
         } catch (_) {
-          final attempts = (int.tryParse(item['attempts']?.toString() ?? '') ?? 0) + 1;
+          final attempts =
+              (int.tryParse(item['attempts']?.toString() ?? '') ?? 0) + 1;
           remaining.add({...item, 'attempts': attempts});
         }
       }
@@ -1221,11 +1334,7 @@ class MusicService {
       client.close(force: true);
     }
     await _saveMapList('$_scrobbleQueueKeyPrefix$profileId', remaining);
-    return {
-      'synced': synced,
-      'remaining': remaining.length,
-      'status': 'ok',
-    };
+    return {'synced': synced, 'remaining': remaining.length, 'status': 'ok'};
   }
 
   Map<String, dynamic> playCountingRules() {
@@ -1305,11 +1414,19 @@ class MusicService {
       '$_pinsKeyPrefix$profileId',
     );
     if (raw == null || raw.trim().isEmpty) {
-      return const {'albums': <String>[], 'artists': <String>[], 'playlists': <String>[]};
+      return const {
+        'albums': <String>[],
+        'artists': <String>[],
+        'playlists': <String>[],
+      };
     }
     final decoded = jsonDecode(raw);
     if (decoded is! Map) {
-      return const {'albums': <String>[], 'artists': <String>[], 'playlists': <String>[]};
+      return const {
+        'albums': <String>[],
+        'artists': <String>[],
+        'playlists': <String>[],
+      };
     }
     List<String> readList(String key) {
       final value = decoded[key];
@@ -1325,6 +1442,7 @@ class MusicService {
       }
       return out;
     }
+
     return {
       'albums': readList('albums'),
       'artists': readList('artists'),
@@ -1627,7 +1745,12 @@ class MusicService {
     Map<String, dynamic> metadata = const {},
   }) async {
     final normalizedType = contentType.trim().toLowerCase();
-    if (!const {'track', 'album', 'artist', 'playlist'}.contains(normalizedType)) {
+    if (!const {
+      'track',
+      'album',
+      'artist',
+      'playlist',
+    }.contains(normalizedType)) {
       throw const FormatException(
         'Share content type must be track, album, artist, or playlist.',
       );
@@ -1657,10 +1780,7 @@ class MusicService {
       scheme: 'millitop',
       host: 'music',
       path: '/share/$normalizedType/$id',
-      queryParameters: {
-        'token': token,
-        'owner': '$profileId',
-      },
+      queryParameters: {'token': token, 'owner': '$profileId'},
     ).toString();
   }
 
@@ -1674,7 +1794,8 @@ class MusicService {
     if (token.isEmpty) {
       throw const FormatException('Share link token is missing.');
     }
-    final owner = int.tryParse(uri.queryParameters['owner']?.trim() ?? '') ?? profileId;
+    final owner =
+        int.tryParse(uri.queryParameters['owner']?.trim() ?? '') ?? profileId;
     final shares = await _mapListByKey('$_socialSharesKeyPrefix$owner');
     final match = shares.where((entry) => entry['token']?.toString() == token);
     if (match.isEmpty) {
@@ -1729,8 +1850,8 @@ class MusicService {
     }
     final baseDir =
         outputDirectoryPath == null || outputDirectoryPath.trim().isEmpty
-            ? await getApplicationDocumentsDirectory()
-            : Directory(outputDirectoryPath.trim());
+        ? await getApplicationDocumentsDirectory()
+        : Directory(outputDirectoryPath.trim());
     if (!await baseDir.exists()) {
       await baseDir.create(recursive: true);
     }
@@ -1785,11 +1906,15 @@ class MusicService {
 
   Future<String> personalHistoryVisibility(int profileId) async {
     final current = await _jsonObject('$_historyPrivacyKeyPrefix$profileId');
-    final value = current['value']?.toString().trim().toLowerCase() ?? 'private';
+    final value =
+        current['value']?.toString().trim().toLowerCase() ?? 'private';
     return value == 'public' ? 'public' : 'private';
   }
 
-  Future<void> setPersonalHistoryVisibility(int profileId, String visibility) async {
+  Future<void> setPersonalHistoryVisibility(
+    int profileId,
+    String visibility,
+  ) async {
     final normalized = visibility.trim().toLowerCase();
     if (normalized != 'private' && normalized != 'public') {
       throw const FormatException(
@@ -1868,7 +1993,9 @@ class MusicService {
     await _saveMapList('$_collabPlaylistsKeyPrefix$profileId', next);
   }
 
-  Future<List<Map<String, dynamic>>> collaborativePlaylists(int profileId) async {
+  Future<List<Map<String, dynamic>>> collaborativePlaylists(
+    int profileId,
+  ) async {
     return _mapListByKey('$_collabPlaylistsKeyPrefix$profileId');
   }
 
@@ -1890,7 +2017,10 @@ class MusicService {
       'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
     };
     final current = await _mapListByKey('$_sharedMixesKeyPrefix$profileId');
-    await _saveMapList('$_sharedMixesKeyPrefix$profileId', [entry, ...current].take(400).toList());
+    await _saveMapList(
+      '$_sharedMixesKeyPrefix$profileId',
+      [entry, ...current].take(400).toList(),
+    );
   }
 
   Future<List<Map<String, dynamic>>> sharedMixes(int profileId) async {
@@ -1957,7 +2087,9 @@ class MusicService {
       'status': 'pending',
       'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
     };
-    final current = await _mapListByKey('$_queueInvitationsKeyPrefix$profileId');
+    final current = await _mapListByKey(
+      '$_queueInvitationsKeyPrefix$profileId',
+    );
     await _saveMapList(
       '$_queueInvitationsKeyPrefix$profileId',
       [invitation, ...current].take(800).toList(),
@@ -2005,26 +2137,32 @@ class MusicService {
     final tType = targetType.trim();
     final tId = targetId.trim();
     if (actor.isEmpty || eventType.isEmpty || tType.isEmpty || tId.isEmpty) {
-      throw const FormatException('Activity event has missing required fields.');
+      throw const FormatException(
+        'Activity event has missing required fields.',
+      );
     }
     final historyVisibility = await personalHistoryVisibility(profileId);
-    final resolvedVisibility = visibility == 'public' && historyVisibility == 'public'
+    final resolvedVisibility =
+        visibility == 'public' && historyVisibility == 'public'
         ? 'public'
         : 'private';
     final current = await _mapListByKey('$_activityFeedKeyPrefix$profileId');
-    await _saveMapList('$_activityFeedKeyPrefix$profileId', [
-      {
-        'id': const Uuid().v4(),
-        'actorUserId': actor,
-        'type': eventType,
-        'targetType': tType,
-        'targetId': tId,
-        'visibility': resolvedVisibility,
-        'metadata': metadata,
-        'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
-      },
-      ...current,
-    ].take(3000).toList());
+    await _saveMapList(
+      '$_activityFeedKeyPrefix$profileId',
+      [
+        {
+          'id': const Uuid().v4(),
+          'actorUserId': actor,
+          'type': eventType,
+          'targetType': tType,
+          'targetId': tId,
+          'visibility': resolvedVisibility,
+          'metadata': metadata,
+          'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
+        },
+        ...current,
+      ].take(3000).toList(),
+    );
   }
 
   Future<List<Map<String, dynamic>>> activityFeed(
@@ -2035,7 +2173,9 @@ class MusicService {
     if (includePrivate) {
       return values;
     }
-    return values.where((entry) => entry['visibility']?.toString() == 'public').toList();
+    return values
+        .where((entry) => entry['visibility']?.toString() == 'public')
+        .toList();
   }
 
   Future<void> addReaction(
@@ -2057,7 +2197,10 @@ class MusicService {
       throw const FormatException('Reaction has missing required fields.');
     }
     final current = await _mapListByKey('$_reactionsKeyPrefix$profileId');
-    await _saveMapList('$_reactionsKeyPrefix$profileId', [entry, ...current].take(3000).toList());
+    await _saveMapList(
+      '$_reactionsKeyPrefix$profileId',
+      [entry, ...current].take(3000).toList(),
+    );
   }
 
   Future<void> addComment(
@@ -2085,7 +2228,10 @@ class MusicService {
       throw const FormatException('Comment has missing required fields.');
     }
     final current = await _mapListByKey('$_commentsKeyPrefix$profileId');
-    await _saveMapList('$_commentsKeyPrefix$profileId', [entry, ...current].take(3000).toList());
+    await _saveMapList(
+      '$_commentsKeyPrefix$profileId',
+      [entry, ...current].take(3000).toList(),
+    );
   }
 
   Future<List<Map<String, dynamic>>> reactionsForTarget(
@@ -2163,10 +2309,15 @@ class MusicService {
         (entry['action']?.toString().isEmpty ?? true) ||
         (entry['targetType']?.toString().isEmpty ?? true) ||
         (entry['targetId']?.toString().isEmpty ?? true)) {
-      throw const FormatException('Moderation action has missing required fields.');
+      throw const FormatException(
+        'Moderation action has missing required fields.',
+      );
     }
     final current = await _mapListByKey('$_moderationKeyPrefix$profileId');
-    await _saveMapList('$_moderationKeyPrefix$profileId', [entry, ...current].take(2000).toList());
+    await _saveMapList(
+      '$_moderationKeyPrefix$profileId',
+      [entry, ...current].take(2000).toList(),
+    );
   }
 
   Future<List<Map<String, dynamic>>> moderationActions(int profileId) async {
@@ -2197,7 +2348,10 @@ class MusicService {
       throw const FormatException('Abuse report has missing required fields.');
     }
     final current = await _mapListByKey('$_abuseReportsKeyPrefix$profileId');
-    await _saveMapList('$_abuseReportsKeyPrefix$profileId', [entry, ...current].take(3000).toList());
+    await _saveMapList(
+      '$_abuseReportsKeyPrefix$profileId',
+      [entry, ...current].take(3000).toList(),
+    );
   }
 
   Future<List<Map<String, dynamic>>> abuseReports(int profileId) async {
@@ -2339,11 +2493,17 @@ class MusicService {
         profileId,
         includeExcluded: true,
       )).map((event) => event.toJson()).toList(),
-      'sessionHistory': await _mapListByKey('$_sessionHistoryKeyPrefix$profileId'),
+      'sessionHistory': await _mapListByKey(
+        '$_sessionHistoryKeyPrefix$profileId',
+      ),
       'historyPaused': await historyCollectionPaused(profileId),
-      'excludedSessions': await _mapListByKey('$_excludedSessionsKeyPrefix$profileId'),
+      'excludedSessions': await _mapListByKey(
+        '$_excludedSessionsKeyPrefix$profileId',
+      ),
       'scrobbleConfig': await scrobbleConfig(profileId),
-      'scrobbleQueue': await _mapListByKey('$_scrobbleQueueKeyPrefix$profileId'),
+      'scrobbleQueue': await _mapListByKey(
+        '$_scrobbleQueueKeyPrefix$profileId',
+      ),
       'uiState': await uiState(profileId),
       'homeSections': await homeSections(profileId),
       'pins': await pins(profileId),
@@ -2484,7 +2644,10 @@ class MusicService {
         }
         values.add(Map<String, dynamic>.from(entry));
       }
-      await _saveMapList('$_handoffsKeyPrefix$profileId', values.take(100).toList());
+      await _saveMapList(
+        '$_handoffsKeyPrefix$profileId',
+        values.take(100).toList(),
+      );
     }
     final playEventsRaw = state['playEvents'];
     if (playEventsRaw is List) {
@@ -2495,7 +2658,10 @@ class MusicService {
         }
         values.add(Map<String, dynamic>.from(entry));
       }
-      await _saveMapList('$_playEventsKeyPrefix$profileId', values.take(50000).toList());
+      await _saveMapList(
+        '$_playEventsKeyPrefix$profileId',
+        values.take(50000).toList(),
+      );
     }
     final sessionHistoryRaw = state['sessionHistory'];
     if (sessionHistoryRaw is List) {
@@ -2506,7 +2672,10 @@ class MusicService {
         }
         values.add(Map<String, dynamic>.from(entry));
       }
-      await _saveMapList('$_sessionHistoryKeyPrefix$profileId', values.take(20000).toList());
+      await _saveMapList(
+        '$_sessionHistoryKeyPrefix$profileId',
+        values.take(20000).toList(),
+      );
     }
     final historyPausedRaw = state['historyPaused'];
     if (historyPausedRaw is bool) {
@@ -2521,7 +2690,10 @@ class MusicService {
         }
         values.add(Map<String, dynamic>.from(entry));
       }
-      await _saveMapList('$_excludedSessionsKeyPrefix$profileId', values.take(2000).toList());
+      await _saveMapList(
+        '$_excludedSessionsKeyPrefix$profileId',
+        values.take(2000).toList(),
+      );
     }
     final scrobbleConfigRaw = state['scrobbleConfig'];
     if (scrobbleConfigRaw is Map) {
@@ -2543,7 +2715,10 @@ class MusicService {
         }
         values.add(Map<String, dynamic>.from(entry));
       }
-      await _saveMapList('$_scrobbleQueueKeyPrefix$profileId', values.take(5000).toList());
+      await _saveMapList(
+        '$_scrobbleQueueKeyPrefix$profileId',
+        values.take(5000).toList(),
+      );
     }
     final uiStateRaw = state['uiState'];
     if (uiStateRaw is Map) {
@@ -2579,6 +2754,7 @@ class MusicService {
         }
         return out;
       }
+
       await savePins(profileId, {
         'albums': valuesFor('albums'),
         'artists': valuesFor('artists'),
@@ -2607,7 +2783,8 @@ class MusicService {
       'shuffleOrder': shuffleOrder,
       'repeatMode': repeatMode,
       if (queueEntries != null) 'queueEntries': queueEntries,
-      if (playedHistoryEntries != null) 'playedHistoryEntries': playedHistoryEntries,
+      if (playedHistoryEntries != null)
+        'playedHistoryEntries': playedHistoryEntries,
       if (queueContextLabel != null) 'queueContextLabel': queueContextLabel,
       'savedAtUtc': DateTime.now().toUtc().toIso8601String(),
     };
@@ -2667,7 +2844,9 @@ class MusicService {
 
   Future<void> removeSavedQueue(int profileId, String queueId) async {
     final current = await savedQueues(profileId);
-    final next = current.where((item) => item['id']?.toString() != queueId).toList();
+    final next = current
+        .where((item) => item['id']?.toString() != queueId)
+        .toList();
     await _saveMapList('$_savedQueuesKeyPrefix$profileId', next);
   }
 
@@ -2705,7 +2884,9 @@ class MusicService {
 
   Future<void> removeSharedQueue(int profileId, String queueId) async {
     final current = await sharedQueues(profileId);
-    final next = current.where((item) => item['id']?.toString() != queueId).toList();
+    final next = current
+        .where((item) => item['id']?.toString() != queueId)
+        .toList();
     await _saveMapList('$_sharedQueuesKeyPrefix$profileId', next);
   }
 
@@ -2719,7 +2900,9 @@ class MusicService {
       throw const FormatException('Queue vote delta must be +1 or -1.');
     }
     final queues = await sharedQueues(profileId);
-    final targetIndex = queues.indexWhere((item) => item['id']?.toString() == queueId);
+    final targetIndex = queues.indexWhere(
+      (item) => item['id']?.toString() == queueId,
+    );
     if (targetIndex < 0) {
       throw StateError('Shared queue not found for vote.');
     }
@@ -2746,7 +2929,11 @@ class MusicService {
     String? label,
   }) async {
     final now = DateTime.now().toUtc();
-    final code = const Uuid().v4().replaceAll('-', '').substring(0, 8).toUpperCase();
+    final code = const Uuid()
+        .v4()
+        .replaceAll('-', '')
+        .substring(0, 8)
+        .toUpperCase();
     final entry = {
       'code': code,
       'fromProfileId': profileId,
@@ -2774,7 +2961,9 @@ class MusicService {
     final now = DateTime.now().toUtc();
     final remaining = <Map<String, dynamic>>[];
     for (final item in current) {
-      final expires = DateTime.tryParse(item['expiresAtUtc']?.toString() ?? '')?.toUtc();
+      final expires = DateTime.tryParse(
+        item['expiresAtUtc']?.toString() ?? '',
+      )?.toUtc();
       if (expires != null && expires.isBefore(now)) {
         continue;
       }
@@ -2846,13 +3035,18 @@ class MusicService {
         continue;
       }
       try {
-        values.add(MusicDownloadEntry.fromJson(Map<String, dynamic>.from(entry)));
+        values.add(
+          MusicDownloadEntry.fromJson(Map<String, dynamic>.from(entry)),
+        );
       } catch (_) {}
     }
     return values;
   }
 
-  Future<void> saveDownloads(int profileId, List<MusicDownloadEntry> values) async {
+  Future<void> saveDownloads(
+    int profileId,
+    List<MusicDownloadEntry> values,
+  ) async {
     if (!await (await SharedPreferences.getInstance()).setString(
       '$_downloadsKeyPrefix$profileId',
       jsonEncode(values.map((item) => item.toJson()).toList()),
@@ -2880,25 +3074,35 @@ class MusicService {
     return file;
   }
 
-  Future<MusicDownloadEntry> downloadTrack(int profileId, MusicTrack track) async {
+  Future<MusicDownloadEntry> downloadTrack(
+    int profileId,
+    MusicTrack track,
+  ) async {
     final streamUrl = track.streamUrl;
     if (streamUrl == null || streamUrl.trim().isEmpty) {
-      throw StateError('This track cannot be downloaded because no stream URL was provided.');
+      throw StateError(
+        'This track cannot be downloaded because no stream URL was provided.',
+      );
     }
     final uri = Uri.parse(streamUrl);
     final appDir = await getApplicationSupportDirectory();
-    final root = Directory('${appDir.path}${Platform.pathSeparator}music-cache${Platform.pathSeparator}profile-$profileId');
+    final root = Directory(
+      '${appDir.path}${Platform.pathSeparator}music-cache${Platform.pathSeparator}profile-$profileId',
+    );
     if (!await root.exists()) {
       await root.create(recursive: true);
     }
     final safeName = track.id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     final file = File('${root.path}${Platform.pathSeparator}$safeName.bin');
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
     try {
       final request = await client.getUrl(uri);
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('Download failed with HTTP ${response.statusCode}.');
+        throw HttpException(
+          'Download failed with HTTP ${response.statusCode}.',
+        );
       }
       final chunks = <int>[];
       await for (final chunk in response) {
@@ -2915,7 +3119,10 @@ class MusicService {
         updatedAtUtc: DateTime.now().toUtc(),
       );
       final current = await downloads(profileId);
-      final next = [entry, ...current.where((item) => item.trackId != track.id)];
+      final next = [
+        entry,
+        ...current.where((item) => item.trackId != track.id),
+      ];
       await saveDownloads(profileId, next.take(2000).toList());
       return entry;
     } finally {
@@ -2932,7 +3139,7 @@ class NavidromeClient {
       .toString();
   NavidromeClient(this.config);
 
-  Uri _endpoint(String route, {Map<String, String>? query}) {
+  Uri _endpoint(String route, {Map<String, dynamic>? query}) {
     final base = Uri.parse(config.baseUrl);
     return base
         .resolve('/rest/$route')
@@ -2970,7 +3177,7 @@ class NavidromeClient {
 
   Future<Map<String, dynamic>> _get(
     String route, {
-    Map<String, String>? query,
+    Map<String, dynamic>? query,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final uri = _endpoint(route, query: query);
@@ -3000,10 +3207,57 @@ class NavidromeClient {
     await _get('ping.view');
   }
 
+  /// Creates a native Navidrome/Subsonic share for one or more song ids,
+  /// mirroring the "Share" action in Navidrome's web console. Returns the
+  /// parsed `share` entry from the server, including the real public `url`
+  /// that recipients (even without an account) can open to stream and,
+  /// if the server has downloads enabled, download the shared tracks.
+  Future<Map<String, dynamic>> createShare({
+    required List<String> ids,
+    String? description,
+    DateTime? expires,
+  }) async {
+    final trimmedIds = ids
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (trimmedIds.isEmpty) {
+      throw const FormatException(
+        'At least one track id is required to create a share.',
+      );
+    }
+    final payload = await _get(
+      'createShare.view',
+      query: {
+        'id': trimmedIds,
+        if (description != null && description.trim().isNotEmpty)
+          'description': description.trim(),
+        if (expires != null)
+          'expires': '${expires.toUtc().millisecondsSinceEpoch}',
+      },
+    );
+    final shares = payload['shares'];
+    final list = shares is Map ? shares['share'] : null;
+    if (list is! List || list.isEmpty || list.first is! Map) {
+      throw StateError('Music server did not return a share link.');
+    }
+    return Map<String, dynamic>.from(list.first as Map);
+  }
+
+  Future<void> deleteShare(String shareId) async {
+    final id = shareId.trim();
+    if (id.isEmpty) {
+      throw const FormatException('Share id is required to delete a share.');
+    }
+    await _get('deleteShare.view', query: {'id': id});
+  }
+
   Future<void> setSongFavorite(String songId, bool isFavorite) async {
     final id = songId.trim();
     if (id.isEmpty) {
-      throw const FormatException('Song id is required to update favorite state.');
+      throw const FormatException(
+        'Song id is required to update favorite state.',
+      );
     }
     await _get(isFavorite ? 'star.view' : 'unstar.view', query: {'id': id});
   }
@@ -3157,10 +3411,7 @@ class NavidromeClient {
     } catch (_) {
       payload = await _get(
         'getLyrics.view',
-        query: {
-          'artist': track.artist,
-          'title': track.title,
-        },
+        query: {'artist': track.artist, 'title': track.title},
       );
     }
     final timed = <Map<String, dynamic>>[];
@@ -3180,7 +3431,10 @@ class NavidromeClient {
             continue;
           }
           final lineMap = Map<String, dynamic>.from(entry);
-          final lineText = lineMap['value']?.toString().trim() ?? lineMap['text']?.toString().trim() ?? '';
+          final lineText =
+              lineMap['value']?.toString().trim() ??
+              lineMap['text']?.toString().trim() ??
+              '';
           final startRaw = lineMap['start'] ?? lineMap['time'];
           final startMs = int.tryParse(startRaw?.toString() ?? '');
           if (lineText.isEmpty || startMs == null || startMs < 0) {
@@ -3218,9 +3472,7 @@ class NavidromeClient {
       parseLyricObject(Map<String, dynamic>.from(lyricsRoot));
     }
     if (timed.isNotEmpty) {
-      timed.sort(
-        (a, b) => (a['timeMs'] as int).compareTo(b['timeMs'] as int),
-      );
+      timed.sort((a, b) => (a['timeMs'] as int).compareTo(b['timeMs'] as int));
     }
     return {
       'plain': plain,

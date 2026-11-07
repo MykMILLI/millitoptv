@@ -3,6 +3,12 @@ import '../profiles/household_store.dart';
 import 'live_tv_source.dart';
 import 'music_service.dart';
 import 'playback_performance.dart';
+import 'shared_family_album_service.dart';
+import 'podcast_service.dart';
+import 'podcast_downloads.dart';
+import 'tube_library.dart';
+import 'global_playlists.dart';
+import 'tube_downloads.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -233,20 +239,6 @@ List<String> mergeAppOrder(List<String> available, List<String> saved) {
 
 class HomePreferences {
   final music = MusicService();
-  Future<bool> familyMoments(int profile) async =>
-      (await SharedPreferences.getInstance()).getBool(
-        'home.familyMoments.v1.$profile',
-      ) ??
-      true;
-  Future<void> setFamilyMoments(int profile, bool value) async {
-    if (!await (await SharedPreferences.getInstance()).setBool(
-      'home.familyMoments.v1.$profile',
-      value,
-    )) {
-      throw StateError('Could not save Family Moments preference.');
-    }
-  }
-
   Future<String> visualTheme(int profile) async =>
       (await SharedPreferences.getInstance()).getString(
         'home.visualTheme.v1.$profile',
@@ -390,6 +382,35 @@ class HomePreferences {
       cleaned,
     )) {
       throw StateError('Could not save TMDB API key.');
+    }
+  }
+
+  Future<SharedFamilyAlbumSettings> sharedFamilyAlbumSettings(
+    int profile,
+  ) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.sharedFamilyAlbum.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const SharedFamilyAlbumSettings();
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('Shared Family Album settings are invalid.');
+    }
+    return SharedFamilyAlbumSettings.fromJson(Map<String, dynamic>.from(decoded));
+  }
+
+  Future<void> saveSharedFamilyAlbumSettings(
+    int profile,
+    SharedFamilyAlbumSettings settings,
+  ) async {
+    final encoded = jsonEncode(settings.toJson());
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.sharedFamilyAlbum.v1.$profile',
+      encoded,
+    )) {
+      throw StateError('Could not save Shared Family Album settings.');
     }
   }
 
@@ -837,7 +858,6 @@ class HomePreferences {
     } catch (_) {}
     final libraryFolders = await _libraryFolderSyncPayload(profile);
     return {
-      'familyMoments': await familyMoments(profile),
       'visualTheme': await visualTheme(profile),
       'appOrder': await order(profile),
       'recentChannels': (await liveTvRecentChannels(
@@ -855,7 +875,11 @@ class HomePreferences {
       'uiState': await liveTvUiState(profile),
       'playbackPerformance': (await playbackPerformance(profile)).toJson(),
       'subtitleProviders': await subtitleProviderSettings(profile),
+      'sharedFamilyAlbum': (await sharedFamilyAlbumSettings(profile)).toJson(),
       'music': await music.profileSyncState(profile),
+      'podcasts': (await PodcastStore().load(profile)).toJson(),
+      'youtube': (await TubeStore().load(profile)).toJson(),
+      'globalPlaylists': (await GlobalPlaylistStore().load(profile)).toJson(),
       if (libraryFolders.isNotEmpty) 'libraryFolders': libraryFolders,
       'libraryPlayback': await libraryPlaybackState(profile),
       if (profileIdentity != null) 'profileIdentity': profileIdentity,
@@ -867,11 +891,6 @@ class HomePreferences {
     int profile,
     Map<String, dynamic> state,
   ) async {
-    final familyMomentsRaw = state['familyMoments'];
-    if (familyMomentsRaw is bool) {
-      await setFamilyMoments(profile, familyMomentsRaw);
-    }
-
     final visualThemeRaw = state['visualTheme'];
     if (visualThemeRaw != null) {
       final value = visualThemeRaw.toString().trim();
@@ -982,6 +1001,16 @@ class HomePreferences {
       );
     }
 
+    final familyAlbumRaw = state['sharedFamilyAlbum'];
+    if (familyAlbumRaw is Map) {
+      await saveSharedFamilyAlbumSettings(
+        profile,
+        SharedFamilyAlbumSettings.fromJson(
+          Map<String, dynamic>.from(familyAlbumRaw),
+        ),
+      );
+    }
+
     final musicRaw = state['music'];
     if (musicRaw is Map) {
       try {
@@ -990,6 +1019,24 @@ class HomePreferences {
           Map<String, dynamic>.from(musicRaw),
         );
       } catch (_) {}
+    }
+
+    final youtubeRaw = state['youtube'];
+    final globalPlaylistsRaw = state['globalPlaylists'];
+    if (globalPlaylistsRaw is Map) {
+      await GlobalPlaylistStore().applySync(
+        profile, Map<String, dynamic>.from(globalPlaylistsRaw),
+      );
+    }
+    if (youtubeRaw is Map) {
+      await TubeStore().applySync(profile, Map<String, dynamic>.from(youtubeRaw));
+    }
+    final podcastsRaw = state['podcasts'];
+    if (podcastsRaw is Map) {
+      await PodcastStore().applySync(
+        profile,
+        Map<String, dynamic>.from(podcastsRaw),
+      );
     }
 
     final libraryFoldersRaw = state['libraryFolders'];
@@ -1203,15 +1250,35 @@ class HomePreferences {
     );
   }
 
-  Future<void> clearProfileData(int profile) async {
+  Future<String> tubePipedUrl(int profile) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('youtube.pipedUrl.v1.$profile') ?? 'https://api.piped.private.coffee';
+  }
+
+  Future<void> setTubePipedUrl(int profile, String value) async {
+    final uri = Uri.tryParse(value);
+    if (uri == null || !['http', 'https'].contains(uri.scheme) ||
+        uri.host.isEmpty || uri.userInfo.isNotEmpty || uri.query.isNotEmpty || uri.fragment.isNotEmpty) {
+      throw const FormatException('Piped server must be an HTTP(S) URL without credentials, query or fragment.');
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.setString('youtube.pipedUrl.v1.$profile', value)) {
+      throw StateError('Could not save the Piped server.');
+    }
+  }
+
+  Future<void> clearProfileData(int profile, {PodcastDownloads? podcastDownloads, TubeDownloads? tubeDownloads}) async {
     final prefs = await SharedPreferences.getInstance();
     final keys = <String>[
-      'home.familyMoments.v1.$profile',
       'home.visualTheme.v1.$profile',
+      'podcasts.v1.$profile',
+      'youtube.v1.$profile',
+      'youtube.pipedUrl.v1.$profile',
       'home.appOrder.v1.$profile',
       'home.sleepUrl.v1.$profile',
       'home.liveTvPlaylistUrl.v1.$profile',
       'home.tmdbApiKey.v1.$profile',
+      'home.sharedFamilyAlbum.v1.$profile',
       'home.playbackPerformance.v1.$profile',
       'home.liveTvSources.v1.$profile',
       'home.liveTvRecent.v1.$profile',
@@ -1221,7 +1288,6 @@ class HomePreferences {
       'home.liveTvUiState.v1.$profile',
       'weather.auto.v1.$profile.enabled',
       'weather.auto.v1.$profile.forecast',
-      'gallery.preferences.v2.$profile',
       'library.folders.v1.$profile',
       'library.playback.v1.$profile',
       'library.tmdb.cache.v1.$profile',
@@ -1231,5 +1297,7 @@ class HomePreferences {
         throw StateError('Could not clear profile data for key: $key');
       }
     }
+    await (podcastDownloads ?? PodcastDownloads()).clearProfile(profile);
+    await (tubeDownloads ?? TubeDownloads()).clearProfile(profile);
   }
 }

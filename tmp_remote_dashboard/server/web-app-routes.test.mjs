@@ -1,0 +1,29 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { validateWebUrl,validateWebApp,validateAssignments } from './web-app-validation.mjs';
+import { registerWebAppRoutes } from './web-app-routes.mjs';
+const id='11111111-1111-4111-8111-111111111111';
+const device='22222222-2222-4222-8222-222222222222';
+const base={title:'Test app',url:'https://example.com',icon:'web',enabled:false};
+for(const url of ['https://example.com','http://192.168.1.10:8096','http://10.1.2.3','http://172.16.0.1','http://localhost:8080','http://nas.local','http://[::1]:8096'])test('accept '+url,()=>assert.ok(validateWebUrl(url)));
+for(const url of ['javascript:alert(1)','file:///C:/secret','data:text/html,test','ftp://example.com','http://example.com','https://user:pass@example.com','https://example.com/?token=secret','https://example.com/#access_token=secret','https://example.com/\nnext'])test('reject unsafe '+url.split(':')[0],()=>assert.throws(()=>validateWebUrl(url)));
+test('name/icon/enabled validation',()=>{assert.equal(validateWebApp(base).title,'Test app');for(const b of [{...base,title:''},{...base,title:'x'.repeat(81)},{...base,icon:'remote-image'},{...base,enabled:'yes'}])assert.throws(()=>validateWebApp(b));});
+test('revision is required for edits',()=>{assert.throws(()=>validateWebApp(base,{revision:true}));assert.equal(validateWebApp({...base,revision:1},{revision:true}).revision,1);});
+test('assignments are explicit, unique and bounded',()=>{assert.deepEqual(validateAssignments({deviceIds:[device],enabled:true}).deviceIds,[device]);for(const body of [{deviceIds:[],enabled:true},{deviceIds:[device,device],enabled:true},{deviceIds:[device],enabled:'yes'},{deviceIds:['bad'],enabled:true}])assert.throws(()=>validateAssignments(body));});
+function harness({authorized=true,apps=[{id,title:'Test',url:'https://example.com',icon:'web',revision:1}],deviceCount=1,failAudit=false}={}){
+ const handlers=new Map(),queries=[];
+ const app={get:(path,...h)=>handlers.set('GET '+path,h.at(-1)),post:(path,...h)=>handlers.set('POST '+path,h.at(-1))};
+ const c={query:async(sql,args=[])=>{queries.push({sql,args});if(failAudit&&sql.includes('INSERT INTO millitop_tv.launcher_web_app_events'))throw new Error('simulated audit failure');if(sql.startsWith('INSERT INTO millitop_tv.launcher_web_apps('))return {rowCount:1,rows:[{id,args}]};if(sql.includes('device_credentials'))return {rowCount:authorized?1:0,rows:authorized?[{id:device}]:[]};if(sql.includes('SELECT a.id,a.title'))return {rowCount:apps.length,rows:apps};if(sql.includes('SELECT id FROM millitop_tv.launcher_web_apps'))return {rowCount:1,rows:[{id}]};if(sql.includes('WHERE d.id=ANY'))return {rowCount:deviceCount,rows:deviceCount?[{id:device}]:[]};return {rowCount:0,rows:[]};},release(){}};
+ const pool={connect:async()=>c,query:c.query};registerWebAppRoutes(app,pool,(_req,_res,next)=>next());
+ const response={code:200,body:null,status(v){this.code=v;return this;},json(v){this.body=v;return this;}};
+ return {handlers,queries,response};
+}
+test('admin route has defense-in-depth authentication',async()=>{const h=harness();await h.handlers.get('GET /api/admin/web-apps')({},h.response,e=>{throw e;});assert.equal(h.response.code,401);assert.equal(h.queries.length,0);});
+test('invalid device token is rejected without a query',async()=>{const h=harness();await h.handlers.get('POST /api/device/web-apps')({get:()=>''},h.response,e=>{throw e;});assert.equal(h.response.code,401);assert.equal(h.queries.length,0);});
+test('revoked device receives no apps',async()=>{const h=harness({authorized:false});await h.handlers.get('POST /api/device/web-apps')({get:()=> 'Bearer mtv_'+'a'.repeat(43)},h.response,e=>{throw e;});assert.equal(h.response.code,401);assert.ok(!h.queries.some(q=>q.sql.includes('SELECT a.id,a.title')));});
+test('device catalog uses hashed credentials and assigned enabled rows',async()=>{const token='mtv_'+'a'.repeat(43),h=harness();await h.handlers.get('POST /api/device/web-apps')({get:()=> 'Bearer '+token},h.response,e=>{throw e;});assert.equal(h.response.code,200);assert.equal(h.response.body.protocol,1);const identify=h.queries.find(q=>q.sql.includes('device_credentials'));assert.equal(identify.args[0],createHash('sha256').update(token).digest('hex'));const query=h.queries.find(q=>q.sql.includes('SELECT a.id,a.title'));assert.match(query.sql,/x\.enabled AND a\.enabled/);assert.deepEqual(query.args,[device]);assert.ok(!JSON.stringify(h.queries).includes(token));});
+test('invalid device assignments commit no assignment writes',async()=>{const h=harness({deviceCount:0});await h.handlers.get('POST /api/admin/web-apps/:id/assign')({admin:{id},params:{id},body:{deviceIds:[device],enabled:true}},h.response,e=>{throw e;});assert.equal(h.response.code,400);assert.ok(!h.queries.some(q=>q.sql.includes('INSERT INTO millitop_tv.launcher_web_app_assignments')));});
+
+test('valid app creation binds values and commits before returning',async()=>{const h=harness();await h.handlers.get('POST /api/admin/web-apps')({admin:{id},body:base},h.response,e=>{throw e;});assert.equal(h.response.code,201);const insert=h.queries.find(q=>q.sql.startsWith('INSERT INTO millitop_tv.launcher_web_apps('));assert.deepEqual(insert.args.slice(1),[base.title,'https://example.com/',base.icon,false,id]);assert.ok(h.queries.some(q=>q.sql==='COMMIT'));assert.ok(h.queries.some(q=>q.sql.includes('launcher_web_app_events')));});
+test('audit failure rolls back instead of claiming success',async()=>{const h=harness({failAudit:true});let failed;await h.handlers.get('POST /api/admin/web-apps')({admin:{id},body:base},h.response,e=>{failed=e;});assert.ok(failed);assert.equal(h.response.body,null);assert.ok(h.queries.some(q=>q.sql==='ROLLBACK'));assert.ok(!h.queries.some(q=>q.sql==='COMMIT'));});

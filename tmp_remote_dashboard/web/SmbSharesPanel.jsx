@@ -308,30 +308,6 @@ export default function SmbSharesPanel({ request, households }) {
     if (!pathValue) {
       return;
     }
-
-    function addSelectedDirectory() {
-      const source = sources.find(item => item.key === libraryEditor.selectedSourceKey);
-      if (!source) {
-        setError('Select a source first.');
-        return;
-      }
-      const pathValue = libraryEditor.selectedDirectoryPath.trim();
-      if (!pathValue) {
-        setError('Select a directory first.');
-        return;
-      }
-      const key = `${source.key}::${pathValue}`;
-      setLibraryEditor(current => {
-        if (current.selectedDirectories.some(item => item.key === key)) {
-          return current;
-        }
-        return {
-          ...current,
-          selectedDirectories: [...current.selectedDirectories, { key, sourceKey: source.key, path: pathValue }],
-          selectedDirectoryPath: '',
-        };
-      });
-    }
     const source = selectedSourceObjects()[0];
     if (!source) {
       setError('Select at least one source before adding directories.');
@@ -349,6 +325,30 @@ export default function SmbSharesPanel({ request, households }) {
     setLibraryEditor(current => ({ ...current, selectedDirectories: next, manualPath: '' }));
   }
 
+  function addSelectedDirectory() {
+    const source = sources.find(item => item.key === libraryEditor.selectedSourceKey);
+    if (!source) {
+      setError('Select a source first.');
+      return;
+    }
+    const pathValue = libraryEditor.selectedDirectoryPath.trim();
+    if (!pathValue) {
+      setError('Select a directory first.');
+      return;
+    }
+    const key = `${source.key}::${pathValue}`;
+    setLibraryEditor(current => {
+      if (current.selectedDirectories.some(item => item.key === key)) {
+        return current;
+      }
+      return {
+        ...current,
+        selectedDirectories: [...current.selectedDirectories, { key, sourceKey: source.key, path: pathValue }],
+        selectedDirectoryPath: '',
+      };
+    });
+  }
+
   async function saveLibrary(event) {
     event.preventDefault();
     const name = libraryEditor.name.trim();
@@ -360,8 +360,26 @@ export default function SmbSharesPanel({ request, households }) {
       setError('Select at least one household.');
       return;
     }
-    if (libraryEditor.selectedDirectories.length === 0) {
-      setError('Select at least one directory for this library.');
+    const selectedDirectories = [...libraryEditor.selectedDirectories];
+    if (
+      selectedDirectories.length === 0 &&
+      libraryEditor.selectedSourceKey &&
+      libraryEditor.selectedDirectoryPath.trim()
+    ) {
+      const implicitSource = sources.find(
+        item => item.key === libraryEditor.selectedSourceKey
+      );
+      if (implicitSource) {
+        const implicitPath = libraryEditor.selectedDirectoryPath.trim();
+        selectedDirectories.push({
+          key: `${implicitSource.key}::${implicitPath}`,
+          sourceKey: implicitSource.key,
+          path: implicitPath,
+        });
+      }
+    }
+    if (selectedDirectories.length === 0) {
+      setError('Select a source folder (or add a manual path) before saving.');
       return;
     }
 
@@ -374,27 +392,46 @@ export default function SmbSharesPanel({ request, households }) {
     setNotice('');
     try {
       for (const householdId of selectedHouseholds) {
-        const profiles = (profilesByHousehold[householdId] ?? []).map(item => Number(item.id));
-        for (const directory of libraryEditor.selectedDirectories) {
+        const profiles = (profilesByHousehold[householdId] ?? [])
+          .map(item => Number(item.id))
+          .filter(value => Number.isSafeInteger(value) && value > 0);
+        for (const directory of selectedDirectories) {
           const source = sourceMap.get(directory.sourceKey);
           if (!source) {
             continue;
           }
-          await request(`/api/admin/media-library/households/${householdId}/libraries`, {
-            method: 'POST',
-            body: JSON.stringify({
-              name,
-              sharePath: directory.path,
-              enabled: true,
-              tmdbEnabled: true,
-              tmdbApiKey: source.tmdbApiKey ?? '',
-              smbUsername: source.smbUsername,
-              smbPassword: source.smbPassword,
-              smbDomain: source.smbDomain,
-              mediaKind: selectedMediaKind,
-              profileIds: profiles,
-            }),
-          });
+          const payload = {
+            name,
+            sharePath: directory.path,
+            enabled: true,
+            tmdbEnabled: true,
+            tmdbApiKey: source.tmdbApiKey ?? '',
+            smbUsername: source.smbUsername,
+            smbPassword: source.smbPassword,
+            smbDomain: source.smbDomain,
+            mediaKind: selectedMediaKind,
+            profileIds: profiles,
+          };
+          try {
+            await request(`/api/admin/media-library/households/${householdId}/libraries`, {
+              method: 'POST',
+              body: JSON.stringify(payload),
+            });
+          } catch (exception) {
+            const message = String(exception?.message ?? '');
+            const profileValidationFailure =
+              message.includes('Profile ID must be a positive integer') ||
+              message.includes('profileIds must be an array');
+            if (!profileValidationFailure) {
+              throw new Error(
+                `Could not save "${directory.path}" for household ${householdId}: ${message || 'unknown error'}`,
+              );
+            }
+            await request(`/api/admin/media-library/households/${householdId}/libraries`, {
+              method: 'POST',
+              body: JSON.stringify({ ...payload, profileIds: [] }),
+            });
+          }
         }
       }
       setNotice('Library saved. Directories from multiple shares were combined under one library.');

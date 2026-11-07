@@ -232,3 +232,168 @@ input[type=checkbox]{accent-color:#63dfcb}fieldset{border:1px solid #31445d;bord
 @media(max-width:760px){.sidebar{position:static;width:auto;padding:16px;gap:16px}.sidebar nav{display:flex;overflow-x:auto}.nav-item{white-space:nowrap;flex-shrink:0}.sidebar-session{display:flex;flex-wrap:wrap;align-items:center;padding:8px 0;margin:0}.sidebar-session>small{display:none}.sidebar-session button{margin-left:auto;padding:8px 14px}.workspace-shell{margin-left:0}.workspace-header{flex-direction:row;align-items:center;padding:18px}.workspace-header h1{font-size:23px}.workspace-header>button{font-size:12px;padding:10px}.workspace{padding:16px}.panel{padding:18px}.billing-rail{grid-template-columns:1fr}.quick-links{grid-template-columns:repeat(2,minmax(0,1fr))}.billing-toolbar{align-items:stretch;flex-direction:column}.workspace-footer{padding:14px 16px;flex-wrap:wrap}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.stat{padding:16px}.stat strong.text-value{font-size:18px}.web-app-form{grid-template-columns:1fr}}
 
 .community-tabs{display:flex;gap:10px;flex-wrap:wrap}.community-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}.community-columns .request-row{display:grid;width:100%;text-align:left;gap:6px;margin:10px 0}.markdown-preview{padding:16px;background:#081425;border-radius:10px;overflow-wrap:anywhere;max-height:450px;overflow:auto}.community-columns textarea{min-height:120px}@media(max-width:1000px){.community-columns{grid-template-columns:1fr}}
+
+:root {
+  --dashboard-bg: #07111f;
+  --dashboard-text: #edf4ff;
+  --dashboard-muted: #9baec6;
+  --dashboard-panel: #111e30;
+  --dashboard-panel-alt: #0d1829;
+  --dashboard-border: #263952;
+  --dashboard-control: #0e1a2b;
+  --dashboard-nav-active: #203149;
+  --dashboard-accent: #63dfcb;
+  --dashboard-accent-contrast: #07111f;
+  --dashboard-danger: #542b35;
+}
+
+:root[data-dashboard-theme='aurora-glass'] {
+  --dashboard-bg: #0a1426;
+  --dashboard-text: #edf4ff;
+  --dashboard-muted: #a9bcd3;
+  --dashboard-panel: #101d31;
+  --dashboard-panel-alt: #152742;
+  --dashboard-border: #2a3f59;
+  --dashboard-control: #0e1a2b;
+  --dashboard-nav-active: #1e324a;
+  --dashboard-accent: #6eede0;
+  --dashboard-accent-contrast: #091920;
+}
+
+:root[data-dashboard-theme='velocity-redline'] {
+  --dashboard-bg: #0a0f18;
+  --dashboard-text: #f0f5fc;
+  --dashboard-muted: #b4bfcc;
+  --dashboard-panel: #111826;
+  --dashboard-panel-alt: #161f31;
+  --dashboard-border: #2f3d52;
+  --dashboard-control: #0d1420;
+  --dashboard-nav-active: #2b2435;
+  --dashboard-accent: #ff3d4e;
+  --dashboard-accent-contrast: #22080d;
+}
+
+:root[data-dashboard-theme='cobalt-horizon'] {
+  --dashboard-bg: #041230;
+  --dashboard-text: #eff5ff;
+  --dashboard-muted: #c3d8f4;
+  --dashboard-panel: #0b2a5c;
+  --dashboard-panel-alt: #123874;
+  --dashboard-border: #2c4f87;
+  --dashboard-control: #08214a;
+  --dashboard-nav-active: #1b4f86;
+  --dashboard-accent: #5fd0ff;
+  --dashboard-accent-contrast: #072335;
+}
+
+:root[data-dashboard-theme='emby-emerald'] {
+  --dashboard-bg: #07140f;
+  --dashboard-text: #f0faf5;
+  --dashboard-muted: #bedccb;
+  --dashboard-panel: #0e231c;
+  --dashboard-panel-alt: #163229;
+  --dashboard-border: #2f5a4f;
+  --dashboard-control: #0b1d17;
+  --dashboard-nav-active: #1f4438;
+  --dashboard-accent: #5fe3a0;
+  --dashboard-accent-contrast: #072114;
+}
+
+:root[data-dashboard-theme='satellite-command'] {
+  --dashboard-bg: #101119;
+  --dashboard-text: #edf3ff;
+  --dashboard-muted: #aab5c8;
+  --dashboard-panel: #181a26;
+  --dashboard-panel-alt: #222739;
+  --dashboard-border: #37405d;
+  --dashboard-control: #141824;
+  --dashboard-nav-active: #273147;
+  --dashboard-accent: #83d5ff;
+  --dashboard-accent-contrast: #0b2032;
+}
+
+:root[data-dashboard-theme='ember-canvas'] {
+  --dashboard-bg: #160e16;
+  --dashboard-text: #f7eef4;
+  --dashboard-muted: #d5becc;
+  --dashboard-panel: #25142a;
+  --dashboard-panel-alt: #331d37;
+  --dashboard-border: #4e3353;
+  --dashboard-control: #1d1220;
+  --dashboard-nav-active: #3a2640;
+  --dashboard-accent: #ff8f5a;
+  --dashboard-accent-contrast: #2b130a;
+}
+
+html, body {
+  background: var(--dashboard-bg);
+  color: var(--dashboard-text);
+}
+
+p, small, .workspace-footer, .sidebar-brand small, .sidebar-session small, .stat span, dt, .channel-row small, .empty, label {
+  color: var(--dashboard-muted);
+}
+
+.brand, .sidebar-brand, .connection-pill.connected, .action-disclosure summary {
+  color: var(--dashboard-accent);
+}
+
+.panel, .device-live-tv, .source-card, .channel-list, .channel-row, .workspace-header, .workspace-footer, .sidebar, .sidebar-session, .households li, th, td {
+  border-color: var(--dashboard-border);
+}
+
+.panel, .sidebar, .workspace-header, .workspace-footer, .device-live-tv, .source-card, .channel-list, .channel-row, .markdown-preview {
+  background: var(--dashboard-panel);
+}
+
+input, select, textarea, .receipt-panel {
+  background: var(--dashboard-control);
+  color: var(--dashboard-text);
+  border-color: var(--dashboard-border);
+}
+
+button {
+  background: var(--dashboard-accent);
+  color: var(--dashboard-accent-contrast);
+}
+
+button.secondary, .nav-item, .device-state {
+  background: var(--dashboard-panel-alt);
+  color: var(--dashboard-text);
+}
+
+.nav-item.selected {
+  background: var(--dashboard-nav-active);
+  box-shadow: inset 3px 0 var(--dashboard-accent);
+  color: var(--dashboard-text);
+}
+
+.skip-link {
+  background: var(--dashboard-accent);
+  color: var(--dashboard-accent-contrast);
+}
+
+.error {
+  background: var(--dashboard-danger);
+}
+
+input:focus-visible, button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline-color: var(--dashboard-accent);
+}
+
+.sidebar-theme {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sidebar-theme select {
+  margin-top: 0;
+  padding: 10px;
+}
+
+.sidebar-theme-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}

@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
+import '../services/global_playlists.dart';
+import '../services/playlist_hub.dart';
 import '../services/live_tv_epg.dart';
 import '../services/live_tv_playlist.dart';
 import '../services/live_tv_source.dart';
@@ -14,6 +17,7 @@ import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/viewing_sessions.dart';
 import '../theme/millitop_visual_theme.dart';
+import '../widgets/live_tv_osd.dart';
 
 enum _ChannelFilterMode { all, favorites, recent }
 
@@ -802,6 +806,13 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
 
   Future<void> _loadSources() async {
     final next = await HomePreferences().liveTvSources(widget.profileId);
+    Set<String>? savedFavorites;
+    try {
+      savedFavorites = await channelFavoriteKeys(widget.profileId);
+    } catch (e) {
+      debugPrint('Saved channel favorites could not load: $e');
+      _setState(() => syncStatus = 'Saved channel favorites could not load. $e');
+    }
     final sourceIds = next.map((item) => item.id).toSet();
     scopedSourceIds.removeWhere((id) => !sourceIds.contains(id));
     final obsoleteGroupKeys = scopedGroupsBySource.keys
@@ -815,6 +826,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     }
     _setState(() {
       sources = next;
+      if (savedFavorites != null) {
+        favorites = savedFavorites;
+      }
       if (sources.isEmpty) {
         source = null;
         allSourcesSelected = false;
@@ -1012,7 +1026,16 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       LiveTvChannel? toOpen;
       final requested = widget.initialChannelId;
       if (requested != null && requested.trim().isNotEmpty) {
+        final requestedSource = widget.initialSourceId;
+        if (requestedSource != null &&
+            !sources.any((s) => s.id == requestedSource)) {
+          throw StateError('The saved channel source is unavailable. Reconnect it in Manage Sources.');
+        }
         toOpen = _channelByKey(requested.trim());
+        if (toOpen == null ||
+            (requestedSource != null && toOpen.sourceId != requestedSource)) {
+          throw StateError('This saved channel is no longer available from its source.');
+        }
       }
       toOpen ??= history.isNotEmpty ? _channelByKey(history.first) : null;
       toOpen ??= visibleChannels.isNotEmpty ? visibleChannels.first : null;
@@ -1125,21 +1148,44 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     syncing = true;
     _setState(() => syncStatus = 'Syncing favorites...');
     try {
-      final snapshot = await syncService.load(
-        expectedConnection: connection,
-        profileId: widget.profileId,
-        sourceId: _sourceId(),
-      );
+      final activeSources = allSourcesSelected ? sources : <LiveTvSource>[source!];
+      final historyKeys = <String>[];
+      var unavailable = 0;
+      for (final activeSource in activeSources) {
+        final snapshot = await syncService.load(
+          expectedConnection: connection,
+          profileId: widget.profileId,
+          sourceId: activeSource.id,
+        );
+        if (!mounted) return;
+        historyKeys.addAll(snapshot.history);
+        final library = await GlobalPlaylistStore().load(widget.profileId);
+        for (final key in snapshot.favorites) {
+          final matches = channels.where((channel) =>
+            channel.sourceId == activeSource.id &&
+            (_channelKey(channel) == key || _channelToken(channel) == key));
+          if (matches.isEmpty) {
+            unavailable++;
+            continue;
+          }
+          final saved = vodHubItem(_channelLibraryItem(matches.first));
+          if (!library.favorites.containsKey(saved.key)) {
+            await PlaylistHubRepository().setFavorite(widget.profileId, saved, true);
+          }
+        }
+      }
+      final savedFavorites = await channelFavoriteKeys(widget.profileId);
       if (!mounted || source == null) {
         return;
       }
       _setState(() {
-        favorites = snapshot.favorites;
+        favorites = savedFavorites;
         history = [
-          ...snapshot.history,
-          ...history.where((value) => !snapshot.history.contains(value)),
+          ...historyKeys,
+          ...history.where((value) => !historyKeys.contains(value)),
         ].take(50).toList();
-        syncStatus = '';
+        syncStatus = unavailable == 0
+            ? '' : '$unavailable saved channels are unavailable from their sources.';
       });
       _recomputeChannelViews();
     } catch (_) {
@@ -1500,18 +1546,34 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     } catch (_) {}
   }
 
+  LiveTvLibraryItem _channelLibraryItem(LiveTvChannel channel) =>
+      LiveTvLibraryItem(
+        sourceId: channel.sourceId ?? source!.id,
+        sourceName: channel.sourceName ?? source?.name ?? 'Live TV',
+        mediaType: 'channel', mediaId: _channelToken(channel),
+        title: channel.title, posterUrl: channel.logo, streamUrl: channel.streamUrl,
+      );
+
   Future<void> _toggleFavorite(LiveTvChannel channel) async {
     final key = _channelKey(channel);
     final next = Set<String>.from(favorites);
     if (!next.remove(key)) {
       next.add(key);
     }
+    try {
+      await PlaylistHubRepository().setFavorite(
+        widget.profileId, vodHubItem(_channelLibraryItem(channel)), next.contains(key),
+      );
+    } catch (e) {
+      _setState(() => error = 'Could not save your channel favorite. $e');
+      return;
+    }
+    if (!mounted) return;
     favorites = next;
     _recomputeChannelViews();
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty ||
-        !DeviceConnection.instance.isConnected ||
-        allSourcesSelected) {
+        !DeviceConnection.instance.isConnected) {
       return;
     }
     final selectedSource = sources.firstWhere(
@@ -1523,7 +1585,13 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         expectedConnection: connection,
         profileId: widget.profileId,
         sourceId: selectedSource.id,
-        favorites: next,
+        favorites: next.where((key) => key.startsWith('${selectedSource.id}|')).toSet(),
+      );
+      await controlService.pushConfig(
+        expectedConnection: connection, profileId: widget.profileId,
+        sources: await HomePreferences().liveTvSources(widget.profileId),
+        tmdbApiKey: await HomePreferences().tmdbApiKey(widget.profileId),
+        profileState: await HomePreferences().liveTvProfileSyncState(widget.profileId),
       );
       if (mounted) {
         _setState(() => syncStatus = '');
@@ -2014,7 +2082,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     if (!mounted) {
       return;
     }
-    if (Theme.of(context).platform == TargetPlatform.android) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       try {
         if (value) {
           await SystemChrome.setEnabledSystemUIMode(
@@ -2469,6 +2537,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   Widget build(BuildContext context) {
     final themeTokens = context.millitopTheme;
     final preset = themeTokens.layoutPreset;
+    final viewport = MediaQuery.sizeOf(context);
+    final compact = viewport.width < 900;
+    final shortScreen = viewport.height < 500;
     final channelRailOnRight =
         preset == MillitopLayoutPreset.commandDeck ||
         preset == MillitopLayoutPreset.haloSplit;
@@ -2644,11 +2715,25 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                         icon: const Icon(Icons.arrow_back),
                       ),
                       actions: [
-                        TextButton(
+                        if (compact) PopupMenuButton<String>(
+                          tooltip: 'Live TV options',
+                          itemBuilder: (_) => [
+                            PopupMenuItem(value: 'sources', enabled: !opening, child: const Text('Manage Sources')),
+                            PopupMenuItem(value: 'reload', enabled: !loading && !opening && source != null, child: const Text('Reload')),
+                            PopupMenuItem(value: 'split', enabled: !loading && !opening, child: Text(screenCount == 4 ? 'Return to single screen' : 'Enable ${screenCount + 1}-screen')),
+                          ],
+                          onSelected: (value) {
+                            switch (value) {
+                              case 'sources': unawaited(_manageSources()); break;
+                              case 'reload': unawaited(_loadChannels()); break;
+                              case 'split': unawaited(_toggleSplitScreen()); break;
+                            }
+                          },
+                        ) else TextButton(
                           onPressed: opening ? null : _manageSources,
                           child: const Text('Manage Sources'),
                         ),
-                        TextButton(
+                        if (!compact) TextButton(
                           onPressed: loading || opening || source == null
                               ? null
                               : _loadChannels,
@@ -2663,7 +2748,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                               : _showEpgGuide,
                           icon: const Icon(Icons.view_agenda_outlined),
                         ),
-                        IconButton(
+                        if (!compact) IconButton(
                           tooltip: screenCount == 1
                               ? 'Enable split screen'
                               : screenCount == 2
@@ -2704,57 +2789,17 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                 ),
                                 child: Row(
                                   children: [
-                                    IconButton(
-                                      tooltip: lastDuration <= Duration.zero
-                                          ? 'Previous channel'
-                                          : 'Rewind 10 seconds',
-                                      onPressed: () => unawaited(
-                                        _seekRelative(
-                                          const Duration(seconds: -10),
-                                          secondary: splitScreen,
-                                        ),
-                                      ),
-                                      icon: const Icon(Icons.fast_rewind),
-                                    ),
-                                    IconButton(
-                                      tooltip: 'Play or pause',
-                                      onPressed: () =>
-                                          unawaited(_togglePlayPause()),
-                                      icon: const Icon(Icons.play_arrow),
-                                    ),
-                                    IconButton(
-                                      tooltip: lastDuration <= Duration.zero
-                                          ? 'Next channel'
-                                          : 'Forward 10 seconds',
-                                      onPressed: () => unawaited(
-                                        _seekRelative(
-                                          const Duration(seconds: 10),
-                                          secondary: splitScreen,
-                                        ),
-                                      ),
-                                      icon: const Icon(Icons.fast_forward),
-                                    ),
-                                    IconButton(
-                                      tooltip: fullScreenVideo
-                                          ? 'Exit full screen'
-                                          : 'Full screen',
-                                      onPressed: _toggleFullScreenVideo,
-                                      icon: Icon(
-                                        fullScreenVideo
-                                            ? Icons.fullscreen_exit
-                                            : Icons.fullscreen,
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    Text(
+                                    Expanded(child: Text(
                                       splitScreen
                                           ? '$screenCount screens'
                                           : 'Single screen',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
                                         color: themeTokens.mutedColor,
                                         fontSize: 12.5,
                                         fontWeight: FontWeight.w600,
-                                      ),
+                                      )),
                                     ),
                                     const SizedBox(width: 10),
                                     Text(
@@ -2776,6 +2821,10 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                   children: [
                     if (!fullScreenVideo && (loading || opening))
                       const LinearProgressIndicator(),
+                    if (!fullScreenVideo)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: compact ? (shortScreen ? 80 : 160) : double.infinity),
+                        child: SingleChildScrollView(child: Column(children: [
                     if (!fullScreenVideo &&
                         (status.isNotEmpty ||
                             syncStatus.isNotEmpty ||
@@ -2836,6 +2885,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                 Expanded(
                                   flex: 2,
                                   child: DropdownButtonFormField<String>(
+                                    isExpanded: true,
                                     key: ValueKey(
                                       allSourcesSelected
                                           ? 'source-all'
@@ -2927,6 +2977,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                               flex: 2,
                               child:
                                   DropdownButtonFormField<_ChannelFilterMode>(
+                                    isExpanded: true,
                                     initialValue: filterMode,
                                     decoration: const InputDecoration(
                                       labelText: 'Channel Filter',
@@ -2959,6 +3010,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                             Expanded(
                               flex: 3,
                               child: DropdownButtonFormField<String>(
+                                isExpanded: true,
                                 key: ValueKey(
                                   'group-$selectedGroup-${groupOptions.length}',
                                 ),
@@ -2998,8 +3050,12 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                           ],
                         ),
                       ),
+                        ])),
+                      ),
                     Expanded(
-                      child: Row(
+                      child: Flex(
+                        direction: compact ? Axis.vertical : Axis.horizontal,
+                        verticalDirection: compact ? VerticalDirection.up : VerticalDirection.down,
                         textDirection: channelRailOnRight
                             ? TextDirection.rtl
                             : TextDirection.ltr,
@@ -3008,7 +3064,8 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                             Directionality(
                               textDirection: TextDirection.ltr,
                               child: Container(
-                                width: 470,
+                                width: compact ? double.infinity : 470,
+                                height: compact ? (shortScreen ? 96 : 160) : null,
                                 margin: const EdgeInsets.fromLTRB(
                                   12,
                                   0,
@@ -3163,7 +3220,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                       if (nowProgram == null &&
                                                           channel.group != null)
                                                         channel.group!,
-                                                      if (channel.sourceName !=
+                                                      if (!compact && channel.sourceName !=
                                                           null)
                                                         'Source: ${channel.sourceName!}',
                                                     ].join(' · '),
@@ -3269,10 +3326,14 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                               focusNode: fullScreenFocusNode,
                               onKeyEvent: _onFullScreenKey,
                               child: MouseRegion(
-                                onEnter: (_) =>
-                                    _showFullScreenControlsTemporarily(),
-                                onHover: (_) =>
-                                    _showFullScreenControlsTemporarily(),
+                                onEnter: (_) {
+                                  _showFullScreenControlsTemporarily();
+                                  _showOsd();
+                                },
+                                onHover: (_) {
+                                  _showFullScreenControlsTemporarily();
+                                  _showOsd();
+                                },
                                 child: !splitScreen && video == null
                                     ? const Center(
                                         child: Text(
@@ -3296,7 +3357,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                               ),
                                             ),
                                           ),
-                                          if (osdVisible && selected != null)
+                                          if (selected != null)
                                             (() {
                                               final nowProgram =
                                                   _currentProgram(selected!);
@@ -3309,8 +3370,17 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                   _programsForChannel(
                                                     selected!,
                                                   ).isNotEmpty;
-                                              return _LiveTvOsd(
+                                              return Positioned.fill(child: AnimatedOpacity(
+                                                opacity: osdVisible ? 1 : 0,
+                                                duration: const Duration(
+                                                  milliseconds: 200,
+                                                ),
+                                                curve: Curves.easeOutCubic,
+                                                child: IgnorePointer(
+                                                  ignoring: !osdVisible,
+                                                  child: LiveTvOsd(
                                                 channelName: selected!.title,
+                                                channelLogo: selected!.logo,
                                                 nowProgram: nowProgram,
                                                 nextProgram: nextProgram,
                                                 epgProgress: _epgProgress(
@@ -3323,9 +3393,19 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                 liveOnly:
                                                     lastDuration <=
                                                     Duration.zero,
+                                                isPlaying: isPlaying,
+                                                position: lastPosition,
+                                                duration: lastDuration,
+                                                isFullScreen: fullScreenVideo,
                                                 splitScreen: splitScreen,
                                                 screenCount: screenCount,
                                                 hasEpg: hasGuideData,
+                                                onGoLive: () => unawaited(
+                                                  _seekRelative(
+                                                    lastDuration - lastPosition,
+                                                  ),
+                                                ),
+                                                onInteraction: _showOsd,
                                                 onFavorite: () => unawaited(
                                                   _toggleFavorite(selected!),
                                                 ),
@@ -3370,9 +3450,11 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                 ),
                                                 onFullScreen:
                                                     _toggleFullScreenVideo,
-                                              );
+                                                  ),
+                                                ),
+                                              ));
                                             })(),
-                                          if (fullScreenVideo)
+                                          if (fullScreenVideo && !osdVisible)
                                             Positioned(
                                               top: 12,
                                               right: 12,
@@ -3908,222 +3990,6 @@ class _GuideProgramTileState extends State<_GuideProgramTile> {
       ),
     );
   }
-}
-
-class _LiveTvOsd extends StatelessWidget {
-  final String channelName;
-  final LiveTvProgram? nowProgram;
-  final LiveTvProgram? nextProgram;
-  final double? epgProgress;
-  final bool isFavorite;
-  final bool recording;
-  final bool liveOnly;
-  final bool splitScreen;
-  final int screenCount;
-  final bool hasEpg;
-  final VoidCallback onFavorite;
-  final VoidCallback onPlayPause;
-  final VoidCallback onStop;
-  final VoidCallback onChannelDown;
-  final VoidCallback onChannelUp;
-  final VoidCallback onRewind;
-  final VoidCallback onForward;
-  final VoidCallback onRecord;
-  final VoidCallback onSchedule;
-  final VoidCallback onGuide;
-  final VoidCallback onSplit;
-  final VoidCallback onFullScreen;
-
-  const _LiveTvOsd({
-    required this.channelName,
-    required this.nowProgram,
-    required this.nextProgram,
-    required this.epgProgress,
-    required this.isFavorite,
-    required this.recording,
-    required this.liveOnly,
-    required this.splitScreen,
-    required this.screenCount,
-    required this.hasEpg,
-    required this.onFavorite,
-    required this.onPlayPause,
-    required this.onStop,
-    required this.onChannelDown,
-    required this.onChannelUp,
-    required this.onRewind,
-    required this.onForward,
-    required this.onRecord,
-    required this.onSchedule,
-    required this.onGuide,
-    required this.onSplit,
-    required this.onFullScreen,
-  });
-
-  @override
-  Widget build(BuildContext context) => Positioned(
-    left: 20,
-    right: 20,
-    bottom: 20,
-    child: Theme(
-      data: Theme.of(context).copyWith(
-        filledButtonTheme: FilledButtonThemeData(
-          style: ButtonStyle(
-            minimumSize: WidgetStateProperty.all(const Size(168, 50)),
-            padding: WidgetStateProperty.all(
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            ),
-            textStyle: WidgetStateProperty.all(
-              const TextStyle(
-                fontSize: 15.5,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
-              ),
-            ),
-            side: WidgetStateProperty.resolveWith((states) {
-              if (states.contains(WidgetState.focused)) {
-                return BorderSide(
-                  color: context.millitopTheme.accentColor,
-                  width: 2,
-                );
-              }
-              return BorderSide(
-                color: context.millitopTheme.panelBorder,
-                width: 1,
-              );
-            }),
-          ),
-        ),
-      ),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface.withAlpha(210),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: context.millitopTheme.panelBorder),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                channelName,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              if (nowProgram != null)
-                Text(
-                  'Now · ${_clockText(nowProgram!.start)} - ${_clockText(nowProgram!.end)} · ${nowProgram!.title}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(height: 1.35),
-                ),
-              if (nextProgram != null)
-                Text(
-                  'Next · ${_clockText(nextProgram!.start)} - ${_clockText(nextProgram!.end)} · ${nextProgram!.title}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white70, height: 1.35),
-                ),
-              if (epgProgress != null) ...[
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: LinearProgressIndicator(
-                    value: epgProgress,
-                    minHeight: 8,
-                    color: Colors.lightBlueAccent,
-                    backgroundColor: Colors.white12,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: [
-                  FilledButton.tonalIcon(
-                    onPressed: onGuide,
-                    icon: const Icon(Icons.view_agenda_outlined),
-                    label: Text(hasEpg ? 'EPG Guide' : 'EPG Missing'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onFavorite,
-                    icon: Icon(isFavorite ? Icons.star : Icons.star_border),
-                    label: Text(isFavorite ? 'Favorite' : 'Add Favorite'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onRecord,
-                    icon: Icon(
-                      recording ? Icons.stop : Icons.fiber_manual_record,
-                    ),
-                    label: Text(recording ? 'Stop DVR' : 'Start DVR'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onSchedule,
-                    icon: const Icon(Icons.event_note),
-                    label: const Text('Schedule DVR'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onRewind,
-                    icon: const Icon(Icons.fast_rewind),
-                    label: Text(liveOnly ? 'Prev Channel' : 'Rewind 10s'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onChannelDown,
-                    icon: const Icon(Icons.keyboard_arrow_down),
-                    label: const Text('Channel -'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onPlayPause,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Play/Pause'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onStop,
-                    icon: const Icon(Icons.stop),
-                    label: const Text('Stop Channel'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onChannelUp,
-                    icon: const Icon(Icons.keyboard_arrow_up),
-                    label: const Text('Channel +'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onForward,
-                    icon: const Icon(Icons.fast_forward),
-                    label: Text(liveOnly ? 'Next Channel' : 'Forward 10s'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onSplit,
-                    icon: Icon(
-                      screenCount == 1 ? Icons.view_week : Icons.grid_view,
-                    ),
-                    label: Text(
-                      screenCount == 1
-                          ? 'Split (2)'
-                          : screenCount == 2
-                          ? 'Split (3)'
-                          : screenCount == 3
-                          ? 'Split (4)'
-                          : 'Single Screen',
-                    ),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onFullScreen,
-                    icon: const Icon(Icons.fullscreen),
-                    label: const Text('Full Screen'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
 }
 
 class _LiveTvSourcesDialog extends StatefulWidget {

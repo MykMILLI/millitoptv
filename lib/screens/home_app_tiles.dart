@@ -10,12 +10,16 @@ import '../services/live_tv_source.dart';
 import '../services/web_app_catalog.dart';
 import '../services/web_app_definition.dart';
 import '../services/firefox_browser.dart';
-import '../services/native_app_launcher.dart';
 import '../services/music_service.dart';
+import '../services/podcast_service.dart';
+import '../services/podcast_playback.dart';
+import '../widgets/animated_media_app_icon.dart';
 import '../theme/millitop_visual_theme.dart';
 import 'live_tv_screen.dart';
 import 'live_tv_media_screen.dart';
 import 'music_screen.dart';
+import 'podcasts_screen.dart';
+import 'youtube_screen.dart';
 import 'app_settings_screen.dart';
 
 class _HoverCardLift extends StatefulWidget {
@@ -52,7 +56,13 @@ class _HoverCardLiftState extends State<_HoverCardLift> {
 class HomeAppTiles extends StatefulWidget {
   final int profileId;
   final WebAppCatalog? catalog;
-  const HomeAppTiles({super.key, required this.profileId, this.catalog});
+  final PodcastPlayback? podcastPlayback;
+  const HomeAppTiles({
+    super.key,
+    required this.profileId,
+    this.catalog,
+    this.podcastPlayback,
+  });
   @override
   State<HomeAppTiles> createState() => _HomeAppTilesState();
 }
@@ -64,6 +74,11 @@ class _HomeAppTilesState extends State<HomeAppTiles>
   final playlistService = const LiveTvPlaylistService();
   final liveTvControl = LiveTvControlService();
   final musicService = MusicService();
+  late PodcastPlayback podcastPlayback;
+  PodcastLibrary? lastPodcastLibrary;
+  List<PodcastResumeEntry> recentPodcasts = [];
+  String podcastError = '';
+  int podcastGeneration = 0;
   List<WebAppDefinition> apps = builtinWebApps;
   List<LiveTvRecentChannel> recentLiveTv = [];
   List<LiveTvRecentMedia> recentMedia = [];
@@ -97,11 +112,93 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     tileFx = CurvedAnimation(parent: tileFxController, curve: Curves.easeInOut);
     catalog = widget.catalog ?? WebAppCatalog.instance;
     catalog.addListener(_changed);
+    podcastPlayback = widget.podcastPlayback ?? PodcastPlayback.instance;
+    podcastPlayback.addListener(_podcastChanged);
+    unawaited(_refreshPodcasts());
     unawaited(_load());
   }
 
   void _changed() {
     unawaited(_load());
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeAppTiles oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.podcastPlayback != widget.podcastPlayback) {
+      podcastPlayback.removeListener(_podcastChanged);
+      podcastPlayback = widget.podcastPlayback ?? PodcastPlayback.instance;
+      podcastPlayback.addListener(_podcastChanged);
+      lastPodcastLibrary = null;
+    }
+    if (oldWidget.profileId != widget.profileId) {
+      recentPodcasts = [];
+      podcastError = '';
+      lastPodcastLibrary = null;
+      unawaited(_refreshPodcasts());
+      unawaited(_load());
+    }
+  }
+
+  void _podcastChanged() {
+    if (!mounted ||
+        podcastPlayback.profileId != widget.profileId ||
+        identical(lastPodcastLibrary, podcastPlayback.library)) {
+      return;
+    }
+    lastPodcastLibrary = podcastPlayback.library;
+    podcastGeneration++;
+    _applyPodcastLibrary(podcastPlayback.library);
+  }
+
+  void _applyPodcastLibrary(PodcastLibrary library) {
+    try {
+      final entries = library.resumableEpisodes;
+      setState(() {
+        recentPodcasts = entries.take(3).toList();
+        podcastError = '';
+      });
+    } catch (e) {
+      debugPrint('Podcast continue listening could not load: $e');
+      setState(
+        () => podcastError = 'Podcast continue listening could not load. $e',
+      );
+    }
+  }
+
+  Future<void> _refreshPodcasts() async {
+    final profile = widget.profileId;
+    final request = ++podcastGeneration;
+    try {
+      final library = await PodcastStore().load(profile);
+      if (!mounted ||
+          request != podcastGeneration ||
+          widget.profileId != profile)
+        return;
+      _applyPodcastLibrary(library);
+    } catch (e) {
+      debugPrint('Podcast continue listening could not load: $e');
+      if (mounted &&
+          request == podcastGeneration &&
+          widget.profileId == profile) {
+        setState(
+          () => podcastError = 'Podcast continue listening could not load. $e',
+        );
+      }
+    }
+  }
+
+  Future<void> _openPodcasts([PodcastEpisode? episode]) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PodcastsScreen(
+          profileId: widget.profileId,
+          initialEpisode: episode,
+          playback: podcastPlayback,
+        ),
+      ),
+    );
+    if (mounted) await _refreshPodcasts();
   }
 
   void _syncTileFxActivity() {
@@ -159,6 +256,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
         } catch (_) {}
       }
       final values = await catalog.load(widget.profileId);
+      await _refreshPodcasts();
       final order = await HomePreferences().order(widget.profileId);
       final recents = await HomePreferences().liveTvRecentChannels(
         widget.profileId,
@@ -253,6 +351,8 @@ class _HomeAppTilesState extends State<HomeAppTiles>
 
   @override
   void dispose() {
+    podcastGeneration++;
+    podcastPlayback.removeListener(_podcastChanged);
     livePulseController.dispose();
     tileFxController.dispose();
     catalog.removeListener(_changed);
@@ -379,76 +479,79 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       child: _HoverCardLift(
         child: Card(
           child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  FadeTransition(
-                    opacity: livePulse,
-                    child: const Icon(
-                      Icons.fiber_manual_record,
-                      color: Colors.redAccent,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    FadeTransition(
+                      opacity: livePulse,
+                      child: const Icon(
+                        Icons.fiber_manual_record,
+                        color: Colors.redAccent,
+                      ),
                     ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Live · Continue Watching',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      tooltip: 'Remove from continue watching',
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => unawaited(_removeRecentLiveTv(recent)),
+                    ),
+                    Text(
+                      recent.sourceName,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  recent.channelName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w700,
                   ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'Live · Continue Watching',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: 'Remove from continue watching',
-                    icon: const Icon(Icons.close, size: 18),
-                    onPressed: () => unawaited(_removeRecentLiveTv(recent)),
-                  ),
+                ),
+                const SizedBox(height: 6),
+                if (recentNowProgram != null)
                   Text(
-                    recent.sourceName,
+                    'Now · ${_clockText(recentNowProgram!.start)} - ${_clockText(recentNowProgram!.end)} · ${recentNowProgram!.title}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white70),
+                  )
+                else
+                  const Text(
+                    'EPG loading or unavailable for this channel.',
+                    style: TextStyle(color: Colors.white70),
                   ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                recent.channelName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w700,
+                if (recentNextProgram != null)
+                  Text(
+                    'Next · ${_clockText(recentNextProgram!.start)} - ${_clockText(recentNextProgram!.end)} · ${recentNextProgram!.title}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white60),
+                  ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: _openRecentLiveTv,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Resume channel'),
                 ),
-              ),
-              const SizedBox(height: 6),
-              if (recentNowProgram != null)
-                Text(
-                  'Now · ${_clockText(recentNowProgram!.start)} - ${_clockText(recentNowProgram!.end)} · ${recentNowProgram!.title}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white70),
-                )
-              else
-                const Text(
-                  'EPG loading or unavailable for this channel.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-              if (recentNextProgram != null)
-                Text(
-                  'Next · ${_clockText(recentNextProgram!.start)} - ${_clockText(recentNextProgram!.end)} · ${recentNextProgram!.title}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white60),
-                ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _openRecentLiveTv,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Resume channel'),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -461,6 +564,119 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     );
     await _load();
   }
+
+  String _podcastTime(Duration value) =>
+      '${value.inMinutes}:${(value.inSeconds % 60).toString().padLeft(2, '0')}';
+
+  Widget _continueListeningPodcastsPanel() => SizedBox(
+    width: MediaQuery.sizeOf(context).width < 700 ? double.infinity : 554,
+    child: _HoverCardLift(
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: AnimatedBuilder(
+            animation: podcastPlayback,
+            builder: (context, _) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Podcasts · Continue Listening',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                for (final entry in recentPodcasts)
+                  Builder(
+                    builder: (context) {
+                      final active =
+                          podcastPlayback.profileId == widget.profileId &&
+                          podcastPlayback.active?.key == entry.episode.key;
+                      final position = active
+                          ? podcastPlayback.position
+                          : entry.position;
+                      final duration =
+                          active && podcastPlayback.duration > Duration.zero
+                          ? podcastPlayback.duration
+                          : entry.duration;
+                      final progress = duration > Duration.zero
+                          ? (position.inMilliseconds / duration.inMilliseconds)
+                                .clamp(0.0, 1.0)
+                          : null;
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 14),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: entry.episode.artwork.isEmpty
+                                  ? Icon(
+                                      entry.episode.video
+                                          ? Icons.videocam
+                                          : Icons.headphones,
+                                    )
+                                  : ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Image.network(
+                                        entry.episode.artwork,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) =>
+                                            const Icon(Icons.podcasts),
+                                      ),
+                                    ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    entry.episode.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  Text(
+                                    entry.episode.show.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: context.millitopTheme.mutedColor,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  if (progress != null) ...[
+                                    LinearProgressIndicator(value: progress),
+                                    const SizedBox(height: 6),
+                                  ],
+                                  Text(
+                                    duration > Duration.zero
+                                        ? '${_podcastTime(position)} / ${_podcastTime(duration)}'
+                                        : '${_podcastTime(position)} listened',
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Resume ${entry.episode.title}',
+                              icon: const Icon(Icons.play_arrow_rounded),
+                              onPressed: () =>
+                                  unawaited(_openPodcasts(entry.episode)),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 
   Widget _continueListeningMusicPanel() {
     final accent = context.millitopTheme.accentColor;
@@ -634,29 +850,15 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       child: _HoverCardLift(
         child: Card(
           child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child:
-                    recent.posterUrl == null || recent.posterUrl!.trim().isEmpty
-                    ? Container(
-                        width: 84,
-                        height: 120,
-                        color: context.millitopTheme.panelColor,
-                        alignment: Alignment.center,
-                        child: Icon(
-                          recent.mediaType == 'movie' ? Icons.movie : Icons.tv,
-                          size: 30,
-                        ),
-                      )
-                    : Image.network(
-                        recent.posterUrl!,
-                        width: 84,
-                        height: 120,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child:
+                      recent.posterUrl == null ||
+                          recent.posterUrl!.trim().isEmpty
+                      ? Container(
                           width: 84,
                           height: 120,
                           color: context.millitopTheme.panelColor,
@@ -667,68 +869,85 @@ class _HomeAppTilesState extends State<HomeAppTiles>
                                 : Icons.tv,
                             size: 30,
                           ),
-                        ),
-                      ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            recent.mediaType == 'movie'
-                                ? 'Continue Movie'
-                                : 'Continue Series',
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
+                        )
+                      : Image.network(
+                          recent.posterUrl!,
+                          width: 84,
+                          height: 120,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            width: 84,
+                            height: 120,
+                            color: context.millitopTheme.panelColor,
+                            alignment: Alignment.center,
+                            child: Icon(
+                              recent.mediaType == 'movie'
+                                  ? Icons.movie
+                                  : Icons.tv,
+                              size: 30,
                             ),
                           ),
                         ),
-                        IconButton(
-                          tooltip: 'Remove from continue watching',
-                          icon: const Icon(Icons.close, size: 18),
-                          onPressed: () =>
-                              unawaited(_removeRecentMedia(recent)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      recent.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              recent.mediaType == 'movie'
+                                  ? 'Continue Movie'
+                                  : 'Continue Series',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Remove from continue watching',
+                            icon: const Icon(Icons.close, size: 18),
+                            onPressed: () =>
+                                unawaited(_removeRecentMedia(recent)),
+                          ),
+                        ],
                       ),
-                    ),
-                    if (recent.subtitle != null)
+                      const SizedBox(height: 6),
                       Text(
-                        recent.subtitle!,
+                        recent.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white70),
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                    Text(
-                      recent.sourceName ?? recent.sourceId,
-                      style: const TextStyle(color: Colors.white60),
-                    ),
-                  ],
+                      if (recent.subtitle != null)
+                        Text(
+                          recent.subtitle!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      Text(
+                        recent.sourceName ?? recent.sourceId,
+                        style: const TextStyle(color: Colors.white60),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              FilledButton.icon(
-                onPressed: _openRecentMedia,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Resume'),
-              ),
-            ],
+                FilledButton.icon(
+                  onPressed: _openRecentMedia,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Resume'),
+                ),
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -830,12 +1049,18 @@ class _HomeAppTilesState extends State<HomeAppTiles>
                       children: [
                         Row(
                           children: [
-                            _buildTileIcon(
-                              tileId: tileId,
-                              title: title,
-                              icon: icon,
-                              iconData: iconData,
-                              isHovered: isHovered,
+                            SizedBox(
+                              width: 62,
+                              height: 62,
+                              child: Center(
+                                child: _buildTileIcon(
+                                  tileId: tileId,
+                                  title: title,
+                                  icon: icon,
+                                  iconData: iconData,
+                                  isHovered: isHovered,
+                                ),
+                              ),
                             ),
                             const Spacer(),
                             if (app != null)
@@ -893,6 +1118,13 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     required bool isHovered,
     IconData? iconData,
   }) {
+    if (tileId == 'native:youtube' || tileId == 'native:podcasts') {
+      return AnimatedMediaAppIcon(
+        kind: tileId == 'native:youtube'
+            ? MediaAppIconKind.youtube
+            : MediaAppIconKind.podcasts,
+      );
+    }
     if (tileId == 'native:iptvnator') {
       return AnimatedBuilder(
         animation: tileFxController,
@@ -969,6 +1201,24 @@ class _HomeAppTilesState extends State<HomeAppTiles>
               color: isHovered
                   ? const Color(0xFF9D9CFF)
                   : const Color(0xFF8D7BFF),
+            ),
+          );
+        },
+      );
+    }
+    if (tileId == 'native:vod') {
+      return AnimatedBuilder(
+        animation: tileFxController,
+        builder: (context, _) {
+          final pulse = 1 + (math.sin(tileFx.value * 2 * 3.14159) * 0.025);
+          return Transform.scale(
+            scale: isHovered ? 1.05 * pulse : pulse,
+            child: Icon(
+              Icons.movie_filter_rounded,
+              size: 48,
+              color: isHovered
+                  ? const Color(0xFFFF7689)
+                  : const Color(0xFFFF5D73),
             ),
           );
         },
@@ -1057,7 +1307,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       ),
       'native:vod': _tile(
         'native:vod',
-        'VOD Movies & Series',
+        'Movies & Series',
         'movie',
         () => Navigator.of(context).push<void>(
           MaterialPageRoute<void>(
@@ -1065,13 +1315,6 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         ),
         iconData: Icons.movie_filter_rounded,
-      ),
-      'native:vlc': _tile(
-        'native:vlc',
-        'VLC player',
-        'vlc',
-        () =>
-            NativeAppLauncher.open(context, appKey: 'vlc', title: 'VLC player'),
       ),
       'native:music': _tile(
         'native:music',
@@ -1083,6 +1326,24 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         ),
         iconData: Icons.graphic_eq_rounded,
+      ),
+      'native:youtube': _tile(
+        'native:youtube',
+        'YouTube',
+        'youtube',
+        () => Navigator.of(context).push<void>(
+          MaterialPageRoute<void>(
+            builder: (_) => YouTubeScreen(profileId: widget.profileId),
+          ),
+        ),
+        iconData: Icons.smart_display_rounded,
+      ),
+      'native:podcasts': _tile(
+        'native:podcasts',
+        'Podcasts',
+        'podcasts',
+        () => unawaited(_openPodcasts()),
+        iconData: Icons.podcasts_rounded,
       ),
       for (final app in apps)
         'web:${app.id}': _tile(
@@ -1163,7 +1424,14 @@ class _HomeAppTilesState extends State<HomeAppTiles>
           ),
         if (error.isNotEmpty)
           Text(error, style: const TextStyle(color: Colors.orangeAccent)),
-        if (recentLiveTv.isNotEmpty || recentMusicAvailable) ...[
+        if (podcastError.isNotEmpty)
+          Text(
+            podcastError,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        if (recentLiveTv.isNotEmpty ||
+            recentMusicAvailable ||
+            recentPodcasts.isNotEmpty) ...[
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
@@ -1171,6 +1439,7 @@ class _HomeAppTilesState extends State<HomeAppTiles>
             children: [
               if (recentLiveTv.isNotEmpty) _continueWatchingPanel(),
               if (recentMusicAvailable) _continueListeningMusicPanel(),
+              if (recentPodcasts.isNotEmpty) _continueListeningPodcastsPanel(),
             ],
           ),
           const SizedBox(height: 8),

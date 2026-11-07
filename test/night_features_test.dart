@@ -11,13 +11,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });
-  test('Family Moments is profile scoped and defaults visible', () async {
-    final prefs = HomePreferences();
-    expect(await prefs.familyMoments(1), true);
-    await prefs.setFamilyMoments(1, false);
-    expect(await prefs.familyMoments(1), false);
-    expect(await prefs.familyMoments(2), true);
-  });
   test('saved app order is stable, removes missing apps, appends new apps', () {
     expect(mergeAppOrder(['a', 'b', 'c'], ['b', 'missing', 'a', 'b']), [
       'b',

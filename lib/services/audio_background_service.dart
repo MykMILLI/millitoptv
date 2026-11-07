@@ -157,7 +157,7 @@ Future<void> initializeAudioBackgroundService() async {
         androidNotificationChannelId: 'com.millitop.music.playback',
         androidNotificationChannelName: 'Music Playback',
         androidNotificationOngoing: true,
-        androidStopForegroundOnPause: false,
+        androidStopForegroundOnPause: true,
       ),
     );
     await AudioBackgroundService.instance.initialize();

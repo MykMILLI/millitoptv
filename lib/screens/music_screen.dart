@@ -19,6 +19,7 @@ import '../services/home_preferences.dart';
 import '../services/live_tv_control.dart';
 import '../services/music_service.dart';
 import '../services/music_widget_service.dart';
+import '../services/music_mini_player.dart';
 import '../services/playback_destinations_service.dart';
 import '../services/speaker_discovery_service.dart';
 import '../theme/millitop_visual_theme.dart';
@@ -421,15 +422,135 @@ class _QueueEntry {
   }
 }
 
+enum _ShareExpiryPreset { never, oneDay, oneWeek, oneMonth }
+
+class _ShareLinkOptions {
+  final bool allowDownload;
+  final DateTime? expiresAt;
+  const _ShareLinkOptions({
+    required this.allowDownload,
+    required this.expiresAt,
+  });
+}
+
+class _ShareOptionsDialog extends StatefulWidget {
+  final String label;
+  const _ShareOptionsDialog({required this.label});
+
+  @override
+  State<_ShareOptionsDialog> createState() => _ShareOptionsDialogState();
+}
+
+class _ShareOptionsDialogState extends State<_ShareOptionsDialog> {
+  _ShareExpiryPreset preset = _ShareExpiryPreset.oneWeek;
+  bool allowDownload = true;
+
+  DateTime? get _expiresAt {
+    final now = DateTime.now();
+    switch (preset) {
+      case _ShareExpiryPreset.never:
+        return null;
+      case _ShareExpiryPreset.oneDay:
+        return now.add(const Duration(days: 1));
+      case _ShareExpiryPreset.oneWeek:
+        return now.add(const Duration(days: 7));
+      case _ShareExpiryPreset.oneMonth:
+        return now.add(const Duration(days: 30));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Share options'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow download'),
+              subtitle: const Text(
+                'Let recipients save a copy, not just stream it.',
+              ),
+              value: allowDownload,
+              onChanged: (value) => setState(() => allowDownload = value),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<_ShareExpiryPreset>(
+              initialValue: preset,
+              decoration: const InputDecoration(
+                labelText: 'Link expires',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.never,
+                  child: Text('Never'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneDay,
+                  child: Text('In 1 day'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneWeek,
+                  child: Text('In 1 week'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneMonth,
+                  child: Text('In 1 month'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => preset = value);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(
+            context,
+            _ShareLinkOptions(
+              allowDownload: allowDownload,
+              expiresAt: _expiresAt,
+            ),
+          ),
+          child: const Text('Create link'),
+        ),
+      ],
+    );
+  }
+}
+
 class MusicScreen extends StatefulWidget {
   final int profileId;
   final String? initialSection;
   final String? initialQuery;
+  final MusicTrack? initialTrack;
   const MusicScreen({
     super.key,
     required this.profileId,
     this.initialSection,
     this.initialQuery,
+    this.initialTrack,
   });
 
   @override
@@ -507,6 +628,7 @@ class _MusicScreenState extends State<MusicScreen>
   bool visualizerEnabled = true;
   DateTime? sleepDeadline;
   Timer? sleepTimer;
+  Timer? miniSyncTimer;
   String plainLyrics = '';
   List<Map<String, dynamic>> timedLyrics = [];
   List<String> credits = [];
@@ -550,6 +672,7 @@ class _MusicScreenState extends State<MusicScreen>
   @override
   void initState() {
     super.initState();
+    MusicMiniPlayerService.instance.hideMini();
     AudioBackgroundService.instance.onPlayRequested = _togglePlayPause;
     AudioBackgroundService.instance.onPauseRequested = _pausePlayback;
     AudioBackgroundService.instance.onStopRequested = _clearQueueAndStop;
@@ -571,6 +694,10 @@ class _MusicScreenState extends State<MusicScreen>
     );
     unawaited(_configureAudioSession());
     unawaited(_load());
+    miniSyncTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _syncMiniPlayerFromState(),
+    );
   }
 
   @override
@@ -597,9 +724,33 @@ class _MusicScreenState extends State<MusicScreen>
       unawaited(sub.cancel());
     }
     sleepTimer?.cancel();
+    miniSyncTimer?.cancel();
     unawaited(_persistUiState());
+    _syncMiniPlayerFromState(showMini: activeQueue.isNotEmpty);
     vinylController?.dispose();
     super.dispose();
+  }
+
+  void _syncMiniPlayerFromState({bool showMini = false}) {
+    final activePlayer = player;
+    if (activePlayer == null) {
+      return;
+    }
+    MusicMiniPlayerService.instance.syncFromMusicScreen(
+      player: activePlayer,
+      queue: activeQueue.map((item) => item.track).toList(),
+      queueIndex: activeQueueIndex,
+      librarySongs: librarySongs,
+      playing: playing,
+      position: position,
+      duration: duration,
+      config: config,
+    );
+    if (showMini) {
+      MusicMiniPlayerService.instance.showMini();
+    } else {
+      MusicMiniPlayerService.instance.hideMini();
+    }
   }
 
   @override
@@ -1058,10 +1209,14 @@ class _MusicScreenState extends State<MusicScreen>
           status =
               'Could not refresh remote favorites. Showing local favorites.';
         }
-        picks = await client!.randomSongs(limit: 24);
+        if (widget.initialTrack == null) {
+          picks = await client!.randomSongs(limit: 24);
+        }
         loadingLibrary = true;
         unawaited(_hydrateLibrary(client!));
-        unawaited(_restorePlaybackSession());
+        if (widget.initialTrack == null) {
+          unawaited(_restorePlaybackSession());
+        }
       }
       if (!mounted) {
         return;
@@ -1071,6 +1226,24 @@ class _MusicScreenState extends State<MusicScreen>
         loading = false;
         error = '';
       });
+      _syncMiniPlayerFromState();
+      final initialTrack = widget.initialTrack;
+      if (initialTrack != null) {
+        final refreshed = MusicTrack(
+          id: initialTrack.id,
+          title: initialTrack.title,
+          artist: initialTrack.artist,
+          album: initialTrack.album,
+          genre: initialTrack.genre,
+          year: initialTrack.year,
+          durationSeconds: initialTrack.durationSeconds,
+          coverArtId: initialTrack.coverArtId,
+          streamUrl:
+              client?.streamUri(initialTrack.id).toString() ??
+              initialTrack.streamUrl,
+        );
+        await _playTrack(refreshed);
+      }
     } catch (e) {
       if (!mounted) {
         return;
@@ -1373,6 +1546,7 @@ class _MusicScreenState extends State<MusicScreen>
       nowPlayingPane = _NowPlayingPane.vinyl;
       status = 'Now playing ${track.title}';
     });
+    _syncMiniPlayerFromState();
     AudioBackgroundService.instance.updateNowPlaying(
       id: track.id,
       title: track.title,
@@ -1831,6 +2005,7 @@ class _MusicScreenState extends State<MusicScreen>
       playing = false;
       status = 'Playback stopped.';
     });
+    _syncMiniPlayerFromState();
     AudioBackgroundService.instance.clear();
     unawaited(widgetService.update(title: '', artist: '', playing: false));
     vinylController?.stop();
@@ -2437,33 +2612,73 @@ class _MusicScreenState extends State<MusicScreen>
     required String contentType,
     required String contentId,
     required String label,
+    required List<String> trackIds,
     Map<String, dynamic> metadata = const {},
     String? subject,
   }) async {
-    final link = await music.createShareLink(
-      widget.profileId,
-      contentType: contentType,
-      contentId: contentId,
-      label: label,
-      accessRequired: true,
-      metadata: metadata,
+    final nav = client;
+    if (nav == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Connect a music server before sharing.'),
+          ),
+        );
+      }
+      return;
+    }
+    final ids = trackIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (ids.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Nothing to share yet.')));
+      }
+      return;
+    }
+    final options = await showDialog<_ShareLinkOptions>(
+      context: context,
+      builder: (context) => _ShareOptionsDialog(label: label),
     );
-    final parsed = Uri.tryParse(link);
-    final blockedPreview = parsed == null
-        ? const {'message': 'Preview unavailable.'}
-        : await music.resolveShareLink(
-            widget.profileId,
-            parsed,
-            recipientSignedIn: true,
-            recipientHasAccess: false,
-          );
+    if (options == null || !mounted) {
+      return;
+    }
+    Map<String, dynamic> share;
+    try {
+      share = await nav.createShare(
+        ids: ids,
+        description: label,
+        expires: options.expiresAt,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not create share link: $e')),
+        );
+      }
+      return;
+    }
+    final link = share['url']?.toString().trim() ?? '';
+    if (link.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('The music server did not return a share link.'),
+          ),
+        );
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
     final shouldShare = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Share item'),
+        title: const Text('Share link ready'),
         content: SizedBox(
           width: 520,
           child: Column(
@@ -2475,9 +2690,26 @@ class _MusicScreenState extends State<MusicScreen>
               SelectableText(link),
               const SizedBox(height: 8),
               Text(
-                'No-access recipient behavior: ${blockedPreview['message'] ?? 'You do not have access to this shared content.'}',
+                options.allowDownload
+                    ? 'In-app, recipients will see a download option for this share.'
+                    : 'In-app, recipients can only stream this share — no download button is shown.',
                 style: TextStyle(color: _MusicPaint.onSurface70, fontSize: 12),
               ),
+              const SizedBox(height: 4),
+              Text(
+                'Opened in a browser, downloads follow the music server\'s own setting.',
+                style: TextStyle(color: _MusicPaint.onSurface70, fontSize: 12),
+              ),
+              if (options.expiresAt != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Expires ${options.expiresAt!.toLocal()}',
+                  style: TextStyle(
+                    color: _MusicPaint.onSurface70,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -2493,7 +2725,7 @@ class _MusicScreenState extends State<MusicScreen>
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: const Text('Done'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
@@ -2502,27 +2734,27 @@ class _MusicScreenState extends State<MusicScreen>
         ],
       ),
     );
-    if (shouldShare != true) {
-      if (mounted) {
-        setState(() => status = 'Share link copied or dismissed.');
-      }
-      return;
+    if (shouldShare == true) {
+      await SharePlus.instance.share(
+        ShareParams(
+          text: '$label\n$link',
+          subject: subject ?? 'Shared from MILLITOP Music',
+        ),
+      );
     }
-    await SharePlus.instance.share(
-      ShareParams(
-        text: '$label\n$link',
-        subject: subject ?? 'Shared from MILLITOP Music',
-      ),
-    );
     await _appendActivity(
       type: 'share',
       targetType: contentType,
       targetId: contentId,
       visibility: 'public',
-      metadata: {'label': label, 'link': link},
+      metadata: {
+        'label': label,
+        'link': link,
+        'allowDownload': options.allowDownload,
+      },
     );
     if (mounted) {
-      setState(() => status = 'Shared $label');
+      setState(() => status = 'Share link ready for $label');
     }
   }
 
@@ -2530,6 +2762,7 @@ class _MusicScreenState extends State<MusicScreen>
     await _shareEntity(
       contentType: 'track',
       contentId: track.id,
+      trackIds: [track.id],
       label: '${track.title} — ${track.artist} • ${track.album}',
       metadata: {'artist': track.artist, 'album': track.album},
       subject: 'Now playing: ${track.title}',
@@ -2546,6 +2779,7 @@ class _MusicScreenState extends State<MusicScreen>
     await _shareEntity(
       contentType: 'album',
       contentId: normalizedId,
+      trackIds: albumTracks.map((track) => track.id).toList(),
       label: '$albumName${artist.trim().isEmpty ? '' : ' — $artist'}',
       metadata: {'trackCount': albumTracks.length, 'artist': artist},
       subject: 'Album share: $albumName',
@@ -2559,6 +2793,7 @@ class _MusicScreenState extends State<MusicScreen>
     await _shareEntity(
       contentType: 'artist',
       contentId: 'artist:${artistName.trim().toLowerCase()}',
+      trackIds: artistTracks.map((track) => track.id).toList(),
       label: '$artistName • ${artistTracks.length} songs',
       metadata: {'trackCount': artistTracks.length},
       subject: 'Artist share: $artistName',
@@ -2569,6 +2804,7 @@ class _MusicScreenState extends State<MusicScreen>
     await _shareEntity(
       contentType: 'playlist',
       contentId: playlist.id,
+      trackIds: playlist.tracks.map((track) => track.id).toList(),
       label: '${playlist.name} • ${playlist.tracks.length} tracks',
       metadata: {'trackCount': playlist.tracks.length},
       subject: 'Playlist share: ${playlist.name}',
@@ -3135,7 +3371,7 @@ class _MusicScreenState extends State<MusicScreen>
     if (!mounted || playerSheetOpen) {
       return;
     }
-    final compact = MediaQuery.sizeOf(context).width < 900;
+    final compact = MediaQuery.sizeOf(context).width < 1100;
     if (!compact || activeTrack == null) {
       return;
     }
@@ -4760,88 +4996,93 @@ class _MusicScreenState extends State<MusicScreen>
     String localError = '';
     return StatefulBuilder(
       builder: (context, setLocal) => Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 680),
-          child: Card(
-            color: _MusicPaint.blend(
-              _MusicPaint.panel,
-              _MusicPaint.overlayOpaque,
-              0.58,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Connect Navidrome',
-                    style: TextStyle(fontSize: 34, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Sign in once and MILLITOP will sync songs, playlists, favorites, stations, and playback parity across household devices.',
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: setupServer,
-                    autocorrect: false,
-                    enabled: !busy,
-                    decoration: const InputDecoration(
-                      labelText: 'Navidrome server origin',
-                      hintText: 'https://music.yourdomain.com',
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 680),
+            child: Card(
+              color: _MusicPaint.blend(
+                _MusicPaint.panel,
+                _MusicPaint.overlayOpaque,
+                0.58,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Connect Navidrome',
+                      style: TextStyle(
+                        fontSize: 34,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: setupUser,
-                    enabled: !busy,
-                    decoration: const InputDecoration(labelText: 'Username'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: setupPass,
-                    enabled: !busy,
-                    obscureText: true,
-                    decoration: const InputDecoration(labelText: 'Password'),
-                  ),
-                  if (localError.isNotEmpty) ...[
                     const SizedBox(height: 10),
-                    Text(
-                      localError,
-                      style: TextStyle(color: _MusicPaint.warning),
+                    const Text(
+                      'Sign in once and MILLITOP will sync songs, playlists, favorites, stations, and playback parity across household devices.',
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: setupServer,
+                      autocorrect: false,
+                      enabled: !busy,
+                      decoration: const InputDecoration(
+                        labelText: 'Navidrome server origin',
+                        hintText: 'https://music.yourdomain.com',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: setupUser,
+                      enabled: !busy,
+                      decoration: const InputDecoration(labelText: 'Username'),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: setupPass,
+                      enabled: !busy,
+                      obscureText: true,
+                      decoration: const InputDecoration(labelText: 'Password'),
+                    ),
+                    if (localError.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        localError,
+                        style: TextStyle(color: _MusicPaint.warning),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    FilledButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              setLocal(() {
+                                busy = true;
+                                localError = '';
+                              });
+                              try {
+                                await _saveSetup(
+                                  setupServer.text,
+                                  setupUser.text,
+                                  setupPass.text,
+                                );
+                              } catch (e) {
+                                setLocal(() {
+                                  localError = e.toString().replaceFirst(
+                                    'FormatException: ',
+                                    '',
+                                  );
+                                });
+                              } finally {
+                                setLocal(() => busy = false);
+                              }
+                            },
+                      icon: const Icon(Icons.link),
+                      label: Text(busy ? 'Connecting...' : 'Connect music'),
                     ),
                   ],
-                  const SizedBox(height: 14),
-                  FilledButton.icon(
-                    onPressed: busy
-                        ? null
-                        : () async {
-                            setLocal(() {
-                              busy = true;
-                              localError = '';
-                            });
-                            try {
-                              await _saveSetup(
-                                setupServer.text,
-                                setupUser.text,
-                                setupPass.text,
-                              );
-                            } catch (e) {
-                              setLocal(() {
-                                localError = e.toString().replaceFirst(
-                                  'FormatException: ',
-                                  '',
-                                );
-                              });
-                            } finally {
-                              setLocal(() => busy = false);
-                            }
-                          },
-                    icon: const Icon(Icons.link),
-                    label: Text(busy ? 'Connecting...' : 'Connect music'),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
@@ -6515,7 +6756,10 @@ class _MusicScreenState extends State<MusicScreen>
           SizedBox(width: 54, height: 54, child: _coverArt(track, radius: 8)),
           const SizedBox(width: 10),
           SizedBox(
-            width: 220,
+            width: (MediaQuery.sizeOf(context).width * 0.12).clamp(
+              110.0,
+              220.0,
+            ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -6593,7 +6837,10 @@ class _MusicScreenState extends State<MusicScreen>
           ),
           const SizedBox(width: 12),
           SizedBox(
-            width: 360,
+            width: (MediaQuery.sizeOf(context).width * 0.20).clamp(
+              180.0,
+              360.0,
+            ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -6648,7 +6895,7 @@ class _MusicScreenState extends State<MusicScreen>
           const Spacer(),
           const Icon(Icons.volume_up_rounded),
           SizedBox(
-            width: 120,
+            width: (MediaQuery.sizeOf(context).width * 0.06).clamp(60.0, 120.0),
             child: Slider(
               value: volume.clamp(0, 100),
               min: 0,
@@ -6668,270 +6915,275 @@ class _MusicScreenState extends State<MusicScreen>
     if (track == null) {
       return const SizedBox.shrink();
     }
-    return Container(
-      color: _MusicPaint.blend(
-        _MusicPaint.panel,
-        _MusicPaint.overlayOpaque,
-        0.76,
-      ),
-      padding: const EdgeInsets.fromLTRB(16, 22, 16, 24),
-      child: Column(
-        children: [
-          const SizedBox(height: 8),
-          SizedBox(
-            width: 280,
-            height: 280,
-            child: _vinylDeck(
-              context,
-              track,
-              size: 280,
-              includeVisualizer: false,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            track.title,
-            style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w700),
-          ),
-          Text(
-            track.artist,
-            style: TextStyle(color: _MusicPaint.onSurface70, fontSize: 22),
-          ),
-          TextButton(
-            onPressed: () => unawaited(_openAlbumContext(track)),
-            child: Text(track.album),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _sourceLabelForTrack(track),
-            style: TextStyle(color: _MusicPaint.onSurface54, fontSize: 14),
-          ),
-          Text(
-            _outputDeviceLabel(),
-            style: TextStyle(color: _MusicPaint.onSurface54, fontSize: 12),
-          ),
-          Slider(
-            value: duration.inMilliseconds <= 0
-                ? 0
-                : position.inMilliseconds
-                      .clamp(0, duration.inMilliseconds)
-                      .toDouble(),
-            min: 0,
-            max: duration.inMilliseconds <= 0
-                ? 1
-                : duration.inMilliseconds.toDouble(),
-            onChanged: duration.inMilliseconds <= 0 || player == null
-                ? null
-                : (value) => unawaited(
-                    player!.seek(Duration(milliseconds: value.toInt())),
-                  ),
-            onChangeEnd: (value) => unawaited(_savePlaybackSession()),
-          ),
-          Row(
-            children: [
-              Text(_clock(position), style: const TextStyle(fontSize: 12)),
-              const Spacer(),
-              Text(_clock(duration), style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                onPressed: () => unawaited(_playPreviousTrackInQueue()),
-                icon: const Icon(Icons.skip_previous, size: 34),
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                onPressed: () => unawaited(_togglePlayPause()),
-                icon: Icon(
-                  playing ? Icons.pause_circle_filled : Icons.play_circle_fill,
-                  size: 72,
-                ),
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                onPressed: () => unawaited(_playNextTrackInQueue()),
-                icon: const Icon(Icons.skip_next, size: 34),
-              ),
-            ],
-          ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                tooltip: 'Favorite',
-                onPressed: () => unawaited(_toggleFavorite(track)),
-                icon: Icon(
-                  _isFavorite(track.id)
-                      ? Icons.favorite
-                      : Icons.favorite_border,
-                ),
-              ),
-              IconButton(
-                onPressed: _toggleShuffleMode,
-                icon: Icon(
-                  Icons.shuffle,
-                  color: shuffleEnabled ? _MusicPaint.accent : null,
-                ),
-              ),
-              IconButton(
-                onPressed: _cycleRepeatMode,
-                icon: Icon(
-                  repeatMode == _RepeatMode.one
-                      ? Icons.repeat_one
-                      : Icons.repeat,
-                  color: repeatMode == _RepeatMode.off
-                      ? null
-                      : _MusicPaint.accent,
-                ),
-              ),
-              PopupMenuButton<String>(
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'share', child: Text('Share')),
-                  PopupMenuItem(
-                    value: 'playlist',
-                    child: Text('Add to playlist'),
-                  ),
-                  PopupMenuItem(
-                    value: 'download',
-                    child: Text('Download offline'),
-                  ),
-                  PopupMenuItem(value: 'comment', child: Text('Comment')),
-                  PopupMenuItem(value: 'report', child: Text('Report')),
-                  PopupMenuItem(
-                    value: 'social',
-                    child: Text('Open social center'),
-                  ),
-                ],
-                onSelected: (value) async {
-                  switch (value) {
-                    case 'share':
-                      await _shareTrack(track);
-                      break;
-                    case 'playlist':
-                      await _pickPlaylistForTrack(track);
-                      break;
-                    case 'download':
-                      await _downloadTrack(track);
-                      break;
-                    case 'comment':
-                      await _commentOnTarget(
-                        targetType: 'track',
-                        targetId: track.id,
-                        label: track.title,
-                      );
-                      break;
-                    case 'report':
-                      await _reportTarget(
-                        targetType: 'track',
-                        targetId: track.id,
-                        label: track.title,
-                      );
-                      break;
-                    case 'social':
-                      await _openSocialCenter();
-                      break;
-                  }
-                },
-              ),
-            ],
-          ),
-          if (trackLoading)
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: LinearProgressIndicator(minHeight: 2),
-            ),
-          if (playbackError.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                playbackError,
-                maxLines: 2,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: _MusicPaint.warning),
+    return SingleChildScrollView(
+      child: Container(
+        color: _MusicPaint.blend(
+          _MusicPaint.panel,
+          _MusicPaint.overlayOpaque,
+          0.76,
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 22, 16, 24),
+        child: Column(
+          children: [
+            const SizedBox(height: 8),
+            SizedBox(
+              width: 280,
+              height: 280,
+              child: _vinylDeck(
+                context,
+                track,
+                size: 280,
+                includeVisualizer: false,
               ),
             ),
-          const SizedBox(height: 10),
-          FilledButton.icon(
-            onPressed: () => unawaited(_createStation(track)),
-            icon: const Icon(Icons.radio),
-            label: const Text('Start song radio'),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () => showDialog<void>(
-                  context: context,
-                  builder: (context) => Dialog.fullscreen(
-                    child: Scaffold(
-                      appBar: AppBar(title: const Text('Lyrics')),
-                      body: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: SingleChildScrollView(child: _lyricsWidget()),
-                      ),
+            const SizedBox(height: 14),
+            Text(
+              track.title,
+              style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w700),
+            ),
+            Text(
+              track.artist,
+              style: TextStyle(color: _MusicPaint.onSurface70, fontSize: 22),
+            ),
+            TextButton(
+              onPressed: () => unawaited(_openAlbumContext(track)),
+              child: Text(track.album),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _sourceLabelForTrack(track),
+              style: TextStyle(color: _MusicPaint.onSurface54, fontSize: 14),
+            ),
+            Text(
+              _outputDeviceLabel(),
+              style: TextStyle(color: _MusicPaint.onSurface54, fontSize: 12),
+            ),
+            Slider(
+              value: duration.inMilliseconds <= 0
+                  ? 0
+                  : position.inMilliseconds
+                        .clamp(0, duration.inMilliseconds)
+                        .toDouble(),
+              min: 0,
+              max: duration.inMilliseconds <= 0
+                  ? 1
+                  : duration.inMilliseconds.toDouble(),
+              onChanged: duration.inMilliseconds <= 0 || player == null
+                  ? null
+                  : (value) => unawaited(
+                      player!.seek(Duration(milliseconds: value.toInt())),
                     ),
-                  ),
-                ),
-                icon: const Icon(Icons.fullscreen),
-                label: const Text('Lyrics full-screen'),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => unawaited(_startSleepTimer(30)),
-                icon: const Icon(Icons.bedtime_outlined),
-                label: const Text('Sleep 30m'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Queue (${(activeQueue.length - activeQueueIndex - 1).clamp(0, 999)} up next)',
-              style: TextStyle(color: _MusicPaint.onSurface70),
+              onChangeEnd: (value) => unawaited(_savePlaybackSession()),
             ),
-          ),
-          const SizedBox(height: 4),
-          Expanded(
-            child: ListView(
+            Row(
               children: [
-                for (final item
-                    in activeQueue
-                        .skip(
-                          (activeQueueIndex + 1).clamp(0, activeQueue.length),
-                        )
-                        .take(8))
-                  ListTile(
-                    dense: true,
-                    leading: SizedBox(
-                      width: 34,
-                      height: 34,
-                      child: _coverArt(item.track, radius: 6),
-                    ),
-                    title: Text(
-                      item.track.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      item.track.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => unawaited(
-                      _playTrack(
-                        item.track,
-                        queue: activeQueue,
-                        queueIndex: activeQueue.indexOf(item),
-                      ),
-                    ),
-                  ),
+                Text(_clock(position), style: const TextStyle(fontSize: 12)),
+                const Spacer(),
+                Text(_clock(duration), style: const TextStyle(fontSize: 12)),
               ],
             ),
-          ),
-        ],
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  onPressed: () => unawaited(_playPreviousTrackInQueue()),
+                  icon: const Icon(Icons.skip_previous, size: 34),
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  onPressed: () => unawaited(_togglePlayPause()),
+                  icon: Icon(
+                    playing
+                        ? Icons.pause_circle_filled
+                        : Icons.play_circle_fill,
+                    size: 72,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  onPressed: () => unawaited(_playNextTrackInQueue()),
+                  icon: const Icon(Icons.skip_next, size: 34),
+                ),
+              ],
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: 'Favorite',
+                  onPressed: () => unawaited(_toggleFavorite(track)),
+                  icon: Icon(
+                    _isFavorite(track.id)
+                        ? Icons.favorite
+                        : Icons.favorite_border,
+                  ),
+                ),
+                IconButton(
+                  onPressed: _toggleShuffleMode,
+                  icon: Icon(
+                    Icons.shuffle,
+                    color: shuffleEnabled ? _MusicPaint.accent : null,
+                  ),
+                ),
+                IconButton(
+                  onPressed: _cycleRepeatMode,
+                  icon: Icon(
+                    repeatMode == _RepeatMode.one
+                        ? Icons.repeat_one
+                        : Icons.repeat,
+                    color: repeatMode == _RepeatMode.off
+                        ? null
+                        : _MusicPaint.accent,
+                  ),
+                ),
+                PopupMenuButton<String>(
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'share', child: Text('Share')),
+                    PopupMenuItem(
+                      value: 'playlist',
+                      child: Text('Add to playlist'),
+                    ),
+                    PopupMenuItem(
+                      value: 'download',
+                      child: Text('Download offline'),
+                    ),
+                    PopupMenuItem(value: 'comment', child: Text('Comment')),
+                    PopupMenuItem(value: 'report', child: Text('Report')),
+                    PopupMenuItem(
+                      value: 'social',
+                      child: Text('Open social center'),
+                    ),
+                  ],
+                  onSelected: (value) async {
+                    switch (value) {
+                      case 'share':
+                        await _shareTrack(track);
+                        break;
+                      case 'playlist':
+                        await _pickPlaylistForTrack(track);
+                        break;
+                      case 'download':
+                        await _downloadTrack(track);
+                        break;
+                      case 'comment':
+                        await _commentOnTarget(
+                          targetType: 'track',
+                          targetId: track.id,
+                          label: track.title,
+                        );
+                        break;
+                      case 'report':
+                        await _reportTarget(
+                          targetType: 'track',
+                          targetId: track.id,
+                          label: track.title,
+                        );
+                        break;
+                      case 'social':
+                        await _openSocialCenter();
+                        break;
+                    }
+                  },
+                ),
+              ],
+            ),
+            if (trackLoading)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: LinearProgressIndicator(minHeight: 2),
+              ),
+            if (playbackError.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  playbackError,
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: _MusicPaint.warning),
+                ),
+              ),
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              onPressed: () => unawaited(_createStation(track)),
+              icon: const Icon(Icons.radio),
+              label: const Text('Start song radio'),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (context) => Dialog.fullscreen(
+                      child: Scaffold(
+                        appBar: AppBar(title: const Text('Lyrics')),
+                        body: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: SingleChildScrollView(child: _lyricsWidget()),
+                        ),
+                      ),
+                    ),
+                  ),
+                  icon: const Icon(Icons.fullscreen),
+                  label: const Text('Lyrics full-screen'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => unawaited(_startSleepTimer(30)),
+                  icon: const Icon(Icons.bedtime_outlined),
+                  label: const Text('Sleep 30m'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Queue (${(activeQueue.length - activeQueueIndex - 1).clamp(0, 999)} up next)',
+                style: TextStyle(color: _MusicPaint.onSurface70),
+              ),
+            ),
+            const SizedBox(height: 4),
+            SizedBox(
+              height: 200,
+              child: ListView(
+                children: [
+                  for (final item
+                      in activeQueue
+                          .skip(
+                            (activeQueueIndex + 1).clamp(0, activeQueue.length),
+                          )
+                          .take(8))
+                    ListTile(
+                      dense: true,
+                      leading: SizedBox(
+                        width: 34,
+                        height: 34,
+                        child: _coverArt(item.track, radius: 6),
+                      ),
+                      title: Text(
+                        item.track.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        item.track.artist,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => unawaited(
+                        _playTrack(
+                          item.track,
+                          queue: activeQueue,
+                          queueIndex: activeQueue.indexOf(item),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -6964,30 +7216,58 @@ class _MusicScreenState extends State<MusicScreen>
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                tooltip: 'Previous',
-                onPressed: () => unawaited(_playPreviousTrackInQueue()),
-                icon: const Icon(Icons.skip_previous),
-              ),
-              IconButton(
-                onPressed: () => unawaited(_togglePlayPause()),
-                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-              ),
-              IconButton(
-                tooltip: 'Next',
-                onPressed: () => unawaited(_playNextTrackInQueue()),
-                icon: const Icon(Icons.skip_next),
-              ),
-              IconButton(
-                tooltip: 'Stop playback',
-                onPressed: () => unawaited(_clearQueueAndStop()),
-                icon: const Icon(Icons.stop_circle_outlined),
-              ),
-            ],
-          ),
+          trailing: screenWidth < 500
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: playing ? 'Pause' : 'Play',
+                      onPressed: () => unawaited(_togglePlayPause()),
+                      icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                    ),
+                    PopupMenuButton<int>(
+                      tooltip: 'Playback actions',
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: -1, child: Text('Previous')),
+                        PopupMenuItem(value: 1, child: Text('Next')),
+                        PopupMenuItem(value: 0, child: Text('Stop playback')),
+                      ],
+                      onSelected: (value) {
+                        if (value == -1) {
+                          unawaited(_playPreviousTrackInQueue());
+                        } else if (value == 1) {
+                          unawaited(_playNextTrackInQueue());
+                        } else {
+                          unawaited(_clearQueueAndStop());
+                        }
+                      },
+                    ),
+                  ],
+                )
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Previous',
+                      onPressed: () => unawaited(_playPreviousTrackInQueue()),
+                      icon: const Icon(Icons.skip_previous),
+                    ),
+                    IconButton(
+                      onPressed: () => unawaited(_togglePlayPause()),
+                      icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                    ),
+                    IconButton(
+                      tooltip: 'Next',
+                      onPressed: () => unawaited(_playNextTrackInQueue()),
+                      icon: const Icon(Icons.skip_next),
+                    ),
+                    IconButton(
+                      tooltip: 'Stop playback',
+                      onPressed: () => unawaited(_clearQueueAndStop()),
+                      icon: const Icon(Icons.stop_circle_outlined),
+                    ),
+                  ],
+                ),
           onTap: () async {
             if (playerSheetOpen) {
               return;
@@ -7130,7 +7410,7 @@ class _MusicScreenState extends State<MusicScreen>
 
   @override
   Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 900;
+    final compact = MediaQuery.sizeOf(context).width < 1100;
     final preset = context.millitopTheme.layoutPreset;
     if (compact) {
       return _mobileScaffold();

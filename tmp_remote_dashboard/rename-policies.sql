@@ -1,0 +1,11 @@
+\set ON_ERROR_STOP on
+BEGIN;
+ALTER POLICY listening_sessions_backend ON millitop_tv.listening_sessions RENAME TO backend_access;
+ALTER POLICY listening_session_members_backend ON millitop_tv.listening_session_members RENAME TO backend_access;
+ALTER POLICY listening_session_messages_backend ON millitop_tv.listening_session_messages RENAME TO backend_access;
+ALTER POLICY listening_session_song_requests_backend ON millitop_tv.listening_session_song_requests RENAME TO backend_access;
+ALTER POLICY listening_session_skip_votes_backend ON millitop_tv.listening_session_skip_votes RENAME TO backend_access;
+ALTER POLICY listening_session_signals_backend ON millitop_tv.listening_session_signals RENAME TO backend_access;
+ALTER POLICY listening_session_invites_backend ON millitop_tv.listening_session_invites RENAME TO backend_access;
+ALTER POLICY listening_session_events_backend ON millitop_tv.listening_session_events RENAME TO backend_access;
+COMMIT;

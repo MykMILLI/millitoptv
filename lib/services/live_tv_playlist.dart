@@ -113,6 +113,10 @@ class LiveTvMediaItem {
   final String? group;
   final bool series;
   final String? seriesId;
+  final int? year;
+  final List<String> genres;
+  final DateTime? releaseDate;
+  final DateTime? addedAt;
   const LiveTvMediaItem({
     required this.id,
     required this.title,
@@ -123,6 +127,10 @@ class LiveTvMediaItem {
     this.group,
     this.series = false,
     this.seriesId,
+    this.year,
+    this.genres = const [],
+    this.releaseDate,
+    this.addedAt,
   });
 }
 
@@ -216,6 +224,7 @@ class _ParsedM3uEntry {
 
 class LiveTvPlaylistService {
   static final Map<String, _TmdbSearchResult?> _tmdbCache = {};
+  static final Map<String, Map<String, dynamic>?> _tmdbDetailCache = {};
   const LiveTvPlaylistService();
 
   Future<LiveTvPlaylist> loadFromSource(LiveTvSource source) async {
@@ -479,7 +488,8 @@ class LiveTvPlaylistService {
           item.posterUrl == null || item.posterUrl!.trim().isEmpty;
       final missingOverview =
           item.description == null || item.description!.trim().isEmpty;
-      if (missingPoster || missingOverview) {
+      final missingGenres = item.genres.isEmpty;
+      if (missingPoster || missingOverview || missingGenres) {
         candidates.add(i);
       }
       if (candidates.length >= maxItems) {
@@ -507,6 +517,16 @@ class LiveTvPlaylistService {
         if (result == null) {
           continue;
         }
+        List<String> genres = item.genres;
+        if (genres.isEmpty) {
+          final details = await _loadTmdbDetailPayload(
+            client: client,
+            apiKey: key,
+            mediaId: result.mediaId,
+            series: series,
+          );
+          genres = _genresFromTmdbPayload(details);
+        }
         updated[index] = LiveTvMediaItem(
           id: item.id,
           title: item.title,
@@ -525,6 +545,10 @@ class LiveTvPlaylistService {
           group: item.group,
           series: item.series,
           seriesId: item.seriesId,
+          year: item.year ?? result.year,
+          genres: genres,
+          releaseDate: item.releaseDate ?? result.releaseDate,
+          addedAt: item.addedAt,
         );
       }
     } finally {
@@ -800,6 +824,7 @@ class LiveTvPlaylistService {
             posterUrl: data['stream_icon']?.toString(),
             description: data['plot']?.toString(),
             group: categoryId == null ? null : categories[categoryId],
+            addedAt: _xtreamAddedAt(data['added']),
           ),
         );
       }
@@ -863,6 +888,7 @@ class LiveTvPlaylistService {
             group: categoryId == null ? null : categories[categoryId],
             series: true,
             seriesId: id,
+            addedAt: _xtreamAddedAt(data['last_modified'] ?? data['added']),
           ),
         );
       }
@@ -1211,6 +1237,7 @@ class LiveTvPlaylistService {
             : 'https://image.tmdb.org/t/p/w780$backdropPath',
         overview: (overview == null || overview.isEmpty) ? null : overview,
         year: _extractTmdbYear(item, series),
+        releaseDate: _extractTmdbReleaseDate(item, series),
       );
       _tmdbCache[cacheKey] = result;
       return result;
@@ -1383,6 +1410,10 @@ class LiveTvPlaylistService {
     required int mediaId,
     required bool series,
   }) async {
+    final cacheKey = '${series ? 'tv' : 'movie'}:$mediaId';
+    if (_tmdbDetailCache.containsKey(cacheKey)) {
+      return _tmdbDetailCache[cacheKey];
+    }
     final uri = Uri.https(
       'api.themoviedb.org',
       '/3/${series ? 'tv' : 'movie'}/$mediaId',
@@ -1391,10 +1422,14 @@ class LiveTvPlaylistService {
     try {
       final data = await _getJson(client, uri);
       if (data is! Map) {
+        _tmdbDetailCache[cacheKey] = null;
         return null;
       }
-      return Map<String, dynamic>.from(data);
+      final payload = Map<String, dynamic>.from(data);
+      _tmdbDetailCache[cacheKey] = payload;
+      return payload;
     } catch (_) {
+      _tmdbDetailCache[cacheKey] = null;
       return null;
     }
   }
@@ -1552,6 +1587,16 @@ class LiveTvPlaylistService {
     return null;
   }
 
+  DateTime? _extractTmdbReleaseDate(Map<String, dynamic> item, bool series) {
+    final primary = series
+        ? item['first_air_date']?.toString()
+        : item['release_date']?.toString();
+    if (primary == null || primary.trim().isEmpty) {
+      return null;
+    }
+    return DateTime.tryParse(primary.trim());
+  }
+
   int? _runtimeFromTmdbPayload(Map<String, dynamic>? payload, bool series) {
     if (payload == null) {
       return null;
@@ -1589,6 +1634,17 @@ class LiveTvPlaylistService {
         .toList();
   }
 
+  DateTime? _xtreamAddedAt(dynamic raw) {
+    if (raw == null) {
+      return null;
+    }
+    final epochSeconds = int.tryParse(raw.toString().trim());
+    if (epochSeconds == null || epochSeconds <= 0) {
+      return null;
+    }
+    return DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
+  }
+
   List<String> _advisoriesForRating(String? rating) {
     final value = (rating ?? '').toUpperCase();
     if (value.isEmpty) {
@@ -1613,11 +1669,13 @@ class _TmdbSearchResult {
   final String? backdropUrl;
   final String? overview;
   final int? year;
+  final DateTime? releaseDate;
   const _TmdbSearchResult({
     required this.mediaId,
     this.posterUrl,
     this.backdropUrl,
     this.overview,
     this.year,
+    this.releaseDate,
   });
 }

@@ -120,12 +120,6 @@ class WebAppDefinition {
 
 const builtinWebApps = [
   WebAppDefinition(
-    id: 'emby',
-    title: 'Emby',
-    url: 'https://watch.millitop.net',
-    icon: 'emby',
-  ),
-  WebAppDefinition(
     id: 'jellyfin',
     title: 'Jellyfin',
     url: 'https://stream.millitop.net',

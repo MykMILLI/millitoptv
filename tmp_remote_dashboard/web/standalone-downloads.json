@@ -1,0 +1,60 @@
+﻿{
+    "downloads":  [
+                      {
+                          "id": "android-release-2-1-0-build-30",
+                          "title": "MILLITOP TV Android universal sideload build",
+                          "version": "2.1.0+30",
+                          "platform": "android-arm32-arm64-x86_64",
+                          "url": "/downloads/Millitop-TV-2.1.0-build-30-universal-941c6d71cb41.apk",
+                          "sha256": "941c6d71cb414c54ab798188bb3b3e7859459aced18f8d795729c30dff8ddad9",
+                          "sizeBytes": 117660680,
+                          "downloadLabel": "Download Android APK",
+                          "hint": "Development-key-signed release-mode APK for sideload testing. Android 7.0+; ARM32, ARM64 and x86_64; TV launcher and ARM64 16KB native alignment. Native Podcasts/YouTube, profile-sync libraries, rotating greetings and responsive phone/TV layouts. Keep a matching signing key when updating; do not uninstall to bypass an error."
+                      },
+                      {
+                          "id": "source-release-2-1-0-build-30",
+                          "category": "source",
+                          "title": "MILLITOP TV GPLv3 corresponding source",
+                          "version": "2.1.0+30",
+                          "platform": "source",
+                          "url": "/downloads/Millitop-TV-2.1.0-build-30-source.zip",
+                          "sha256": "f89e1e078c708e3115f0ccf7c6cd83d44c2e6eb78aa7ba85f16f22a5b1f77af6",
+                          "sizeBytes": 901889,
+                          "downloadLabel": "Download corresponding source ZIP",
+                          "hint": "Full application source/build inputs, adapted PsTube engine, GPLv3 license, locked dependencies and README build instructions. SOURCE-MANIFEST.json records the version/build and every included file hash. Local credentials, keystores, SDK paths and generated caches are excluded."
+                      },
+                      {
+                          "id":  "android-release-2-0-1-build-27",
+                          "title":  "Android ARM64 release",
+                          "version":  "2.0.1+27",
+                          "platform":  "android-arm64-v8a",
+                          "url":  "/downloads/Millitop-TV-2.0.1-build-27-android-arm64-53ed0846d69a.apk",
+                          "sha256":  "53ed0846d69aae9d9785528ab7367b8a4dc727b55366ab53c446c7a987c51869",
+                          "sizeBytes":  107557001,
+                          "downloadLabel":  "Download Android ARM64 APK",
+                          "hint":  "Release APK build 27: native Navidrome Music, station creation, synced music profile state, and premium playback continuity improvements."
+                      },
+                      {
+                          "id":  "shared-sync-1b-windows",
+                          "title":  "Windows x64 portable preview",
+                          "version":  "Shared Sync 1B / 20261025-121008",
+                          "platform":  "windows-x64",
+                          "url":  "/downloads/Millitop-Shared-Sync-1B-20261025-121008-windows-x64-14a88b8df838.zip",
+                          "sha256":  "14a88b8df83859dc3023b446d42f59607a0d1a2d77ddc158d0147d1f472714b2",
+                          "sizeBytes":  34091435,
+                          "downloadLabel":  "Download Windows preview ZIP",
+                          "hint":  "Development preview. Extract all files; run millitop_tv.exe. This is not a production installer."
+                      },
+                      {
+                          "id":  "android-release-2-0-1",
+                          "title":  "Android ARM64 release",
+                          "version":  "2.0.1+26",
+                          "platform":  "android-arm64-v8a",
+                          "url":  "/downloads/Millitop-TV-2.0.1-build-26-android-arm64-931c2cd650bd.apk",
+                          "sha256":  "931c2cd650bd4da03cf50199ae64e33be227e41e2f77b361762d832fd29ac030",
+                          "sizeBytes":  107442013,
+                          "downloadLabel":  "Download Android ARM64 APK",
+                          "hint":  "Release APK build 26: premium playback controls, draggable PiP, parity sync expansion, OTA hardening."
+                      }
+                  ]
+}

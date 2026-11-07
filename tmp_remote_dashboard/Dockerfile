@@ -13,6 +13,7 @@ RUN node --check server/billing-routes.mjs && node --check server/verify-billing
 RUN node --check server/community-routes.mjs && node --check server/verify-community-schema.mjs && node --test server/community-routes.test.mjs
 RUN node --check server/tmdb-discovery.mjs && node --test server/tmdb-discovery.test.mjs
 RUN node --check server/profile-sync-routes.mjs && node --check server/verify-profile-sync-schema.mjs && node --test server/profile-sync.test.mjs
+RUN node --check server/listening-session-routes.mjs && node --check server/verify-listening-session-schema.mjs && node --test server/listening-session-routes.test.mjs
 RUN npm prune --omit=dev
 
 FROM node:24-bookworm-slim
