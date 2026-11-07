@@ -21,13 +21,16 @@ import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/live_tv_source.dart';
 import '../services/media_catalog_cache.dart';
+import '../services/adult_content.dart';
+import '../services/app_log.dart';
 import 'jellyfin_connect_screen.dart';
+import 'diagnostics_screen.dart';
 import 'media_home_view.dart';
 import '../services/subtitle_provider_service.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
 
-enum _MediaTab { movies, series }
+enum _MediaTab { movies, series, adult }
 
 enum _MediaSortMode { relevance, title, source, inTheaters, recentlyAdded }
 
@@ -376,11 +379,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<JellyfinEntry> jellyfinNextUp = const [];
   List<JellyfinEntry> jellyfinLatest = const [];
   List<JellyfinEntry> jellyfinSimilar = const [];
+  List<JellyfinEntry> jellyfinAdultResume = const [];
+  List<JellyfinEntry> jellyfinAdultLatest = const [];
   String? jellyfinSimilarTo;
   String jellyfinHomeError = '';
   LiveTvSource? source;
   List<LiveTvMediaItem> movies = [];
   List<LiveTvMediaItem> series = [];
+
+  /// Adult titles (IPTV "XXX -" / "For Adults", Jellyfin "Adult" library)
+  /// never mix with [movies]/[series]; they only appear in their own tab
+  /// and Home row when [showAdult] is on.
+  List<LiveTvMediaItem> adultMovies = [];
+  List<LiveTvMediaItem> adultSeries = [];
+  Set<String> adultIds = {};
+  bool showAdult = false;
   List<LiveTvRecentMedia> history = [];
   List<LiveTvLibraryItem> favorites = [];
   List<LiveTvUserPlaylist> playlists = [];
@@ -414,12 +427,41 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   void initState() {
     super.initState();
     service = widget.playlistService ?? const LiveTvPlaylistService();
-    search.addListener(() => setState(() {}));
+    search.addListener(() {
+      setState(() {});
+      _logSearchSoon();
+    });
     unawaited(_initialize());
+  }
+
+  Timer? _searchLogDebounce;
+
+  /// Records what people search for (after they stop typing) and whether it
+  /// found anything, to improve search and catalog matching later.
+  void _logSearchSoon() {
+    _searchLogDebounce?.cancel();
+    final text = search.text.trim();
+    if (text.length < 2) {
+      return;
+    }
+    _searchLogDebounce = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || search.text.trim() != text) {
+        return;
+      }
+      AppLog.event(
+        'media.search',
+        props: {
+          'query': text,
+          'results': visibleItems.length,
+          'tab': homeView ? 'home' : tab.name,
+        },
+      );
+    });
   }
 
   @override
   void dispose() {
+    _searchLogDebounce?.cancel();
     profileSyncDebounce?.cancel();
     searchFocus.dispose();
     search.dispose();
@@ -579,31 +621,107 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           jellyfinNextUp = const [];
           jellyfinLatest = const [];
           jellyfinSimilar = const [];
+          jellyfinAdultResume = const [];
+          jellyfinAdultLatest = const [];
         });
       }
       return;
     }
     try {
-      final libraryIds = account.selectedLibraryIds;
-      final results = await Future.wait([
-        api.resume(account.userId).catchError((_) => <JellyfinEntry>[]),
-        api.nextUp(account.userId).catchError((_) => <JellyfinEntry>[]),
-        Future.wait([
-          for (final id in libraryIds)
-            api
-                .latest(account.userId, parentId: id, limit: 12)
-                .catchError((_) => <JellyfinEntry>[]),
-        ]).then((lists) => lists.expand((list) => list).toList()),
-      ]);
-      final resume = List<JellyfinEntry>.from(results[0]);
-      final nextUp = List<JellyfinEntry>.from(results[1]);
-      final latest = [...results[2]]
-        ..sort(
-          (a, b) => (b.media.addedAt ?? DateTime(1970)).compareTo(
-            a.media.addedAt ?? DateTime(1970),
-          ),
+      final watch = Stopwatch()..start();
+      // Rows are requested per library so adult libraries can be skipped
+      // entirely (hidden) or kept in their own row (shown).
+      final libraries = account.selectedLibraries
+          .where(
+            (library) => showAdult || !AdultContent.isAdultLabel(library.name),
+          )
+          .toList();
+      Future<List<JellyfinEntry>> safe(
+        String row,
+        Future<List<JellyfinEntry>> request,
+      ) => request.catchError((Object e, StackTrace st) {
+        AppLog.warn(
+          LogCategory.jellyfin,
+          'Jellyfin $row row failed',
+          error: e,
+          stackTrace: st,
         );
-      _rememberJellyfin([...resume, ...nextUp, ...latest]);
+        return <JellyfinEntry>[];
+      });
+      final perLibrary = await Future.wait([
+        for (final library in libraries)
+          Future.wait([
+            safe(
+              'resume',
+              api.resume(
+                account.userId,
+                parentId: library.id,
+                group: library.name,
+              ),
+            ),
+            safe(
+              'next up',
+              api.nextUp(
+                account.userId,
+                parentId: library.id,
+                group: library.name,
+              ),
+            ),
+            safe(
+              'latest',
+              api.latest(
+                account.userId,
+                parentId: library.id,
+                limit: 12,
+                group: library.name,
+              ),
+            ),
+          ]),
+      ]);
+      final resume = <JellyfinEntry>[];
+      final nextUp = <JellyfinEntry>[];
+      final latest = <JellyfinEntry>[];
+      final adultResume = <JellyfinEntry>[];
+      final adultLatest = <JellyfinEntry>[];
+      for (var i = 0; i < libraries.length; i++) {
+        final adultLibrary = AdultContent.isAdultLabel(libraries[i].name);
+        final lists = perLibrary[i];
+        for (final entry in lists[0]) {
+          (adultLibrary || _isAdultJellyfin(entry) ? adultResume : resume).add(
+            entry,
+          );
+        }
+        for (final entry in lists[1]) {
+          if (!adultLibrary && !_isAdultJellyfin(entry)) {
+            nextUp.add(entry);
+          }
+        }
+        for (final entry in lists[2]) {
+          (adultLibrary || _isAdultJellyfin(entry) ? adultLatest : latest).add(
+            entry,
+          );
+        }
+      }
+      int byLastPlayed(JellyfinEntry a, JellyfinEntry b) =>
+          (b.userData.lastPlayed ?? DateTime(1970)).compareTo(
+            a.userData.lastPlayed ?? DateTime(1970),
+          );
+      int byAdded(JellyfinEntry a, JellyfinEntry b) =>
+          (b.media.addedAt ?? DateTime(1970)).compareTo(
+            a.media.addedAt ?? DateTime(1970),
+          );
+      resume.sort(byLastPlayed);
+      nextUp.sort(byLastPlayed);
+      adultResume.sort(byLastPlayed);
+      latest.sort(byAdded);
+      adultLatest.sort(byAdded);
+      _rememberJellyfin([
+        ...resume,
+        ...nextUp,
+        ...latest,
+        ...adultResume,
+        ...adultLatest,
+      ]);
       var similar = const <JellyfinEntry>[];
       String? similarTo;
       final seed = resume.isNotEmpty ? resume.first : null;
@@ -614,22 +732,46 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         similarTo = seed.isEpisode
             ? (seed.seriesName ?? seed.media.title)
             : seed.media.title;
-        similar = await api
-            .similar(account.userId, seedId)
-            .catchError((_) => <JellyfinEntry>[]);
+        similar = (await safe(
+          'similar',
+          api.similar(account.userId, seedId),
+        )).where((entry) => !_isAdultJellyfin(entry)).toList();
       }
+      AppLog.info(
+        LogCategory.jellyfin,
+        'Jellyfin Home rows loaded',
+        details: {
+          'libraries': libraries.length,
+          'resume': resume.length,
+          'nextUp': nextUp.length,
+          'latest': latest.length,
+          'ms': watch.elapsedMilliseconds,
+        },
+      );
       if (!mounted) {
         return;
       }
       setState(() {
         jellyfinResume = account.showContinueWatching ? resume : const [];
-        jellyfinNextUp = nextUp;
+        jellyfinNextUp = nextUp.take(20).toList();
         jellyfinLatest = latest.take(24).toList();
         jellyfinSimilar = similar;
         jellyfinSimilarTo = similarTo;
+        jellyfinAdultResume = showAdult && account.showContinueWatching
+            ? adultResume
+            : const [];
+        jellyfinAdultLatest = showAdult
+            ? adultLatest.take(24).toList()
+            : const [];
         jellyfinHomeError = '';
       });
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.error(
+        LogCategory.jellyfin,
+        'Jellyfin Home failed to load',
+        error: e,
+        stackTrace: st,
+      );
       if (mounted) {
         setState(() => jellyfinHomeError = e.toString());
       }
@@ -973,7 +1115,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           Map<String, dynamic>.from(profileState),
         );
       }
-    } catch (_) {}
+    } catch (error, stack) {
+      AppLog.warn(
+        LogCategory.sync,
+        'Profile sync pull failed; using local copy',
+        error: error,
+        stackTrace: stack,
+      );
+    }
   }
 
   Future<void> _scheduleProfileSync() async {
@@ -993,7 +1142,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             widget.profileId,
           ),
         );
-      } catch (_) {}
+      } catch (error, stack) {
+        AppLog.warn(
+          LogCategory.sync,
+          'Profile sync push failed',
+          error: error,
+          stackTrace: stack,
+        );
+      }
     });
   }
 
@@ -1021,6 +1177,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       });
       playbackPerformance = await HomePreferences().playbackPerformance(
         widget.profileId,
+      );
+      showAdult = await HomePreferences().showAdultContent(widget.profileId);
+      AppLog.event(
+        'screen.view',
+        props: {'screen': 'movies_series', 'adultVisible': showAdult},
       );
       final configuredSources = await _configuredSources();
       final managedSources = await _managedSources(widget.profileId);
@@ -1061,7 +1222,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         homeView = false;
       }
       await _loadCatalog();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.error(
+        LogCategory.catalog,
+        'Movies & Series failed to start',
+        error: e,
+        stackTrace: st,
+      );
       if (mounted) {
         setState(() {
           loading = false;
@@ -1078,6 +1245,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   ) {
     final mergedMovies = <LiveTvMediaItem>[];
     final mergedSeries = <LiveTvMediaItem>[];
+    final nextAdultMovies = <LiveTvMediaItem>[];
+    final nextAdultSeries = <LiveTvMediaItem>[];
     mediaItemOrigins.clear();
     for (var i = 0; i < activeSources.length; i++) {
       final sourceItem = activeSources[i];
@@ -1086,17 +1255,109 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         sourceName: sourceItem.name,
         source: _isManagedSource(sourceItem) ? null : sourceItem,
       );
+      final adultSource = _isAdultSource(sourceItem);
       for (final item in moviesBySource[i]) {
         mediaItemOrigins[item] = origin;
-        mergedMovies.add(item);
+        if (adultSource || AdultContent.isAdult(item)) {
+          nextAdultMovies.add(item);
+        } else {
+          mergedMovies.add(item);
+        }
       }
       for (final item in seriesBySource[i]) {
         mediaItemOrigins[item] = origin;
-        mergedSeries.add(item);
+        if (adultSource || AdultContent.isAdult(item)) {
+          nextAdultSeries.add(item);
+        } else {
+          mergedSeries.add(item);
+        }
       }
     }
     movies = mergedMovies;
     series = mergedSeries;
+    adultIds = {
+      ...adultIds,
+      for (final item in nextAdultMovies) item.id,
+      for (final item in nextAdultSeries) item.id,
+    };
+    // Hidden adult titles are dropped from memory entirely.
+    adultMovies = showAdult ? nextAdultMovies : const [];
+    adultSeries = showAdult ? nextAdultSeries : const [];
+    if (!showAdult && tab == _MediaTab.adult) {
+      tab = _MediaTab.movies;
+    }
+  }
+
+  bool _isAdultSource(LiveTvSource item) =>
+      AdultContent.isAdultLabel(item.name);
+
+  /// Sources the user can see: adult-only sources/libraries are hidden
+  /// unless adult content is turned on.
+  List<LiveTvSource> get _visibleSources => showAdult
+      ? sources
+      : sources.where((item) => !_isAdultSource(item)).toList();
+
+  /// True for any history/favorite/Jellyfin row that belongs in the Adult
+  /// section rather than the regular rows.
+  bool _isAdultRef({String? id, String title = '', String? sourceName}) =>
+      (id != null && adultIds.contains(id)) ||
+      AdultContent.isAdultEntry(title: title, sourceName: sourceName);
+
+  bool _isAdultJellyfin(JellyfinEntry entry) =>
+      adultIds.contains(entry.media.id) ||
+      adultIds.contains(entry.itemId) ||
+      AdultContent.isAdult(entry.media);
+
+  List<LiveTvMediaItem>? _adultCombined;
+  List<LiveTvMediaItem>? _adultCombinedMovies;
+  List<LiveTvMediaItem>? _adultCombinedSeries;
+
+  List<LiveTvMediaItem> get adultItems {
+    if (_adultCombined == null ||
+        !identical(_adultCombinedMovies, adultMovies) ||
+        !identical(_adultCombinedSeries, adultSeries)) {
+      _adultCombinedMovies = adultMovies;
+      _adultCombinedSeries = adultSeries;
+      _adultCombined = [...adultMovies, ...adultSeries];
+    }
+    return _adultCombined!;
+  }
+
+  /// Items for the current grid tab.
+  List<LiveTvMediaItem> get _tabItems => switch (tab) {
+    _MediaTab.movies => movies,
+    _MediaTab.series => series,
+    _MediaTab.adult => showAdult ? adultItems : const [],
+  };
+
+  Future<void> _setShowAdult(bool value) async {
+    if (value == showAdult) {
+      return;
+    }
+    await HomePreferences().setShowAdultContent(widget.profileId, value);
+    AppLog.audit(
+      'Adult content ${value ? 'shown' : 'hidden'}',
+      details: {'profileId': widget.profileId},
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      showAdult = value;
+      if (!value) {
+        adultMovies = const [];
+        adultSeries = const [];
+        if (tab == _MediaTab.adult) {
+          tab = _MediaTab.movies;
+        }
+        if (source != null && _isAdultSource(source!)) {
+          allSourcesSelected = true;
+        }
+      }
+    });
+    unawaited(_scheduleProfileSync());
+    await _loadCatalog();
+    unawaited(_loadJellyfinHome());
   }
 
   /// Opens the catalog from the local cache when possible, so the screen is
@@ -1165,16 +1426,18 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               orElse: () => sources.first,
             );
       source = selected;
-      final activeSources = allSourcesSelected
-          ? List<LiveTvSource>.from(sources)
+      final visible = _visibleSources;
+      final activeSources = allSourcesSelected || !visible.contains(selected)
+          ? List<LiveTvSource>.from(visible)
           : <LiveTvSource>[selected];
-      final cached = <String, MediaCatalogCacheEntry?>{};
-      for (final activeSource in activeSources) {
-        cached[activeSource.id] = await catalogCache.source(
-          widget.profileId,
-          activeSource,
-        );
-      }
+      final cachedEntries = await Future.wait([
+        for (final activeSource in activeSources)
+          catalogCache.source(widget.profileId, activeSource),
+      ]);
+      final cached = <String, MediaCatalogCacheEntry?>{
+        for (var i = 0; i < activeSources.length; i++)
+          activeSources[i].id: cachedEntries[i],
+      };
       final needsFetch = activeSources
           .where(
             (item) =>
@@ -1187,84 +1450,151 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           loading = true;
         }
         catalogStepsTotal = needsFetch.length * 2;
+        catalogPhase = needsFetch.length > 1
+            ? 'Loading ${needsFetch.length} sources in parallel...'
+            : 'Loading movies and series...';
         status = allSourcesSelected
             ? 'Loading movies and series from ${activeSources.length} source(s)...'
             : 'Loading movies and series from ${selected.name}...';
       });
-      final moviesBySource = <List<LiveTvMediaItem>>[];
-      final seriesBySource = <List<LiveTvMediaItem>>[];
+      final loadWatch = Stopwatch()..start();
+      final moviesBySource = List<List<LiveTvMediaItem>>.filled(
+        activeSources.length,
+        const [],
+      );
+      final seriesBySource = List<List<LiveTvMediaItem>>.filled(
+        activeSources.length,
+        const [],
+      );
       // Index -> ids that already went through metadata enrichment. A null
       // value means "enrich everything" (first load of that source).
       final enrichQueue = <int, Set<String>?>{};
       final unsaved = <int>{};
-      for (var i = 0; i < activeSources.length; i++) {
+      final failures = <String>[];
+      Object? firstFailure;
+      StackTrace? firstFailureStack;
+      Future<void> loadOne(int i) async {
         final activeSource = activeSources[i];
         final entry = cached[activeSource.id];
         if (_isManagedSource(activeSource)) {
           final managed = managedCatalogBySourceId[activeSource.id];
-          moviesBySource.add(
-            MediaCatalogCache.mergeKeepingMetadata(
-              managed?.movies ?? const [],
-              entry?.movies ?? const [],
-            ),
+          moviesBySource[i] = MediaCatalogCache.mergeKeepingMetadata(
+            managed?.movies ?? const [],
+            entry?.movies ?? const [],
           );
-          seriesBySource.add(
-            MediaCatalogCache.mergeKeepingMetadata(
-              managed?.series ?? const [],
-              entry?.series ?? const [],
-            ),
+          seriesBySource[i] = MediaCatalogCache.mergeKeepingMetadata(
+            managed?.series ?? const [],
+            entry?.series ?? const [],
           );
           enrichQueue[i] = entry == null ? null : _idsOf(entry);
-          continue;
+          return;
         }
         if (entry != null && !forceRefresh) {
-          moviesBySource.add(entry.movies);
-          seriesBySource.add(entry.series);
-          continue;
-        }
-        setState(() {
-          catalogSourceName = activeSource.name;
-          catalogPhase = 'Loading movies...';
-        });
-        final freshMovies = await _loadMoviesFor(activeSource);
-        if (!mounted || generation != catalogLoadGeneration) {
+          moviesBySource[i] = entry.movies;
+          seriesBySource[i] = entry.series;
           return;
         }
-        setState(() {
-          catalogMoviesLoaded += freshMovies.length;
-          catalogStepsCompleted++;
-          catalogPhase = 'Loading series...';
-        });
-        final freshSeries = await _loadSeriesFor(activeSource);
-        if (!mounted || generation != catalogLoadGeneration) {
-          return;
+        final watch = Stopwatch()..start();
+        void progress(int movieCount, int seriesCount) {
+          if (!mounted || generation != catalogLoadGeneration) {
+            return;
+          }
+          setState(() {
+            catalogSourceName = activeSource.name;
+            catalogMoviesLoaded += movieCount;
+            catalogSeriesLoaded += seriesCount;
+            catalogStepsCompleted++;
+          });
         }
-        setState(() {
-          catalogSeriesLoaded += freshSeries.length;
-          catalogStepsCompleted++;
-        });
-        moviesBySource.add(
-          MediaCatalogCache.mergeKeepingMetadata(
-            freshMovies,
-            entry?.movies ?? const [],
-          ),
+
+        // Movies and series are requested together; the playlist service
+        // shares one download when both come from the same M3U.
+        final results =
+            await Future.wait([
+              _loadMoviesFor(activeSource).then((value) {
+                progress(value.length, 0);
+                return value;
+              }),
+              _loadSeriesFor(activeSource).then((value) {
+                progress(0, value.length);
+                return value;
+              }),
+            ]).catchError((Object e, StackTrace st) {
+              AppLog.error(
+                LogCategory.catalog,
+                'Failed to load source "${activeSource.name}"',
+                error: e,
+                stackTrace: st,
+                details: {
+                  'sourceId': activeSource.id,
+                  'type': activeSource.type,
+                },
+              );
+              failures.add(activeSource.name);
+              firstFailure ??= e;
+              firstFailureStack ??= st;
+              // Fall back to whatever was cached so one bad source does not
+              // block the rest of the catalog.
+              return <List<LiveTvMediaItem>>[
+                entry?.movies ?? const [],
+                entry?.series ?? const [],
+              ];
+            });
+        AppLog.info(
+          LogCategory.catalog,
+          'Loaded source "${activeSource.name}"',
+          details: {
+            'sourceId': activeSource.id,
+            'movies': results[0].length,
+            'series': results[1].length,
+            'ms': watch.elapsedMilliseconds,
+          },
         );
-        seriesBySource.add(
-          MediaCatalogCache.mergeKeepingMetadata(
-            freshSeries,
-            entry?.series ?? const [],
-          ),
+        moviesBySource[i] = MediaCatalogCache.mergeKeepingMetadata(
+          results[0],
+          entry?.movies ?? const [],
+        );
+        seriesBySource[i] = MediaCatalogCache.mergeKeepingMetadata(
+          results[1],
+          entry?.series ?? const [],
         );
         enrichQueue[i] = entry == null ? null : _idsOf(entry);
-        unsaved.add(i);
+        if (!failures.contains(activeSource.name)) {
+          unsaved.add(i);
+        }
+      }
+
+      await Future.wait([
+        for (var i = 0; i < activeSources.length; i++) loadOne(i),
+      ]);
+      if (needsFetch.isNotEmpty) {
+        AppLog.info(
+          LogCategory.catalog,
+          'Catalog network load finished',
+          details: {
+            'sources': needsFetch.length,
+            'failed': failures.length,
+            'ms': loadWatch.elapsedMilliseconds,
+          },
+        );
       }
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
+      // Nothing loaded and nothing cached: show the error instead of an
+      // empty library.
+      if (firstFailure != null &&
+          moviesBySource.every((list) => list.isEmpty) &&
+          seriesBySource.every((list) => list.isEmpty)) {
+        Error.throwWithStackTrace(firstFailure!, firstFailureStack!);
+      }
       setState(() {
         _applyCatalog(activeSources, moviesBySource, seriesBySource);
         loading = false;
-        status = 'Loaded ${movies.length} movies and ${series.length} series';
+        status = failures.isEmpty
+            ? 'Loaded ${movies.length} movies and ${series.length} series'
+            : 'Loaded ${movies.length} movies and ${series.length} series. '
+                  'Could not refresh: ${failures.join(', ')} (see Diagnostics).';
       });
       // Save freshly downloaded lists right away so the next visit is instant
       // even if metadata enrichment is interrupted.
@@ -1290,7 +1620,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         ),
       );
       await _tryAutoResume();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.error(
+        LogCategory.catalog,
+        'Movies & Series catalog failed to load',
+        error: e,
+        stackTrace: st,
+      );
       if (mounted && generation == catalogLoadGeneration) {
         setState(() {
           loading = false;
@@ -1543,41 +1879,63 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     resumedInitial = true;
     final targetType = widget.initialMediaType?.toLowerCase();
     if (targetType == 'series') {
-      final match = series.where((item) => item.id == targetId).toList();
+      final match = [
+        ...series,
+        ...adultSeries,
+      ].where((item) => item.id == targetId).toList();
       if (match.isNotEmpty) {
         await _openSeries(match.first);
       }
       return;
     }
-    final match = movies.where((item) => item.id == targetId).toList();
+    final match = [
+      ...movies,
+      ...adultMovies,
+    ].where((item) => item.id == targetId).toList();
     if (match.isNotEmpty) {
       await _openMovie(match.first);
     }
   }
 
+  List<String>? _groupsCache;
+  List<LiveTvMediaItem>? _groupsFor;
+
   List<String> get groups {
+    final input = _tabItems;
+    if (_groupsCache != null && identical(_groupsFor, input)) {
+      return _groupsCache!;
+    }
     final values =
-        (tab == _MediaTab.movies ? movies : series)
+        input
             .map((item) => item.group?.trim() ?? '')
             .where((item) => item.isNotEmpty)
             .toSet()
             .toList()
           ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-    return ['All', ...values];
+    _groupsFor = input;
+    return _groupsCache = ['All', ...values];
   }
 
   /// Distinct genres available for the current media tab, derived from
   /// whatever TMDB metadata has been enriched so far.
+  List<String>? _genresCache;
+  List<LiveTvMediaItem>? _genresFor;
+
   List<String> get availableGenres {
+    final input = _tabItems;
+    if (_genresCache != null && identical(_genresFor, input)) {
+      return _genresCache!;
+    }
     final values =
-        (tab == _MediaTab.movies ? movies : series)
+        input
             .expand((item) => item.genres)
             .map((genre) => genre.trim())
             .where((genre) => genre.isNotEmpty)
             .toSet()
             .toList()
           ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-    return values;
+    _genresFor = input;
+    return _genresCache = values;
   }
 
   /// Seasonal/themed collections that are currently in their active date
@@ -1593,18 +1951,78 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     return active;
   }
 
-  Map<String, int> get _versionCounts {
-    final input = tab == _MediaTab.movies ? movies : series;
+  final Map<List<LiveTvMediaItem>, Map<String, int>> _versionCountCache =
+      Map.identity();
+
+  /// Title -> number of copies, computed once per list (was O(n) per card).
+  Map<String, int> _versionCountsOf(List<LiveTvMediaItem> input) {
+    final cached = _versionCountCache[input];
+    if (cached != null) {
+      return cached;
+    }
+    if (_versionCountCache.length > 6) {
+      _versionCountCache.clear();
+    }
     final buckets = <String, int>{};
     for (final item in input) {
       final key = _versionTitleKey(item);
       buckets.update(key, (value) => value + 1, ifAbsent: () => 1);
     }
-    return buckets;
+    return _versionCountCache[input] = buckets;
   }
 
+  Map<String, int> get _versionCounts => _versionCountsOf(_tabItems);
+
+  List<LiveTvMediaItem>? _visibleCache;
+  List<Object?>? _visibleKey;
+
   List<LiveTvMediaItem> get visibleItems {
-    final input = tab == _MediaTab.movies ? movies : series;
+    final input = _tabItems;
+    final key = <Object?>[
+      input,
+      search.text.trim().toLowerCase(),
+      groupFilter,
+      selectedGenres,
+      activeCollectionId,
+      versionAwareOnly,
+      sortMode,
+      mediaItemOrigins.length,
+    ];
+    final previous = _visibleKey;
+    if (_visibleCache != null &&
+        previous != null &&
+        identical(previous[0], key[0]) &&
+        identical(previous[3], key[3]) &&
+        _listEquals(previous.skip(1), key.skip(1), skip: {2})) {
+      return _visibleCache!;
+    }
+    final result = _computeVisibleItems(input);
+    _visibleKey = key;
+    return _visibleCache = result;
+  }
+
+  static bool _listEquals(
+    Iterable<Object?> a,
+    Iterable<Object?> b, {
+    Set<int> skip = const {},
+  }) {
+    final left = a.toList();
+    final right = b.toList();
+    if (left.length != right.length) {
+      return false;
+    }
+    for (var i = 0; i < left.length; i++) {
+      if (skip.contains(i)) {
+        continue;
+      }
+      if (left[i] != right[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  List<LiveTvMediaItem> _computeVisibleItems(List<LiveTvMediaItem> input) {
     final query = search.text.trim().toLowerCase();
     final currentGroups = groups;
     final effectiveGroupFilter = currentGroups.contains(groupFilter)
@@ -1697,7 +2115,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     final pick = candidates[Random().nextInt(candidates.length)];
     setState(() => focusedMediaId = pick.id);
-    if (tab == _MediaTab.series) {
+    if (pick.series) {
       await _openSeries(pick);
     } else {
       await _openMovie(pick);
@@ -1744,20 +2162,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   int _versionCountFor(LiveTvMediaItem item) {
-    final input = tab == _MediaTab.movies ? movies : series;
-    final target = _versionTitleKey(item);
-    return input.where((entry) => _versionTitleKey(entry) == target).length;
+    final input = adultIds.contains(item.id)
+        ? adultItems
+        : item.series
+        ? series
+        : movies;
+    return _versionCountsOf(input)[_versionTitleKey(item)] ?? 0;
   }
 
-  int get _multiVersionCount {
-    final input = tab == _MediaTab.movies ? movies : series;
-    final buckets = <String, int>{};
-    for (final item in input) {
-      final key = _versionTitleKey(item);
-      buckets.update(key, (value) => value + 1, ifAbsent: () => 1);
-    }
-    return buckets.values.where((value) => value > 1).length;
-  }
+  int get _multiVersionCount =>
+      _versionCounts.values.where((value) => value > 1).length;
 
   int? _yearFromTitle(String title) {
     final match = RegExp(r'(19|20)\d{2}').firstMatch(title);
@@ -3027,13 +3441,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return;
     }
     if (recent.mediaType == 'movie') {
-      final match = movies.where((item) => item.id == recent.mediaId).toList();
+      final match = [
+        ...movies,
+        ...adultMovies,
+      ].where((item) => item.id == recent.mediaId).toList();
       if (match.isNotEmpty) {
         await _openMovie(match.first);
       }
       return;
     }
-    final match = series.where((item) => item.id == recent.mediaId).toList();
+    final match = [
+      ...series,
+      ...adultSeries,
+    ].where((item) => item.id == recent.mediaId).toList();
     if (match.isNotEmpty) {
       await _openSeries(match.first);
     }
@@ -3088,9 +3508,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   Widget _favoritesPanel() {
     final filtered = favorites
         .where(
-          (item) => tab == _MediaTab.movies
-              ? item.mediaType == 'movie'
-              : item.mediaType == 'series' || item.mediaType == 'episode',
+          (item) =>
+              _isAdultRef(
+                id: item.mediaId,
+                title: item.title,
+                sourceName: item.sourceName,
+              ) ==
+              (tab == _MediaTab.adult),
+        )
+        .where(
+          (item) => switch (tab) {
+            _MediaTab.adult => showAdult,
+            _MediaTab.movies => item.mediaType == 'movie',
+            _MediaTab.series =>
+              item.mediaType == 'series' || item.mediaType == 'episode',
+          },
         )
         .take(10)
         .toList();
@@ -3141,9 +3573,20 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   Widget _continueWatchingCard() {
     final values = history
         .where(
-          (item) => tab == _MediaTab.movies
-              ? item.mediaType == 'movie'
-              : item.mediaType == 'series',
+          (item) =>
+              _isAdultRef(
+                id: item.mediaId,
+                title: item.title,
+                sourceName: item.sourceName,
+              ) ==
+              (tab == _MediaTab.adult),
+        )
+        .where(
+          (item) => switch (tab) {
+            _MediaTab.adult => showAdult,
+            _MediaTab.movies => item.mediaType == 'movie',
+            _MediaTab.series => item.mediaType == 'series',
+          },
         )
         .toList();
     if (values.isEmpty) {
@@ -3360,6 +3803,23 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         });
       },
     ),
+    if (showAdult)
+      ChoiceChip(
+        key: const ValueKey('media-tab-adult'),
+        label: const Text('Adult'),
+        selected: !homeView && tab == _MediaTab.adult,
+        onSelected: (selected) {
+          if (!selected) {
+            return;
+          }
+          setState(() {
+            homeView = false;
+            tab = _MediaTab.adult;
+            groupFilter = 'All';
+          });
+          AppLog.event('media.tab', props: {'tab': 'adult'});
+        },
+      ),
   ];
 
   /// Home always shows every source, so switch back to "All Sources".
@@ -3560,20 +4020,58 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
+  List<LiveTvMediaItem>? _datedCache;
+  List<LiveTvMediaItem>? _datedMovies;
+  List<LiveTvMediaItem>? _datedSeries;
+
+  /// Newest-first non-adult titles with an added date, sorted once per
+  /// catalog instead of on every Home rebuild.
+  List<LiveTvMediaItem> _recentlyAddedSorted() {
+    if (_datedCache != null &&
+        identical(_datedMovies, movies) &&
+        identical(_datedSeries, series)) {
+      return _datedCache!;
+    }
+    _datedMovies = movies;
+    _datedSeries = series;
+    return _datedCache =
+        [...movies, ...series].where((item) => item.addedAt != null).toList()
+          ..sort((a, b) => b.addedAt!.compareTo(a.addedAt!));
+  }
+
   Widget _buildHome() {
     final rows = <MediaHomeRow>[];
     final resume = jellyfinResume;
 
     // Continue watching: Jellyfin resume points first, then local history
     // from IPTV / NAS sources (Jellyfin titles are already covered above).
-    final localRecent = history
+    final visibleSourceIds = {for (final item in _visibleSources) item.id};
+    bool adultRecent(LiveTvRecentMedia entry) => _isAdultRef(
+      id: entry.mediaId,
+      title: entry.title,
+      sourceName: entry.sourceName,
+    );
+    final localHistory = history
         .where(
           (entry) =>
               !isJellyfinSourceId(entry.sourceId) &&
-              sources.any((item) => item.id == entry.sourceId),
+              visibleSourceIds.contains(entry.sourceId),
         )
+        .toList();
+    final localRecent = localHistory
+        .where((entry) => !adultRecent(entry))
         .take(20)
         .toList();
+    MediaHomeCard recentCard(LiveTvRecentMedia entry) => MediaHomeCard(
+      id: 'recent-${entry.sourceId}-${entry.mediaId}',
+      title: entry.title,
+      subtitle: entry.subtitle ?? entry.sourceName,
+      imageUrl: entry.posterUrl,
+      badge: _sourceBadge(entry.sourceId).label,
+      badgeColor: _sourceBadge(entry.sourceId).color,
+      icon: entry.mediaType == 'series' ? Icons.tv : Icons.movie_outlined,
+      onTap: () => unawaited(_resumeRecentMedia(entry)),
+    );
     rows.add(
       MediaHomeRow(
         title: 'Continue Watching',
@@ -3581,19 +4079,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         cards: [
           for (final entry in resume)
             _cardForJellyfin(entry, landscape: true, play: true),
-          for (final entry in localRecent)
-            MediaHomeCard(
-              id: 'recent-${entry.sourceId}-${entry.mediaId}',
-              title: entry.title,
-              subtitle: entry.subtitle ?? entry.sourceName,
-              imageUrl: entry.posterUrl,
-              badge: _sourceBadge(entry.sourceId).label,
-              badgeColor: _sourceBadge(entry.sourceId).color,
-              icon: entry.mediaType == 'series'
-                  ? Icons.tv
-                  : Icons.movie_outlined,
-              onTap: () => unawaited(_resumeRecentMedia(entry)),
-            ),
+          for (final entry in localRecent) recentCard(entry),
         ],
       ),
     );
@@ -3617,7 +4103,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         title: 'Your Libraries',
         shape: MediaHomeCardShape.tile,
         cards: [
-          for (final library in sources)
+          for (final library in _visibleSources)
             MediaHomeCard(
               id: 'library-${library.id}',
               title: library.name,
@@ -3654,9 +4140,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         recentCards.add(_cardForJellyfin(entry));
       }
     }
-    final dated =
-        [...movies, ...series].where((item) => item.addedAt != null).toList()
-          ..sort((a, b) => b.addedAt!.compareTo(a.addedAt!));
+    final dated = _recentlyAddedSorted();
     for (final item in dated) {
       if (recentCards.length >= 24) {
         break;
@@ -3676,8 +4160,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           cards: [for (final entry in jellyfinSimilar) _cardForJellyfin(entry)],
         ),
       );
-    } else if (history.isNotEmpty) {
-      final last = history.first;
+    } else if (localRecent.isNotEmpty) {
+      final last = localRecent.first;
       final pool = last.mediaType == 'series' ? series : movies;
       final seed = pool.where((item) => item.id == last.mediaId).toList();
       if (seed.isNotEmpty && seed.first.genres.isNotEmpty) {
@@ -3720,11 +4204,39 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         cards: [for (final item in series.take(24)) _cardForItem(item)],
       ),
     );
+    // Adult titles only ever appear here (and in the Adult tab), never in
+    // the rows above, and only when the profile turned them on.
+    if (showAdult) {
+      final adultRecentLocal = localHistory.where(adultRecent).take(12);
+      rows.add(
+        MediaHomeRow(
+          title: 'Adult',
+          actionLabel: 'See all',
+          onAction: () => seeAll(_MediaTab.adult),
+          cards: [
+            for (final entry in jellyfinAdultResume)
+              _cardForJellyfin(entry, play: true),
+            for (final entry in adultRecentLocal) recentCard(entry),
+            for (final entry in jellyfinAdultLatest) _cardForJellyfin(entry),
+            for (final item in adultItems.take(24)) _cardForItem(item),
+          ],
+        ),
+      );
+    }
     rows.add(
       MediaHomeRow(
         title: 'My List',
         cards: [
-          for (final item in favorites.take(24))
+          for (final item
+              in favorites
+                  .where(
+                    (item) => !_isAdultRef(
+                      id: item.mediaId,
+                      title: item.title,
+                      sourceName: item.sourceName,
+                    ),
+                  )
+                  .take(24))
             MediaHomeCard(
               id: 'fav-${item.sourceId}-${item.mediaId}',
               title: item.title,
@@ -3838,8 +4350,27 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
+  /// At the Movies & Series Home with nothing to back out of.
+  bool get _atMediaHome =>
+      homeView && allSourcesSelected && search.text.trim().isEmpty;
+
+  /// One Back step inside Movies & Series: clear search, else return from a
+  /// library/grid to the Movies & Series Home.
+  void _stepBackWithinMedia() {
+    if (search.text.trim().isNotEmpty) {
+      search.clear();
+      return;
+    }
+    AppLog.debug(LogCategory.nav, 'Back to Movies & Series Home');
+    _showHome();
+  }
+
   Future<void> _requestExitToHome() async {
     if (!mounted) {
+      return;
+    }
+    if (!_atMediaHome) {
+      _stepBackWithinMedia();
       return;
     }
     await Navigator.of(context).maybePop();
@@ -3895,7 +4426,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       child: Focus(
         autofocus: true,
         child: PopScope(
-          canPop: true,
+          // Back from a library/grid/search returns to the Movies & Series
+          // Home first; only Back from Home leaves the screen.
+          canPop: _atMediaHome,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) {
+              _stepBackWithinMedia();
+            }
+          },
           child: Scaffold(
             appBar: AppBar(
               title: const Text('Movies & Series'),
@@ -3950,6 +4488,40 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.refresh),
+                ),
+                PopupMenuButton<String>(
+                  key: const ValueKey('media-more-menu'),
+                  tooltip: 'More',
+                  onSelected: (value) {
+                    if (value == 'adult') {
+                      unawaited(_setShowAdult(!showAdult));
+                    } else if (value == 'diagnostics') {
+                      unawaited(
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            settings: const RouteSettings(name: 'diagnostics'),
+                            builder: (_) => const DiagnosticsScreen(),
+                          ),
+                        ),
+                      );
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    CheckedPopupMenuItem<String>(
+                      key: const ValueKey('media-adult-toggle'),
+                      value: 'adult',
+                      checked: showAdult,
+                      child: const Text('Show adult content'),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'diagnostics',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.bug_report_outlined),
+                        title: Text('Diagnostics & logs'),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -4063,7 +4635,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                                     await _loadCatalog();
                                                   },
                                           ),
-                                          ...sources.map(
+                                          ..._visibleSources.map(
                                             (item) => ChoiceChip(
                                               label: Text(
                                                 item.name,
@@ -4775,6 +5347,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Track selectedTrack = const Track();
   Tracks tracks = const Tracks();
   final subscriptions = <StreamSubscription<dynamic>>[];
+  final Stopwatch _sessionWatch = Stopwatch()..start();
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
   bool playing = false;
@@ -4843,6 +5416,16 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   @override
   void dispose() {
+    AppLog.event(
+      'media.play',
+      props: {
+        'title': widget.title,
+        'seconds': _sessionWatch.elapsed.inSeconds,
+        'jellyfin': jellyfin != null,
+        'route': qualityRoute,
+        'hadError': error.isNotEmpty,
+      },
+    );
     WidgetsBinding.instance.removeObserver(this);
     if (fullscreen) {
       unawaited(_setFullscreen(false));
@@ -4892,16 +5475,49 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         ? <String>[jellyfin!.playUrl]
         : <String>[...widget.streamUrlCandidates, widget.streamUrl];
     Object? lastError;
+    StackTrace? lastStack;
+    final watch = Stopwatch()..start();
+    var attempt = 0;
     for (final candidate in candidates) {
+      attempt++;
       try {
         await created.open(Media(candidate), play: true);
         lastError = null;
+        AppLog.info(
+          LogCategory.playback,
+          'Playback opened "${widget.title}"',
+          details: {
+            'attempt': attempt,
+            'candidates': candidates.length,
+            'compatible': compatibleMode,
+            'jellyfin': jellyfin != null,
+            'ms': watch.elapsedMilliseconds,
+          },
+        );
         break;
-      } catch (error) {
+      } catch (error, stack) {
         lastError = error;
+        lastStack = stack;
+        AppLog.warn(
+          LogCategory.playback,
+          'Stream candidate $attempt/${candidates.length} failed for '
+          '"${widget.title}"',
+          error: error,
+          details: {'url': candidate},
+        );
       }
     }
     if (lastError != null) {
+      AppLog.error(
+        LogCategory.playback,
+        'Could not open "${widget.title}"',
+        error: lastError,
+        stackTrace: lastStack,
+        details: {
+          'candidates': candidates.length,
+          'compatible': compatibleMode,
+        },
+      );
       throw lastError;
     }
     if (qualityAdaptive) {
@@ -5069,7 +5685,13 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         }),
       );
       subscriptions.add(
-        created.stream.error.listen((_) {
+        created.stream.error.listen((message) {
+          AppLog.error(
+            LogCategory.playback,
+            'Player error during "${widget.title}"',
+            error: message,
+            details: {'route': qualityRoute},
+          );
           if (mounted) {
             setState(
               () => error =

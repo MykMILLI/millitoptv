@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show compute;
+import 'app_log.dart';
 import 'live_tv_epg.dart';
 import 'live_tv_source.dart';
 
@@ -221,6 +223,40 @@ class _ParsedM3uEntry {
     required this.attrs,
   });
 }
+
+class _XtreamParseArgs {
+  const _XtreamParseArgs({
+    required this.body,
+    required this.base,
+    required this.username,
+    required this.password,
+    required this.categories,
+  });
+  final String body;
+  final String base;
+  final String username;
+  final String password;
+  final Map<String, String> categories;
+}
+
+class _M3uParseArgs {
+  const _M3uParseArgs({
+    required this.bodies,
+    required this.series,
+    required this.enforceMediaTypeHeuristics,
+  });
+  final List<String> bodies;
+  final bool series;
+  final bool enforceMediaTypeHeuristics;
+}
+
+// Top-level entry points for compute().
+List<LiveTvMediaItem> _xtreamVodFromBody(_XtreamParseArgs args) =>
+    LiveTvPlaylistService._xtreamVodRows(args);
+List<LiveTvMediaItem> _xtreamSeriesFromBody(_XtreamParseArgs args) =>
+    LiveTvPlaylistService._xtreamSeriesRows(args);
+List<LiveTvMediaItem> _m3uMediaFromBodies(_M3uParseArgs args) =>
+    LiveTvPlaylistService._m3uMediaRows(args);
 
 class LiveTvPlaylistService {
   static final Map<String, _TmdbSearchResult?> _tmdbCache = {};
@@ -792,10 +828,34 @@ class LiveTvPlaylistService {
           'action': 'get_vod_streams',
         },
       );
-      final raw = await _getJson(client, uri);
-      if (raw is! List) {
-        return const [];
-      }
+      final body = await _getText(client, uri);
+      // Large provider lists (tens of thousands of rows) are decoded and
+      // mapped on a background isolate so the UI never freezes.
+      return await compute(
+        _xtreamVodFromBody,
+        _XtreamParseArgs(
+          body: body,
+          base: base.toString(),
+          username: username,
+          password: password,
+          categories: categories,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static List<LiveTvMediaItem> _xtreamVodRows(_XtreamParseArgs args) {
+    final raw = _decodeJsonBody(args.body);
+    if (raw is! List) {
+      return const [];
+    }
+    final base = Uri.parse(args.base);
+    final username = args.username;
+    final password = args.password;
+    final categories = args.categories;
+    {
       final values = <LiveTvMediaItem>[];
       for (final row in raw) {
         if (row is! Map) {
@@ -832,8 +892,6 @@ class LiveTvPlaylistService {
         (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
       );
       return values;
-    } finally {
-      client.close(force: true);
     }
   }
 
@@ -861,10 +919,29 @@ class LiveTvPlaylistService {
           'action': 'get_series',
         },
       );
-      final raw = await _getJson(client, uri);
-      if (raw is! List) {
-        return const [];
-      }
+      final body = await _getText(client, uri);
+      return await compute(
+        _xtreamSeriesFromBody,
+        _XtreamParseArgs(
+          body: body,
+          base: base.toString(),
+          username: username,
+          password: password,
+          categories: categories,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static List<LiveTvMediaItem> _xtreamSeriesRows(_XtreamParseArgs args) {
+    final raw = _decodeJsonBody(args.body);
+    if (raw is! List) {
+      return const [];
+    }
+    final categories = args.categories;
+    {
       final values = <LiveTvMediaItem>[];
       for (final row in raw) {
         if (row is! Map) {
@@ -896,8 +973,6 @@ class LiveTvPlaylistService {
         (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
       );
       return values;
-    } finally {
-      client.close(force: true);
     }
   }
 
@@ -907,7 +982,21 @@ class LiveTvPlaylistService {
     required List<String> playlistUrls,
     required bool enforceMediaTypeHeuristics,
   }) async {
-    final entries = await _loadM3uEntriesFromUrls(playlistUrls);
+    final bodies = await _downloadM3uBodies(playlistUrls);
+    return compute(
+      _m3uMediaFromBodies,
+      _M3uParseArgs(
+        bodies: bodies,
+        series: series,
+        enforceMediaTypeHeuristics: enforceMediaTypeHeuristics,
+      ),
+    );
+  }
+
+  static List<LiveTvMediaItem> _m3uMediaRows(_M3uParseArgs args) {
+    final entries = _dedupeM3uEntries(args.bodies);
+    final series = args.series;
+    final enforceMediaTypeHeuristics = args.enforceMediaTypeHeuristics;
     final values = <LiveTvMediaItem>[];
     for (final entry in entries) {
       final group = (entry.attrs['group-title'] ?? '').toLowerCase();
@@ -943,44 +1032,94 @@ class LiveTvPlaylistService {
     return values;
   }
 
-  Future<List<_ParsedM3uEntry>> _loadM3uEntriesFromUrls(
-    List<String> urls,
-  ) async {
-    final values = <_ParsedM3uEntry>[];
-    final seen = <String>{};
+  /// In-flight/recent M3U downloads keyed by URL. Movies and series usually
+  /// come from the same playlist, so the second request reuses the first
+  /// download instead of fetching a (often 50+ MB) file twice.
+  static final Map<String, ({DateTime at, Future<String?> body})>
+  _m3uDownloads = {};
+  static const Duration _m3uReuseFor = Duration(minutes: 2);
+
+  Future<List<String>> _downloadM3uBodies(List<String> urls) async {
+    final now = DateTime.now();
+    _m3uDownloads.removeWhere(
+      (_, value) => now.difference(value.at) > _m3uReuseFor,
+    );
+    final bodies = await Future.wait([
+      for (final raw in urls)
+        if (raw.trim().isNotEmpty)
+          (_m3uDownloads[raw.trim()] ??= (
+            at: now,
+            body: _downloadM3u(raw.trim()),
+          )).body,
+    ]);
+    return bodies.whereType<String>().toList();
+  }
+
+  static Future<String?> _downloadM3u(String url) async {
     final client = HttpClient();
+    final watch = Stopwatch()..start();
     try {
-      for (final raw in urls) {
-        final text = raw.trim();
-        if (text.isEmpty) {
-          continue;
-        }
-        final uri = Uri.parse(text);
-        final request = await client
-            .getUrl(uri)
-            .timeout(const Duration(seconds: 15));
-        request.headers.set(HttpHeaders.acceptHeader, 'audio/x-mpegurl,*/*');
-        final response = await request.close().timeout(
-          const Duration(seconds: 20),
+      final uri = Uri.parse(url);
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 15));
+      request.headers.set(HttpHeaders.acceptHeader, 'audio/x-mpegurl,*/*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        AppLog.warn(
+          LogCategory.catalog,
+          'M3U playlist returned HTTP ${response.statusCode}',
+          details: {'url': url, 'status': response.statusCode},
         );
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          continue;
-        }
-        final body = await utf8.decoder.bind(response).join();
-        for (final entry in _parseM3uEntries(body)) {
-          final key = '${entry.title.toLowerCase()}|${entry.streamUrl}';
-          if (seen.add(key)) {
-            values.add(entry);
-          }
-        }
+        _m3uDownloads.remove(url);
+        return null;
       }
+      final body = await utf8.decoder
+          .bind(response)
+          .join()
+          .timeout(const Duration(minutes: 3));
+      AppLog.debug(
+        LogCategory.catalog,
+        'M3U playlist downloaded',
+        details: {
+          'url': url,
+          'chars': body.length,
+          'ms': watch.elapsedMilliseconds,
+        },
+      );
+      return body;
+    } catch (error, stack) {
+      _m3uDownloads.remove(url);
+      AppLog.error(
+        LogCategory.catalog,
+        'M3U playlist download failed',
+        error: error,
+        stackTrace: stack,
+        details: {'url': url, 'ms': watch.elapsedMilliseconds},
+      );
+      rethrow;
     } finally {
       client.close(force: true);
+    }
+  }
+
+  static List<_ParsedM3uEntry> _dedupeM3uEntries(List<String> bodies) {
+    final values = <_ParsedM3uEntry>[];
+    final seen = <String>{};
+    for (final body in bodies) {
+      for (final entry in _parseM3uEntries(body)) {
+        final key = '${entry.title.toLowerCase()}|${entry.streamUrl}';
+        if (seen.add(key)) {
+          values.add(entry);
+        }
+      }
     }
     return values;
   }
 
-  List<_ParsedM3uEntry> _parseM3uEntries(String text) {
+  static List<_ParsedM3uEntry> _parseM3uEntries(String text) {
     final values = <_ParsedM3uEntry>[];
     final lines = const LineSplitter().convert(text);
     String? pendingTitle;
@@ -1110,6 +1249,53 @@ class LiveTvPlaylistService {
     }
   }
 
+  static dynamic _decodeJsonBody(String body) {
+    try {
+      return jsonDecode(body);
+    } on FormatException {
+      throw const FormatException(
+        'Source response was not valid JSON. Check the source endpoint.',
+      );
+    }
+  }
+
+  /// Downloads a JSON endpoint as text (decoded later, off the UI thread).
+  Future<String> _getText(HttpClient client, Uri uri) async {
+    final watch = Stopwatch()..start();
+    try {
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 15));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json,*/*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('Source server returned HTTP ${response.statusCode}.');
+      }
+      final body = await utf8.decoder
+          .bind(response)
+          .join()
+          .timeout(const Duration(minutes: 3));
+      AppLog.debug(
+        LogCategory.catalog,
+        'Source request finished',
+        details: {
+          'url': uri.toString(),
+          'chars': body.length,
+          'ms': watch.elapsedMilliseconds,
+        },
+      );
+      return body;
+    } on TimeoutException {
+      throw StateError('Source server timed out. Check network and try again.');
+    } on SocketException {
+      throw StateError(
+        'Source server is unreachable. Check network and try again.',
+      );
+    }
+  }
+
   Future<dynamic> _getJson(HttpClient client, Uri uri) async {
     try {
       final request = await client
@@ -1123,7 +1309,9 @@ class LiveTvPlaylistService {
         throw StateError('Source server returned HTTP ${response.statusCode}.');
       }
       final body = await utf8.decoder.bind(response).join();
-      return jsonDecode(body);
+      return body.length > 256 * 1024
+          ? await compute(_decodeJsonBody, body)
+          : jsonDecode(body);
     } on TimeoutException {
       throw StateError('Source server timed out. Check network and try again.');
     } on SocketException {
@@ -1338,7 +1526,13 @@ class LiveTvPlaylistService {
       if (rawCrew is! List) {
         return const [];
       }
-      final wanted = {'director', 'writer', 'screenplay', 'creator', 'producer'};
+      final wanted = {
+        'director',
+        'writer',
+        'screenplay',
+        'creator',
+        'producer',
+      };
       final values = <String>{};
       for (final entry in rawCrew.whereType<Map>()) {
         final job = entry['job']?.toString().trim().toLowerCase() ?? '';
@@ -1634,7 +1828,7 @@ class LiveTvPlaylistService {
         .toList();
   }
 
-  DateTime? _xtreamAddedAt(dynamic raw) {
+  static DateTime? _xtreamAddedAt(dynamic raw) {
     if (raw == null) {
       return null;
     }
@@ -1650,8 +1844,13 @@ class LiveTvPlaylistService {
     if (value.isEmpty) {
       return const [];
     }
-    if (value.contains('R') || value.contains('TV-MA') || value.contains('NC-17')) {
-      return const ['Mature themes', 'Strong language or violence may be present'];
+    if (value.contains('R') ||
+        value.contains('TV-MA') ||
+        value.contains('NC-17')) {
+      return const [
+        'Mature themes',
+        'Strong language or violence may be present',
+      ];
     }
     if (value.contains('PG-13') || value.contains('TV-14')) {
       return const ['Parental guidance suggested for younger audiences'];

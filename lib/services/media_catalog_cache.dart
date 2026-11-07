@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'app_log.dart';
 import 'live_tv_playlist.dart';
 import 'live_tv_source.dart';
 
@@ -74,7 +76,10 @@ class MediaCatalogCache {
       enabled = false;
 
   /// Test hook: forget the in-memory copy so the next read comes from disk.
-  static void resetMemoryForTest() => _memory.clear();
+  static void resetMemoryForTest() {
+    _memory.clear();
+    _decoded.clear();
+  }
 
   static String sourceFingerprint(LiveTvSource source) {
     final material = [
@@ -102,23 +107,61 @@ class MediaCatalogCache {
     );
   }
 
-  Future<Map<String, dynamic>> _document(int profileId) async {
+  static final Map<String, Future<Map<String, dynamic>>> _loading = {};
+
+  /// Decoded [MediaCatalogCacheEntry]s, reused while the stored entry is
+  /// unchanged so reopening the screen does not rebuild thousands of items.
+  static final Map<String, (Object, MediaCatalogCacheEntry)> _decoded = {};
+
+  Future<Map<String, dynamic>> _document(int profileId) {
     final key = '$profileId';
     final cached = _store[key];
     if (cached != null) {
-      return cached;
+      return Future.value(cached);
     }
+    if (!enabled) {
+      return _readDocument(profileId);
+    }
+    // Sources load in parallel; they all share one disk read/decode.
+    return _loading.putIfAbsent(
+      '${identityHashCode(_store)}:$key',
+      // Block body on purpose: returning the removed Future from
+      // whenComplete would make the read wait on itself forever.
+      () => _readDocument(profileId).whenComplete(() {
+        _loading.remove('${identityHashCode(_store)}:$key');
+      }),
+    );
+  }
+
+  Future<Map<String, dynamic>> _readDocument(int profileId) async {
+    final key = '$profileId';
     var doc = <String, dynamic>{'v': schemaVersion, 'sources': {}};
     try {
       final file = enabled ? await _file(profileId) : null;
       if (file != null && await file.exists()) {
-        final decoded = jsonDecode(await file.readAsString());
+        final text = await file.readAsString();
+        final watch = Stopwatch()..start();
+        // Big catalogs are decoded off the UI thread.
+        final decoded = text.length > 256 * 1024
+            ? await compute(_decodeJson, text)
+            : jsonDecode(text);
+        AppLog.debug(
+          LogCategory.catalog,
+          'Catalog cache read',
+          details: {'chars': text.length, 'ms': watch.elapsedMilliseconds},
+        );
         if (decoded is Map && decoded['v'] == schemaVersion) {
           doc = Map<String, dynamic>.from(decoded);
         }
       }
-    } catch (_) {
+    } catch (error, stack) {
       // A corrupt cache is just a cache miss; it is rewritten on next save.
+      AppLog.warn(
+        LogCategory.catalog,
+        'Catalog cache unreadable; it will be rebuilt',
+        error: error,
+        stackTrace: stack,
+      );
     }
     doc['sources'] = Map<String, dynamic>.from(doc['sources'] as Map? ?? {});
     if (!enabled) {
@@ -132,8 +175,17 @@ class MediaCatalogCache {
     if (!enabled || _directory == null) {
       return Future<void>.value();
     }
+    // Several saves in a row (one per source) collapse into one write.
+    final queued = _queuedWrites[key];
+    if (queued != null) {
+      return queued;
+    }
     final previous = _writes[key] ?? Future<void>.value();
-    final next = previous.then((_) async {
+    late final Future<void> next;
+    next = previous.then((_) async {
+      if (identical(_queuedWrites[key], next)) {
+        _queuedWrites.remove(key);
+      }
       final doc = _store[key];
       if (doc == null || !enabled) {
         return;
@@ -145,18 +197,34 @@ class MediaCatalogCache {
         }
         await file.parent.create(recursive: true);
         final temp = File('${file.path}.tmp');
-        await temp.writeAsString(jsonEncode(doc), flush: true);
+        final sourceCount = (doc['sources'] as Map?)?.length ?? 0;
+        final text = sourceCount > 0
+            ? await compute(_encodeJson, doc)
+            : jsonEncode(doc);
+        await temp.writeAsString(text, flush: true);
         if (await file.exists()) {
           await file.delete();
         }
         await temp.rename(file.path);
-      } catch (_) {
+      } catch (error, stack) {
         // Caching is best-effort; the catalog still works without it.
+        AppLog.warn(
+          LogCategory.catalog,
+          'Could not save the catalog cache',
+          error: error,
+          stackTrace: stack,
+        );
       }
     });
+    _queuedWrites[key] = next;
     _writes[key] = next;
     return next;
   }
+
+  static final Map<String, Future<void>> _queuedWrites = {};
+
+  static Object? _decodeJson(String text) => jsonDecode(text);
+  static String _encodeJson(Map<String, dynamic> doc) => jsonEncode(doc);
 
   Future<MediaCatalogCacheEntry?> source(
     int profileId,
@@ -171,16 +239,24 @@ class MediaCatalogCache {
     if (savedAt == null) {
       return null;
     }
-    List<LiveTvMediaItem> items(Object? value) => [
-      for (final entry in (value as List? ?? const []))
-        if (entry is Map) ?itemFromJson(Map<String, dynamic>.from(entry)),
-    ];
-    return MediaCatalogCacheEntry(
+    final memoKey = '${identityHashCode(_store)}:$profileId:${source.id}';
+    final memo = _decoded[memoKey];
+    if (memo != null && identical(memo.$1, raw)) {
+      return memo.$2;
+    }
+    final entry = MediaCatalogCacheEntry(
       savedAt: savedAt,
-      movies: items(raw['movies']),
-      series: items(raw['series']),
+      movies: _items(raw['movies']),
+      series: _items(raw['series']),
     );
+    _decoded[memoKey] = (raw, entry);
+    return entry;
   }
+
+  static List<LiveTvMediaItem> _items(Object? value) => [
+    for (final entry in (value as List? ?? const []))
+      if (entry is Map) ?itemFromJson(Map<String, dynamic>.from(entry)),
+  ];
 
   Future<void> saveSource(
     int profileId,

@@ -1,5 +1,6 @@
 import 'billing_transport.dart';
 import 'dart:async';
+import 'app_log.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -76,6 +77,7 @@ class DeviceConnection {
       '/api/device/live-tv/dvr/recordings',
       '/api/device/service/access',
       '/api/device/media-library/catalog',
+      '/api/device/telemetry',
     }.contains(route)) {
       throw ArgumentError('Unsupported device route.');
     }
@@ -90,6 +92,47 @@ class DeviceConnection {
         : route == '/api/device/live-tv/dvr'
         ? const Duration(seconds: 40)
         : const Duration(seconds: 15);
+    final watch = Stopwatch()..start();
+    final category = route.contains('/dvr')
+        ? LogCategory.dvr
+        : LogCategory.sync;
+    final action = body['action']?.toString();
+    try {
+      final result = await _postGuarded(
+        saved,
+        route,
+        body,
+        requestTimeout,
+        expectedConnection,
+      );
+      if (category == LogCategory.dvr && action != null && action != 'list') {
+        AppLog.audit(
+          'DVR $action',
+          details: {'route': route, 'ms': watch.elapsedMilliseconds},
+        );
+      }
+      return result;
+    } catch (error, stack) {
+      if (route != '/api/device/telemetry') {
+        AppLog.error(
+          category,
+          'Dashboard request $route${action == null ? '' : ' ($action)'} failed',
+          error: error,
+          stackTrace: stack,
+          details: {'ms': watch.elapsedMilliseconds},
+        );
+      }
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> _postGuarded(
+    Map<String, dynamic> saved,
+    String route,
+    Map<String, dynamic> body,
+    Duration requestTimeout,
+    String expectedConnection,
+  ) async {
     try {
       return await _post(
         validateServer(saved['serverUrl'] as String),

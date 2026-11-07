@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_log.dart';
 import 'live_tv_playlist.dart';
 import 'live_tv_source.dart';
 
@@ -103,9 +104,7 @@ Future<JellyfinHttpResponse> _defaultTransport(
       request.headers.contentType = ContentType.json;
       request.add(utf8.encode(body));
     }
-    final response = await request.close().timeout(
-      const Duration(seconds: 30),
-    );
+    final response = await request.close().timeout(const Duration(seconds: 30));
     final text = await utf8.decoder.bind(response).join();
     return JellyfinHttpResponse(response.statusCode, text);
   } finally {
@@ -509,27 +508,45 @@ class JellyfinApi {
     Object? body,
   }) async {
     final JellyfinHttpResponse response;
+    final watch = Stopwatch()..start();
     try {
-      response = await _transport(
-        method,
-        uri(path, query),
-        {
-          'Accept': 'application/json',
-          'Authorization': authorizationHeader,
-          // Older servers only read the legacy header name.
-          'X-Emby-Authorization': authorizationHeader,
-        },
-        body == null ? null : jsonEncode(body),
-      );
-    } on TimeoutException {
+      response = await _transport(method, uri(path, query), {
+        'Accept': 'application/json',
+        'Authorization': authorizationHeader,
+        // Older servers only read the legacy header name.
+        'X-Emby-Authorization': authorizationHeader,
+      }, body == null ? null : jsonEncode(body));
+    } on TimeoutException catch (error, stack) {
+      _logFailure(method, path, watch, error, stack);
       throw const JellyfinException('Jellyfin server timed out.');
-    } on SocketException {
+    } on SocketException catch (error, stack) {
+      _logFailure(method, path, watch, error, stack);
       throw const JellyfinException(
         'Jellyfin server is unreachable. Check the address and network.',
       );
-    } on HandshakeException {
+    } on HandshakeException catch (error, stack) {
+      _logFailure(method, path, watch, error, stack);
       throw const JellyfinException(
         'Secure connection to Jellyfin failed. Check the HTTPS certificate.',
+      );
+    }
+    final failed = response.statusCode < 200 || response.statusCode >= 300;
+    // 404 on the modern path is expected on old servers (legacy fallback).
+    if (failed && response.statusCode != 404) {
+      AppLog.warn(
+        LogCategory.jellyfin,
+        'Jellyfin $method $path returned HTTP ${response.statusCode}',
+        details: {
+          'status': response.statusCode,
+          'ms': watch.elapsedMilliseconds,
+          'server': serverUrl,
+        },
+      );
+    } else {
+      AppLog.debug(
+        LogCategory.jellyfin,
+        'Jellyfin $method $path ${response.statusCode}',
+        details: {'ms': watch.elapsedMilliseconds},
       );
     }
     if (response.statusCode == 401) {
@@ -554,6 +571,22 @@ class JellyfinApi {
         'That address did not answer like a Jellyfin server.',
       );
     }
+  }
+
+  void _logFailure(
+    String method,
+    String path,
+    Stopwatch watch,
+    Object error,
+    StackTrace stack,
+  ) {
+    AppLog.error(
+      LogCategory.jellyfin,
+      'Jellyfin $method $path failed',
+      error: error,
+      stackTrace: stack,
+      details: {'ms': watch.elapsedMilliseconds, 'server': serverUrl},
+    );
   }
 
   /// Tries the current endpoint, then the pre-10.9 path on 404.
@@ -716,9 +749,15 @@ class JellyfinApi {
     return entries;
   }
 
-  Future<List<JellyfinEntry>> resume(String userId, {int limit = 20}) async {
+  Future<List<JellyfinEntry>> resume(
+    String userId, {
+    int limit = 20,
+    String? parentId,
+    String? group,
+  }) async {
     final query = {
       'userId': userId,
+      'ParentId': parentId,
       'Limit': '$limit',
       'MediaTypes': 'Video',
       'Fields': _itemFields,
@@ -730,27 +769,34 @@ class JellyfinApi {
       '/Users/$userId/Items/Resume',
       query: query,
     );
-    return _items(result).map((item) => entry(item)).toList();
+    return _items(result).map((item) => entry(item, group: group)).toList();
   }
 
-  Future<List<JellyfinEntry>> nextUp(String userId, {int limit = 20}) async {
+  Future<List<JellyfinEntry>> nextUp(
+    String userId, {
+    int limit = 20,
+    String? parentId,
+    String? group,
+  }) async {
     final result = await _request(
       'GET',
       '/Shows/NextUp',
       query: {
         'userId': userId,
+        'ParentId': parentId,
         'Limit': '$limit',
         'Fields': _itemFields,
         'EnableImageTypes': 'Primary,Backdrop,Thumb',
       },
     );
-    return _items(result).map((item) => entry(item)).toList();
+    return _items(result).map((item) => entry(item, group: group)).toList();
   }
 
   Future<List<JellyfinEntry>> latest(
     String userId, {
     String? parentId,
     int limit = 20,
+    String? group,
   }) async {
     final query = {
       'userId': userId,
@@ -765,7 +811,7 @@ class JellyfinApi {
       '/Users/$userId/Items/Latest',
       query: query,
     );
-    return _items(result).map((item) => entry(item)).toList();
+    return _items(result).map((item) => entry(item, group: group)).toList();
   }
 
   Future<List<JellyfinEntry>> similar(
@@ -890,10 +936,7 @@ class JellyfinApi {
     if (imageTags['Primary'] != null) {
       poster = imageUrl(id, tag: imageTags['Primary'].toString());
     } else if (seriesId != null && raw['SeriesPrimaryImageTag'] != null) {
-      poster = imageUrl(
-        seriesId,
-        tag: raw['SeriesPrimaryImageTag'].toString(),
-      );
+      poster = imageUrl(seriesId, tag: raw['SeriesPrimaryImageTag'].toString());
     }
     String? backdrop;
     if (backdropTags.isNotEmpty) {
@@ -925,9 +968,13 @@ class JellyfinApi {
     );
     final runtimeTicks = int.tryParse(raw['RunTimeTicks']?.toString() ?? '');
     final year = int.tryParse(raw['ProductionYear']?.toString() ?? '');
-    final genres = raw['Genres'] is List
-        ? (raw['Genres'] as List).map((item) => item.toString()).toList()
-        : const <String>[];
+    final rating = raw['OfficialRating']?.toString().trim().toUpperCase();
+    final genres = [
+      if (raw['Genres'] is List)
+        ...(raw['Genres'] as List).map((item) => item.toString()),
+      // Rated adult on the server: tag it so it lands in the Adult section.
+      if (rating == 'XXX' || rating == 'X' || rating == 'AO') 'Adult',
+    ];
     final name = raw['Name']?.toString() ?? 'Untitled';
     return JellyfinEntry(
       itemId: id,
@@ -1028,11 +1075,7 @@ class JellyfinPlaybackReporter {
       _started = true;
       unawaited(
         api
-            .reportPlaybackStart(
-              itemId,
-              playSessionId,
-              positionMs: positionMs,
-            )
+            .reportPlaybackStart(itemId, playSessionId, positionMs: positionMs)
             .catchError((_) {}),
       );
       _lastProgress = DateTime.now();

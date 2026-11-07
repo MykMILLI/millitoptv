@@ -1,3 +1,4 @@
+import 'app_log.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
@@ -148,12 +149,19 @@ class AutoWeatherController extends ChangeNotifier {
             'Weather is available, but its offline cache could not be saved.';
       }
     } on WeatherProblem catch (error) {
+      AppLog.warn(LogCategory.weather, 'Weather problem', error: error.message);
       if (_disposed) {
         return;
       }
       problem = error.message;
       showSettings = error.showSettings;
-    } catch (_) {
+    } catch (error, stack) {
+      AppLog.error(
+        LogCategory.weather,
+        'Weather refresh failed',
+        error: error,
+        stackTrace: stack,
+      );
       if (_disposed) {
         return;
       }

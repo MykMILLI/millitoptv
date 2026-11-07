@@ -1,5 +1,6 @@
 import '../services/home_preferences.dart';
 import 'sleep_mode_panel.dart';
+import 'diagnostics_screen.dart';
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -263,9 +264,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       final performance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
-      final sharedFamilyAlbum = await HomePreferences().sharedFamilyAlbumSettings(
-        widget.profileId,
-      );
+      final sharedFamilyAlbum = await HomePreferences()
+          .sharedFamilyAlbumSettings(widget.profileId);
       if (mounted) {
         setState(() {
           apps = values;
@@ -478,7 +478,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     autocorrect: false,
                     enableSuggestions: false,
                     onChanged: (_) => setLocal(() => localError = ''),
-                    decoration: const InputDecoration(labelText: 'Immich API key'),
+                    decoration: const InputDecoration(
+                      labelText: 'Immich API key',
+                    ),
                   ),
                   const SizedBox(height: 10),
                   Row(
@@ -556,7 +558,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                               value: draft.albumIds.contains(album.id),
                               onChanged: (selected) {
                                 final ids = List<String>.from(draft.albumIds);
-                                final names = List<String>.from(draft.albumNames);
+                                final names = List<String>.from(
+                                  draft.albumNames,
+                                );
                                 if (selected == true) {
                                   if (!ids.contains(album.id)) {
                                     ids.add(album.id);
@@ -580,7 +584,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                                   ),
                                 );
                               },
-                              title: Text('${album.name} (${album.assetCount})'),
+                              title: Text(
+                                '${album.name} (${album.assetCount})',
+                              ),
                             ),
                         ],
                       ),
@@ -667,7 +673,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                     continue;
                   }
                   final previousIndex = draft.albumIds.indexOf(id);
-                  if (previousIndex >= 0 && previousIndex < draft.albumNames.length) {
+                  if (previousIndex >= 0 &&
+                      previousIndex < draft.albumNames.length) {
                     resolvedNames.add(draft.albumNames[previousIndex]);
                     continue;
                   }
@@ -1297,12 +1304,14 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                   color: context.millitopTheme.accentColor,
                 ),
                 SizedBox(width: 10),
-                Expanded(child: Text(
-                  'Sleep timer',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                )),
+                Expanded(
+                  child: Text(
+                    'Sleep timer',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -1347,6 +1356,25 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       const SizedBox(height: 14),
       _settingsCard(
         child: ListTile(
+          key: const ValueKey('settings-diagnostics'),
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.bug_report_outlined),
+          title: const Text('Diagnostics & logs'),
+          subtitle: const Text(
+            'Errors with suggested fixes, activity log, and usage sharing.',
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              settings: const RouteSettings(name: 'diagnostics'),
+              builder: (_) => const DiagnosticsScreen(),
+            ),
+          ),
+        ),
+      ),
+      const SizedBox(height: 14),
+      _settingsCard(
+        child: ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.palette_outlined),
           title: const Text('Interface theme'),
@@ -1381,7 +1409,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.folder_outlined),
               title: const Text('Files'),
-              subtitle: const Text('Manage your folders and browse local or network media'),
+              subtitle: const Text(
+                'Manage your folders and browse local or network media',
+              ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.of(context).push<void>(
                 MaterialPageRoute(
@@ -1608,92 +1638,108 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     final tokens = context.millitopTheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
-      body: LayoutBuilder(builder: (context, constraints) {
-        if (constraints.maxWidth < 700) {
-          return SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: DropdownButtonFormField<_SettingsSection>(
-                    initialValue: section,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: 'Settings category'),
-                    items: const [
-                      DropdownMenuItem(value: _SettingsSection.general, child: Text('General')),
-                      DropdownMenuItem(value: _SettingsSection.tvMovies, child: Text('TV & movies')),
-                      DropdownMenuItem(value: _SettingsSection.music, child: Text('Music')),
-                      DropdownMenuItem(value: _SettingsSection.websites, child: Text('Websites')),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) {
-                        setState(() => section = value);
-                      }
-                    },
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 700) {
+            return SafeArea(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: DropdownButtonFormField<_SettingsSection>(
+                      initialValue: section,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Settings category',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: _SettingsSection.general,
+                          child: Text('General'),
+                        ),
+                        DropdownMenuItem(
+                          value: _SettingsSection.tvMovies,
+                          child: Text('TV & movies'),
+                        ),
+                        DropdownMenuItem(
+                          value: _SettingsSection.music,
+                          child: Text('Music'),
+                        ),
+                        DropdownMenuItem(
+                          value: _SettingsSection.websites,
+                          child: Text('Websites'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() => section = value);
+                        }
+                      },
+                    ),
                   ),
-                ),
-                Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.all(16),
-                    children: [_sectionContent()],
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.all(16),
+                      children: [_sectionContent()],
+                    ),
                   ),
+                ],
+              ),
+            );
+          }
+          return Row(
+            children: [
+              Container(
+                width: 220,
+                padding: const EdgeInsets.fromLTRB(16, 18, 16, 18),
+                decoration: BoxDecoration(
+                  border: Border(right: BorderSide(color: tokens.panelBorder)),
                 ),
-              ],
-            ),
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    Text(
+                      'MILLITOP',
+                      style: TextStyle(
+                        letterSpacing: 1.5,
+                        fontWeight: FontWeight.w700,
+                        color: tokens.accentColor,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    _sectionButton(
+                      value: _SettingsSection.general,
+                      label: 'General',
+                      icon: Icons.settings_outlined,
+                    ),
+                    _sectionButton(
+                      value: _SettingsSection.tvMovies,
+                      label: 'TV & movies',
+                      icon: Icons.tv_outlined,
+                    ),
+                    _sectionButton(
+                      value: _SettingsSection.music,
+                      label: 'Music',
+                      icon: Icons.music_note_outlined,
+                    ),
+                    _sectionButton(
+                      value: _SettingsSection.websites,
+                      label: 'Websites',
+                      icon: Icons.public_outlined,
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(22),
+                  children: [_sectionContent()],
+                ),
+              ),
+            ],
           );
-        }
-        return Row(
-        children: [
-          Container(
-            width: 220,
-            padding: const EdgeInsets.fromLTRB(16, 18, 16, 18),
-            decoration: BoxDecoration(
-              border: Border(right: BorderSide(color: tokens.panelBorder)),
-            ),
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                Text(
-                  'MILLITOP',
-                  style: TextStyle(
-                    letterSpacing: 1.5,
-                    fontWeight: FontWeight.w700,
-                    color: tokens.accentColor,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                _sectionButton(
-                  value: _SettingsSection.general,
-                  label: 'General',
-                  icon: Icons.settings_outlined,
-                ),
-                _sectionButton(
-                  value: _SettingsSection.tvMovies,
-                  label: 'TV & movies',
-                  icon: Icons.tv_outlined,
-                ),
-                _sectionButton(
-                  value: _SettingsSection.music,
-                  label: 'Music',
-                  icon: Icons.music_note_outlined,
-                ),
-                _sectionButton(
-                  value: _SettingsSection.websites,
-                  label: 'Websites',
-                  icon: Icons.public_outlined,
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(22),
-              children: [_sectionContent()],
-            ),
-          ),
-        ],
-        );
-      }),
+        },
+      ),
     );
   }
 }

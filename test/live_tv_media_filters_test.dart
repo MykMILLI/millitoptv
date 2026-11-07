@@ -67,6 +67,7 @@ Future<void> _open(
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+  adultAndBackTests();
 
   testWidgets('selecting a category on a large catalog does not hang', (
     tester,
@@ -215,5 +216,112 @@ void main() {
         .whereType<String>()
         .toList();
     expect(titles.indexOf('New Movie') < titles.indexOf('Old Movie'), isTrue);
+  });
+}
+
+List<LiveTvMediaItem> _mixedCatalog() => const [
+  LiveTvMediaItem(
+    id: 'regular-1',
+    title: 'Family Movie',
+    streamUrl: 'https://example.invalid/family.mp4',
+    group: 'Movies',
+  ),
+  LiveTvMediaItem(
+    id: 'iptv-adult-1',
+    title: 'XXX - Late Feature',
+    streamUrl: 'https://example.invalid/xxx.mp4',
+    group: 'For Adults',
+  ),
+  LiveTvMediaItem(
+    id: 'jf-adult-1',
+    title: 'Library Title',
+    streamUrl: 'https://example.invalid/jf.mp4',
+    group: 'Adult',
+  ),
+];
+
+void adultAndBackTests() {
+  testWidgets('adult titles are hidden by default', (tester) async {
+    await _open(tester, service: _CatalogService(movies: _mixedCatalog()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Family Movie'), findsOneWidget);
+    expect(find.text('XXX - Late Feature'), findsNothing);
+    expect(find.text('Library Title'), findsNothing);
+    expect(find.byKey(const ValueKey('media-tab-adult')), findsNothing);
+  });
+
+  testWidgets('when enabled, adult titles live only in their own tab', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'media.showAdult.v1.1': true});
+    await _open(tester, service: _CatalogService(movies: _mixedCatalog()));
+    await tester.pumpAndSettle();
+
+    // Movies grid stays clean.
+    expect(find.text('Family Movie'), findsOneWidget);
+    expect(find.text('XXX - Late Feature'), findsNothing);
+
+    final adultTab = find.byKey(const ValueKey('media-tab-adult'));
+    await tester.ensureVisible(adultTab);
+    await tester.tap(adultTab);
+    await tester.pumpAndSettle();
+
+    expect(find.text('XXX - Late Feature'), findsOneWidget);
+    expect(find.text('Library Title'), findsOneWidget);
+    expect(find.text('Family Movie'), findsNothing);
+  });
+
+  testWidgets('Back from a grid returns to Movies & Series Home first', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MillitopThemeController.instance.materialTheme,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => LiveTvMediaScreen(
+                      catalogCache: MediaCatalogCache.disabled(),
+                      profileId: 1,
+                      loadConfiguredSources: (_) => Future.value([_source]),
+                      playlistService: _CatalogService(movies: _mixedCatalog()),
+                    ),
+                  ),
+                ),
+                child: const Text('App Home'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('App Home'));
+    await tester.pumpAndSettle();
+
+    ChoiceChip chip(String key) =>
+        tester.widget<ChoiceChip>(find.byKey(ValueKey(key)));
+    expect(chip('media-tab-home').selected, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('media-tab-movies')).first);
+    await tester.pumpAndSettle();
+    expect(chip('media-tab-movies').selected, isTrue);
+
+    // First Back: still in Movies & Series, now on its Home.
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.text('App Home'), findsNothing);
+    expect(chip('media-tab-home').selected, isTrue);
+
+    // Second Back: leaves to the app home screen.
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.text('App Home'), findsOneWidget);
   });
 }

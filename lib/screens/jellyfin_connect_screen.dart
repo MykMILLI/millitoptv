@@ -1,3 +1,4 @@
+import '../services/app_log.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -207,6 +208,14 @@ class _JellyfinConnectScreenState extends State<JellyfinConnectScreen> {
       selectedLibraryIds: {for (final library in libraries) library.id},
     );
     await store.save(widget.profileId, next);
+    AppLog.audit(
+      'Jellyfin signed in',
+      details: {
+        'server': api.serverUrl,
+        'user': auth.userName,
+        'libraries': libraries.length,
+      },
+    );
     if (!mounted) {
       return;
     }
@@ -266,6 +275,10 @@ class _JellyfinConnectScreenState extends State<JellyfinConnectScreen> {
 
   Future<void> _signOut() async {
     await store.clear(widget.profileId);
+    AppLog.audit(
+      'Jellyfin signed out',
+      details: {'profileId': widget.profileId},
+    );
     if (mounted) {
       setState(() {
         account = null;

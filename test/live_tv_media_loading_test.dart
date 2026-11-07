@@ -124,13 +124,13 @@ void main() {
     sources.complete([_source]);
     await tester.pump();
     expect(_modal, findsOneWidget);
-    expect(find.text('Loading movies...'), findsOneWidget);
+    expect(find.text('Loading movies and series...'), findsOneWidget);
     expect(find.text('Test library'), findsWidgets);
 
     movies.complete([_movie]);
     await tester.pump();
     expect(_modal, findsOneWidget);
-    expect(find.text('Loading series...'), findsOneWidget);
+    expect(find.text('Loading movies and series...'), findsOneWidget);
     expect(find.text('Movies: 1'), findsOneWidget);
     expect(
       tester

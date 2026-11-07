@@ -32,6 +32,8 @@ import 'services/podcast_playback.dart';
 import 'widgets/podcast_player_bar.dart';
 import 'screens/live_tv_screen.dart';
 import 'theme/millitop_visual_theme.dart';
+import 'services/app_log.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
@@ -45,7 +47,46 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 Future<void> main() async {
+  // Every uncaught error (framework, platform channel, async zone) lands in
+  // the app log with a fix hint, so troubleshooting starts in
+  // Settings > Diagnostics instead of guessing.
+  await runZonedGuarded(_main, (error, stack) {
+    AppLog.error(
+      LogCategory.app,
+      'Uncaught async error',
+      error: error,
+      stackTrace: stack,
+    );
+  });
+}
+
+Future<void> _main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final previousFlutterError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    AppLog.error(
+      LogCategory.app,
+      'Flutter error${details.library == null ? '' : ' in ${details.library}'}',
+      error: details.exception,
+      stackTrace: details.stack,
+      details: {
+        if (details.context != null) 'context': details.context.toString(),
+      },
+    );
+    previousFlutterError?.call(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLog.error(
+      LogCategory.app,
+      'Uncaught platform error',
+      error: error,
+      stackTrace: stack,
+    );
+    return true;
+  };
+  await AppLog.instance.init();
+  unawaited(_describeAppForLog());
+  AppLog.instance.uploader = _uploadTelemetry;
   final desktopWindowMode =
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.windows ||
@@ -131,6 +172,39 @@ class _HoverLiftState extends State<HoverLift> {
   }
 }
 
+Future<void> _describeAppForLog() async {
+  try {
+    final info = await PackageInfo.fromPlatform();
+    AppLog.instance.appVersion = '${info.version}+${info.buildNumber}';
+  } catch (_) {}
+  AppLog.info(
+    LogCategory.app,
+    'App started',
+    details: {
+      'version': AppLog.instance.appVersion,
+      'platform': AppLog.instance.platform,
+    },
+  );
+}
+
+/// Sends redacted warnings, errors, audit and usage events to the dashboard
+/// (opt-out in Settings > Diagnostics). Skipped when the device is not paired.
+Future<void> _uploadTelemetry(List<Map<String, Object?>> batch) async {
+  final connection = DeviceConnection.instance;
+  if (connection.connectionKey.isEmpty || !connection.isConnected) {
+    throw StateError('Device not paired');
+  }
+  await connection.postDevice('/api/device/telemetry', {
+    'sessionId': AppLog.instance.sessionId,
+    'appVersion': AppLog.instance.appVersion,
+    'platform': AppLog.instance.platform,
+    'events': batch,
+  }, expectedConnection: connection.connectionKey);
+}
+
+final AppLogNavigatorObserver appLogNavigatorObserver =
+    AppLogNavigatorObserver();
+
 class MillitopApp extends StatefulWidget {
   const MillitopApp({super.key});
 
@@ -145,6 +219,7 @@ class _MillitopAppState extends State<MillitopApp> {
       animation: MillitopThemeController.instance,
       builder: (context, _) => MaterialApp(
         navigatorKey: overnightNavigatorKey,
+        navigatorObservers: [appLogNavigatorObserver],
         title: 'MILLITOP TV',
         debugShowCheckedModeBanner: false,
         builder: (context, child) => Listener(
@@ -415,6 +490,8 @@ class _LauncherState extends State<Launcher>
     try {
       final prefs = HomePreferences();
       await prefs.setLastActiveProfileId(widget.profileId);
+      AppLog.instance.profileId = widget.profileId;
+      AppLog.audit('Profile opened', details: {'profileId': widget.profileId});
       final savedThemeId = MillitopThemeController.fromStorage(
         await prefs.visualTheme(widget.profileId),
       );
@@ -2315,70 +2392,82 @@ class _LauncherState extends State<Launcher>
                                   embedded: true,
                                 )
                               : SingleChildScrollView(
-                            key: ValueKey(page),
-                            padding: const EdgeInsets.only(bottom: 20),
-                            child: Stack(
-                              children: [
-                                IgnorePointer(
-                                  ignoring: serviceLocked && page != 3,
-                                  child: switch (page) {
-                                    1 => const SizedBox(height: 400),
-                                    2 => dvr(),
-                                    3 => account(),
-                                    4 => updates(),
-                                    _ => home(),
-                                  },
-                                ),
-                                if (serviceLocked && page != 3)
-                                  Positioned.fill(
-                                    child: DecoratedBox(
-                                      decoration: const BoxDecoration(
-                                        color: Color(0xAA000000),
+                                  key: ValueKey(page),
+                                  padding: const EdgeInsets.only(bottom: 20),
+                                  child: Stack(
+                                    children: [
+                                      IgnorePointer(
+                                        ignoring: serviceLocked && page != 3,
+                                        child: switch (page) {
+                                          1 => const SizedBox(height: 400),
+                                          2 => dvr(),
+                                          3 => account(),
+                                          4 => updates(),
+                                          _ => home(),
+                                        },
                                       ),
-                                      child: Center(
-                                        child: Card(
-                                          child: Padding(
-                                            padding: const EdgeInsets.all(18),
-                                            child: Column(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                const Icon(
-                                                  Icons.lock_outline,
-                                                  size: 40,
-                                                ),
-                                                const SizedBox(height: 10),
-                                                const Text(
-                                                  'Service locked',
-                                                  style: TextStyle(
-                                                    fontSize: 24,
-                                                    fontWeight: FontWeight.w700,
+                                      if (serviceLocked && page != 3)
+                                        Positioned.fill(
+                                          child: DecoratedBox(
+                                            decoration: const BoxDecoration(
+                                              color: Color(0xAA000000),
+                                            ),
+                                            child: Center(
+                                              child: Card(
+                                                child: Padding(
+                                                  padding: const EdgeInsets.all(
+                                                    18,
+                                                  ),
+                                                  child: Column(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      const Icon(
+                                                        Icons.lock_outline,
+                                                        size: 40,
+                                                      ),
+                                                      const SizedBox(
+                                                        height: 10,
+                                                      ),
+                                                      const Text(
+                                                        'Service locked',
+                                                        style: TextStyle(
+                                                          fontSize: 24,
+                                                          fontWeight:
+                                                              FontWeight.w700,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 8),
+                                                      Text(
+                                                        serviceLockReason
+                                                                .isEmpty
+                                                            ? 'Open Account to restore access.'
+                                                            : serviceLockReason,
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                      ),
+                                                      const SizedBox(
+                                                        height: 10,
+                                                      ),
+                                                      FilledButton(
+                                                        onPressed: () =>
+                                                            setState(
+                                                              () => page = 3,
+                                                            ),
+                                                        child: const Text(
+                                                          'Open Account',
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ),
                                                 ),
-                                                const SizedBox(height: 8),
-                                                Text(
-                                                  serviceLockReason.isEmpty
-                                                      ? 'Open Account to restore access.'
-                                                      : serviceLockReason,
-                                                  textAlign: TextAlign.center,
-                                                ),
-                                                const SizedBox(height: 10),
-                                                FilledButton(
-                                                  onPressed: () =>
-                                                      setState(() => page = 3),
-                                                  child: const Text(
-                                                    'Open Account',
-                                                  ),
-                                                ),
-                                              ],
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                    ),
+                                    ],
                                   ),
-                              ],
-                            ),
-                          ),
+                                ),
                         ),
                       ),
                       AnimatedBuilder(

@@ -364,6 +364,21 @@ class HomePreferences {
     }
   }
 
+  /// Adult titles (IPTV "XXX -" / "For Adults", Jellyfin "Adult") are
+  /// hidden unless the profile turns this on. Synced with the profile.
+  Future<bool> showAdultContent(int profile) async =>
+      (await SharedPreferences.getInstance()).getBool(
+        'media.showAdult.v1.$profile',
+      ) ??
+      false;
+
+  Future<void> setShowAdultContent(int profile, bool value) async {
+    await (await SharedPreferences.getInstance()).setBool(
+      'media.showAdult.v1.$profile',
+      value,
+    );
+  }
+
   Future<String> tmdbApiKey(int profile) async =>
       (await SharedPreferences.getInstance()).getString(
         'home.tmdbApiKey.v1.$profile',
@@ -398,7 +413,9 @@ class HomePreferences {
     if (decoded is! Map) {
       throw const FormatException('Shared Family Album settings are invalid.');
     }
-    return SharedFamilyAlbumSettings.fromJson(Map<String, dynamic>.from(decoded));
+    return SharedFamilyAlbumSettings.fromJson(
+      Map<String, dynamic>.from(decoded),
+    );
   }
 
   Future<void> saveSharedFamilyAlbumSettings(
@@ -873,6 +890,7 @@ class HomePreferences {
         profile,
       )).map((item) => item.toJson()).toList(),
       'uiState': await liveTvUiState(profile),
+      'showAdultContent': await showAdultContent(profile),
       'playbackPerformance': (await playbackPerformance(profile)).toJson(),
       'subtitleProviders': await subtitleProviderSettings(profile),
       'sharedFamilyAlbum': (await sharedFamilyAlbumSettings(profile)).toJson(),
@@ -927,6 +945,11 @@ class HomePreferences {
       }
       channels.sort((a, b) => b.watchedAtUtc.compareTo(a.watchedAtUtc));
       await _saveLiveTvRecentChannels(profile, channels.take(40).toList());
+    }
+
+    final showAdultRaw = state['showAdultContent'];
+    if (showAdultRaw is bool) {
+      await setShowAdultContent(profile, showAdultRaw);
     }
 
     final recentMediaRaw = state['recentMedia'];
@@ -1025,11 +1048,15 @@ class HomePreferences {
     final globalPlaylistsRaw = state['globalPlaylists'];
     if (globalPlaylistsRaw is Map) {
       await GlobalPlaylistStore().applySync(
-        profile, Map<String, dynamic>.from(globalPlaylistsRaw),
+        profile,
+        Map<String, dynamic>.from(globalPlaylistsRaw),
       );
     }
     if (youtubeRaw is Map) {
-      await TubeStore().applySync(profile, Map<String, dynamic>.from(youtubeRaw));
+      await TubeStore().applySync(
+        profile,
+        Map<String, dynamic>.from(youtubeRaw),
+      );
     }
     final podcastsRaw = state['podcasts'];
     if (podcastsRaw is Map) {
@@ -1188,19 +1215,15 @@ class HomePreferences {
         ..sort((a, b) {
           final aTime =
               DateTime.tryParse(
-                (a.value is Map
-                        ? (a.value as Map)['updatedAtUtc']
-                        : null)
-                    ?.toString() ??
+                (a.value is Map ? (a.value as Map)['updatedAtUtc'] : null)
+                        ?.toString() ??
                     '',
               )?.toUtc() ??
               DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
           final bTime =
               DateTime.tryParse(
-                (b.value is Map
-                        ? (b.value as Map)['updatedAtUtc']
-                        : null)
-                    ?.toString() ??
+                (b.value is Map ? (b.value as Map)['updatedAtUtc'] : null)
+                        ?.toString() ??
                     '',
               )?.toUtc() ??
               DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
@@ -1252,14 +1275,21 @@ class HomePreferences {
 
   Future<String> tubePipedUrl(int profile) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('youtube.pipedUrl.v1.$profile') ?? 'https://api.piped.private.coffee';
+    return prefs.getString('youtube.pipedUrl.v1.$profile') ??
+        'https://api.piped.private.coffee';
   }
 
   Future<void> setTubePipedUrl(int profile, String value) async {
     final uri = Uri.tryParse(value);
-    if (uri == null || !['http', 'https'].contains(uri.scheme) ||
-        uri.host.isEmpty || uri.userInfo.isNotEmpty || uri.query.isNotEmpty || uri.fragment.isNotEmpty) {
-      throw const FormatException('Piped server must be an HTTP(S) URL without credentials, query or fragment.');
+    if (uri == null ||
+        !['http', 'https'].contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.query.isNotEmpty ||
+        uri.fragment.isNotEmpty) {
+      throw const FormatException(
+        'Piped server must be an HTTP(S) URL without credentials, query or fragment.',
+      );
     }
     final prefs = await SharedPreferences.getInstance();
     if (!await prefs.setString('youtube.pipedUrl.v1.$profile', value)) {
@@ -1267,7 +1297,11 @@ class HomePreferences {
     }
   }
 
-  Future<void> clearProfileData(int profile, {PodcastDownloads? podcastDownloads, TubeDownloads? tubeDownloads}) async {
+  Future<void> clearProfileData(
+    int profile, {
+    PodcastDownloads? podcastDownloads,
+    TubeDownloads? tubeDownloads,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     final keys = <String>[
       'home.visualTheme.v1.$profile',
