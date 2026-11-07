@@ -15,6 +15,7 @@ RUN node --check server/tmdb-discovery.mjs && node --test server/tmdb-discovery.
 RUN node --check server/profile-sync-routes.mjs && node --check server/verify-profile-sync-schema.mjs && node --test server/profile-sync.test.mjs
 RUN node --check server/listening-session-routes.mjs && node --check server/verify-listening-session-schema.mjs && node --test server/listening-session-routes.test.mjs
 RUN node --check server/dvr-routes.mjs && node --check server/dvr-recorder.mjs && node --check server/dvr-store.mjs && node --test server/dvr-routes.test.mjs
+RUN node --check server/media-library-routes.mjs && node --test server/media-library-catalog-version.test.mjs
 RUN npm prune --omit=dev
 
 FROM node:24-bookworm-slim

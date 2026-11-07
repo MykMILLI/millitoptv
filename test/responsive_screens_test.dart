@@ -6,6 +6,7 @@ import 'package:millitop_tv/library/library_repository.dart';
 import 'package:millitop_tv/screens/app_settings_screen.dart';
 import 'package:millitop_tv/screens/live_tv_screen.dart';
 import 'package:millitop_tv/screens/live_tv_media_screen.dart';
+import 'package:millitop_tv/services/media_catalog_cache.dart';
 import 'package:millitop_tv/screens/media_library_home.dart';
 import 'package:millitop_tv/screens/music_screen.dart';
 import 'package:millitop_tv/theme/millitop_visual_theme.dart';
@@ -47,7 +48,10 @@ void main() {
           ),
           const MusicScreen(profileId: 1),
           const LiveTvScreen(profileId: 1),
-          const LiveTvMediaScreen(profileId: 1),
+          LiveTvMediaScreen(
+            profileId: 1,
+            catalogCache: MediaCatalogCache.disabled(),
+          ),
         ]) {
           await tester.pumpWidget(
             MaterialApp(
@@ -69,7 +73,11 @@ void main() {
           }
           await tester.pumpWidget(const SizedBox.shrink());
           await tester.pump();
-          expect(tester.takeException(), isNull, reason: '${screen.runtimeType} cleanup');
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '${screen.runtimeType} cleanup',
+          );
         }
       });
     }

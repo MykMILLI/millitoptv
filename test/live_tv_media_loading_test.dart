@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/screens/live_tv_media_screen.dart';
+import 'package:millitop_tv/services/media_catalog_cache.dart';
 import 'package:millitop_tv/services/live_tv_playlist.dart';
 import 'package:millitop_tv/services/live_tv_source.dart';
 import 'package:millitop_tv/services/home_preferences.dart';
@@ -49,6 +50,7 @@ Future<void> _open(
   MaterialApp(
     theme: MillitopThemeController.instance.materialTheme,
     home: LiveTvMediaScreen(
+      catalogCache: MediaCatalogCache.disabled(),
       profileId: 1,
       loadConfiguredSources: loadSources,
       playlistService: service ?? _CatalogService(),
@@ -254,22 +256,87 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a saved item never falls back to another provider', (tester) async {
-    await tester.pumpWidget(MaterialApp(
-      home: LiveTvMediaScreen(
-        profileId: 1,
-        playlistService: _CatalogService(),
-        loadConfiguredSources: (_) async => [_source],
-        initialSourceId: 'missing-provider',
-        initialLibraryItem: const LiveTvLibraryItem(
-          sourceId: 'missing-provider', sourceName: 'Missing provider',
-          mediaType: 'movie', mediaId: 'movie', title: 'Saved movie',
+  testWidgets('a saved item never falls back to another provider', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LiveTvMediaScreen(
+          catalogCache: MediaCatalogCache.disabled(),
+          profileId: 1,
+          playlistService: _CatalogService(),
+          loadConfiguredSources: (_) async => [_source],
+          initialSourceId: 'missing-provider',
+          initialLibraryItem: const LiveTvLibraryItem(
+            sourceId: 'missing-provider',
+            sourceName: 'Missing provider',
+            mediaType: 'movie',
+            mediaId: 'movie',
+            title: 'Saved movie',
+          ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
     expect(_modal, findsNothing);
-    expect(find.textContaining('The source for "Saved movie" is unavailable'), findsOneWidget);
+    expect(
+      find.textContaining('The source for "Saved movie" is unavailable'),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('reopening Movies & Series uses the cached catalog', (
+    tester,
+  ) async {
+    final cache = MediaCatalogCache(memory: {}, persist: false);
+    var loads = 0;
+    final service = _CountingService(() => loads++);
+    Future<void> open() => tester.pumpWidget(
+      MaterialApp(
+        home: LiveTvMediaScreen(
+          profileId: 1,
+          catalogCache: cache,
+          playlistService: service,
+          loadConfiguredSources: (_) async => [_source],
+        ),
+      ),
+    );
+    await open();
+    await tester.pumpAndSettle();
+    expect(loads, 1);
+    expect(find.text('Test movie'), findsWidgets);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await open();
+    await tester.pump();
+    await tester.pump();
+    // No loading modal and no provider download on the second visit.
+    expect(_modal, findsNothing);
+    await tester.pumpAndSettle();
+    expect(loads, 1);
+    expect(find.text('Test movie'), findsWidgets);
+
+    // A manual reload still goes to the provider.
+    await tester.tap(find.byTooltip('Reload library'));
+    await tester.pumpAndSettle();
+    expect(loads, 2);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
+
+class _CountingService extends LiveTvPlaylistService {
+  final void Function() onLoad;
+  _CountingService(this.onLoad);
+
+  @override
+  Future<List<LiveTvMediaItem>> loadMovies(LiveTvSource source) async {
+    onLoad();
+    return [_movie];
+  }
+
+  @override
+  Future<List<LiveTvMediaItem>> loadSeries(LiveTvSource source) async => [
+    _series,
+  ];
 }

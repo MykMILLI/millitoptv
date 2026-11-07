@@ -330,6 +330,19 @@ async function saveFallbackSources(connection, householdId, sources) {
   );
 }
 
+// Lets a device skip downloading and re-parsing a catalog it already has.
+export function catalogVersionOf(profileId, libraries) {
+  return createHash('sha256').update(JSON.stringify([profileId, libraries])).digest('base64url').slice(0, 32);
+}
+
+export function catalogResponse(req, profileId, libraries, extra = {}) {
+  const catalogVersion = catalogVersionOf(profileId, libraries);
+  if (typeof req.body?.catalogVersion === 'string' && req.body.catalogVersion === catalogVersion) {
+    return { profileId, unchanged: true, catalogVersion, ...extra };
+  }
+  return { profileId, libraries, catalogVersion, ...extra };
+}
+
 function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -1683,7 +1696,7 @@ export function registerMediaLibraryRoutes(app, pool, deviceLimit) {
         console.info(
           `[media-library/catalog] fallback household=${device.household_id} profile=${profileId} libraries=${normalizedLibraries.length}`
         );
-        return res.json({ profileId, libraries: normalizedLibraries, fallback: true });
+        return res.json(catalogResponse(req, profileId, normalizedLibraries, { fallback: true }));
       }
       connection = await pool.connect();
       await connection.query('BEGIN');
@@ -1842,7 +1855,7 @@ export function registerMediaLibraryRoutes(app, pool, deviceLimit) {
       console.info(
         `[media-library/catalog] structured household=${device.household_id} profile=${profileId} dbLibraries=${Object.keys(libraries).length} fallbackLibraries=${fallbackCatalog.length} merged=${normalizedLibraries.length}`
       );
-      return res.json({ profileId, libraries: normalizedLibraries });
+      return res.json(catalogResponse(req, profileId, normalizedLibraries));
     } catch (error) {
       if (connection) {
         await connection.query('ROLLBACK').catch(() => {});

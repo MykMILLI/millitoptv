@@ -19,6 +19,7 @@ import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/live_tv_source.dart';
+import '../services/media_catalog_cache.dart';
 import '../services/subtitle_provider_service.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
@@ -323,6 +324,7 @@ class LiveTvMediaScreen extends StatefulWidget {
   final Future<List<LiveTvSource>> Function(int profileId)?
   loadConfiguredSources;
   final DateTime Function()? now;
+  final MediaCatalogCache? catalogCache;
   const LiveTvMediaScreen({
     super.key,
     required this.profileId,
@@ -334,6 +336,7 @@ class LiveTvMediaScreen extends StatefulWidget {
     this.playlistService,
     this.loadConfiguredSources,
     this.now,
+    this.catalogCache,
   });
 
   @override
@@ -349,6 +352,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   final Map<LiveTvMediaItem, _MediaItemSourceOrigin> mediaItemOrigins = {};
   List<LiveTvSource> sources = [];
   final Map<String, _ManagedCatalogLibrary> managedCatalogBySourceId = {};
+  late final MediaCatalogCache catalogCache =
+      widget.catalogCache ?? MediaCatalogCache();
+  bool managedCatalogLoaded = false;
+  bool managedCatalogFromCache = false;
+  String? managedCatalogVersion;
+  bool checkingForCatalogUpdates = false;
   LiveTvSource? source;
   List<LiveTvMediaItem> movies = [];
   List<LiveTvMediaItem> series = [];
@@ -491,204 +500,238 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     return managedCatalogBySourceId[sourceId]?.seriesDetailsById[seriesId];
   }
 
-  Future<List<LiveTvSource>> _managedSources(int profileId) async {
+  List<LiveTvSource> _managedSourceList() => managedCatalogBySourceId.values
+      .map(
+        (library) => LiveTvSource(
+          id: library.id,
+          name: '${library.name} (SMB)',
+          type: 'managed',
+        ),
+      )
+      .toList();
+
+  /// Dashboard (SMB) libraries. Opens from the cached catalog when one exists;
+  /// [_refreshManagedCatalog] checks the server for changes afterwards.
+  Future<List<LiveTvSource>> _managedSources(
+    int profileId, {
+    bool preferCache = true,
+  }) async {
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty ||
         !DeviceConnection.instance.isEnrolled ||
         DeviceConnection.instance.isSuspended) {
       managedCatalogBySourceId.clear();
+      managedCatalogLoaded = false;
       return const [];
+    }
+    if (preferCache) {
+      if (managedCatalogLoaded) {
+        return _managedSourceList();
+      }
+      final entry = await catalogCache.managedCatalog(profileId, connection);
+      if (entry != null) {
+        _parseManagedCatalog(entry.response);
+        managedCatalogVersion = entry.version;
+        managedCatalogLoaded = true;
+        managedCatalogFromCache = true;
+        return _managedSourceList();
+      }
+    }
+    await _refreshManagedCatalog(profileId);
+    return _managedSourceList();
+  }
+
+  /// Asks the server for the dashboard catalog, sending the version we already
+  /// have so an unchanged library costs almost nothing. Returns true when the
+  /// catalog changed.
+  Future<bool> _refreshManagedCatalog(int profileId) async {
+    final connection = DeviceConnection.instance.connectionKey;
+    if (connection.isEmpty) {
+      return false;
     }
     try {
       final response = await liveTvControl.mediaLibraryCatalog(
         expectedConnection: connection,
         profileId: profileId,
+        catalogVersion: managedCatalogLoaded ? managedCatalogVersion : null,
       );
-      final libraries = response['libraries'];
-      if (libraries is! List) {
-        managedCatalogBySourceId.clear();
-        return const [];
+      managedCatalogFromCache = false;
+      if (response['unchanged'] == true && managedCatalogLoaded) {
+        return false;
       }
-      final parsedSources = <LiveTvSource>[];
-      final seenSourceIds = <String>{};
-      final parsedCatalogs = <String, _ManagedCatalogLibrary>{};
-      for (final entry in libraries) {
-        if (entry is! Map) {
-          continue;
-        }
-        final value = Map<String, dynamic>.from(entry);
-        final libraryId = value['id']?.toString().trim() ?? '';
-        final libraryName = value['name']?.toString().trim() ?? '';
-        if (libraryId.isEmpty || libraryName.isEmpty) {
-          continue;
-        }
-        final sourceId = _managedSourceId(libraryId);
-        final movies = <LiveTvMediaItem>[];
-        final series = <LiveTvMediaItem>[];
-        final seriesDetailsById = <String, LiveTvSeriesDetails>{};
-        final rawItems = value['items'];
-        if (rawItems is List) {
-          for (final rawItem in rawItems) {
-            if (rawItem is! Map) {
-              continue;
-            }
-            final item = Map<String, dynamic>.from(rawItem);
-            final mediaKind = item['mediaKind']
-                ?.toString()
-                .trim()
-                .toLowerCase();
-            if (mediaKind == 'series') {
-              continue;
-            }
-            final itemId = item['id']?.toString().trim() ?? '';
-            final title = item['title']?.toString().trim() ?? '';
-            final path = item['path']?.toString().trim() ?? '';
-            if (itemId.isEmpty || title.isEmpty || path.isEmpty) {
-              continue;
-            }
-            movies.add(
-              LiveTvMediaItem(
-                id: '$sourceId:movie:$itemId',
-                title: title,
-                streamUrl: _managedPathToStreamUrl(path),
-                posterUrl: item['posterUrl']?.toString(),
-                description: item['overview']?.toString(),
-                backdropUrl: item['backdropUrl']?.toString(),
-                group: libraryName,
-                series: false,
-              ),
-            );
+      final version = response['catalogVersion']?.toString();
+      _parseManagedCatalog(response);
+      managedCatalogVersion = version;
+      managedCatalogLoaded = true;
+      unawaited(
+        catalogCache.saveManagedCatalog(
+          profileId,
+          connection,
+          response,
+          version: version,
+        ),
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _parseManagedCatalog(Map<String, dynamic> response) {
+    final libraries = response['libraries'];
+    if (libraries is! List) {
+      managedCatalogBySourceId.clear();
+      return;
+    }
+    final parsedCatalogs = <String, _ManagedCatalogLibrary>{};
+    for (final entry in libraries) {
+      if (entry is! Map) {
+        continue;
+      }
+      final value = Map<String, dynamic>.from(entry);
+      final libraryId = value['id']?.toString().trim() ?? '';
+      final libraryName = value['name']?.toString().trim() ?? '';
+      if (libraryId.isEmpty || libraryName.isEmpty) {
+        continue;
+      }
+      final sourceId = _managedSourceId(libraryId);
+      final movies = <LiveTvMediaItem>[];
+      final series = <LiveTvMediaItem>[];
+      final seriesDetailsById = <String, LiveTvSeriesDetails>{};
+      final rawItems = value['items'];
+      if (rawItems is List) {
+        for (final rawItem in rawItems) {
+          if (rawItem is! Map) {
+            continue;
           }
-        }
-        final rawSeries = value['series'];
-        if (rawSeries is List) {
-          for (final rawSeriesItem in rawSeries) {
-            if (rawSeriesItem is! Map) {
-              continue;
-            }
-            final seriesItem = Map<String, dynamic>.from(rawSeriesItem);
-            final seriesTitle = seriesItem['title']?.toString().trim() ?? '';
-            if (seriesTitle.isEmpty) {
-              continue;
-            }
-            final seriesId = '$sourceId:series:${_seriesSlug(seriesTitle)}';
-            final episodes = <LiveTvSeriesEpisode>[];
-            final seasons = seriesItem['seasons'];
-            if (seasons is List) {
-              for (final rawSeason in seasons) {
-                if (rawSeason is! Map) {
-                  continue;
-                }
-                final seasonMap = Map<String, dynamic>.from(rawSeason);
-                final seasonNumber =
-                    int.tryParse(seasonMap['season']?.toString() ?? '') ?? 0;
-                final episodesRaw = seasonMap['episodes'];
-                if (episodesRaw is! List) {
-                  continue;
-                }
-                for (final rawEpisode in episodesRaw) {
-                  if (rawEpisode is! Map) {
-                    continue;
-                  }
-                  final episodeMap = Map<String, dynamic>.from(rawEpisode);
-                  final episodeId = episodeMap['id']?.toString().trim() ?? '';
-                  final episodeTitle =
-                      episodeMap['title']?.toString().trim() ?? '';
-                  final path = episodeMap['path']?.toString().trim() ?? '';
-                  if (episodeId.isEmpty ||
-                      episodeTitle.isEmpty ||
-                      path.isEmpty) {
-                    continue;
-                  }
-                  episodes.add(
-                    LiveTvSeriesEpisode(
-                      id: '$seriesId:$episodeId',
-                      title: episodeTitle,
-                      streamUrl: _managedPathToStreamUrl(path),
-                      season: seasonNumber,
-                      episode:
-                          int.tryParse(
-                            episodeMap['episode']?.toString() ?? '',
-                          ) ??
-                          0,
-                      posterUrl: episodeMap['posterUrl']?.toString(),
-                      description: episodeMap['overview']?.toString(),
-                    ),
-                  );
-                }
-              }
-            }
-            if (episodes.isEmpty) {
-              continue;
-            }
-            episodes.sort((a, b) {
-              final bySeason = a.season.compareTo(b.season);
-              if (bySeason != 0) {
-                return bySeason;
-              }
-              final byEpisode = a.episode.compareTo(b.episode);
-              if (byEpisode != 0) {
-                return byEpisode;
-              }
-              return a.title.toLowerCase().compareTo(b.title.toLowerCase());
-            });
-            final details = LiveTvSeriesDetails(
-              seriesId: seriesId,
-              title: seriesTitle,
-              description: null,
-              posterUrl: episodes.first.posterUrl,
-              backdropUrl: null,
-              episodes: episodes,
-            );
-            seriesDetailsById[seriesId] = details;
-            series.add(
-              LiveTvMediaItem(
-                id: seriesId,
-                title: seriesTitle,
-                streamUrl: episodes.first.streamUrl,
-                posterUrl: details.posterUrl,
-                description: details.description,
-                backdropUrl: details.backdropUrl,
-                group: libraryName,
-                series: true,
-                seriesId: seriesId,
-              ),
-            );
+          final item = Map<String, dynamic>.from(rawItem);
+          final mediaKind = item['mediaKind']?.toString().trim().toLowerCase();
+          if (mediaKind == 'series') {
+            continue;
           }
-        }
-        parsedCatalogs[sourceId] = _ManagedCatalogLibrary(
-          id: sourceId,
-          name: libraryName,
-          movies: movies,
-          series: series,
-          seriesDetailsById: seriesDetailsById,
-        );
-        if (!seenSourceIds.contains(sourceId)) {
-          seenSourceIds.add(sourceId);
-          parsedSources.add(
-            LiveTvSource(
-              id: sourceId,
-              name: '$libraryName (SMB)',
-              type: 'managed',
+          final itemId = item['id']?.toString().trim() ?? '';
+          final title = item['title']?.toString().trim() ?? '';
+          final path = item['path']?.toString().trim() ?? '';
+          if (itemId.isEmpty || title.isEmpty || path.isEmpty) {
+            continue;
+          }
+          movies.add(
+            LiveTvMediaItem(
+              id: '$sourceId:movie:$itemId',
+              title: title,
+              streamUrl: _managedPathToStreamUrl(path),
+              posterUrl: item['posterUrl']?.toString(),
+              description: item['overview']?.toString(),
+              backdropUrl: item['backdropUrl']?.toString(),
+              group: libraryName,
+              series: false,
             ),
           );
         }
       }
-      managedCatalogBySourceId
-        ..clear()
-        ..addAll(parsedCatalogs);
-      return parsedSources;
-    } catch (_) {
-      return managedCatalogBySourceId.keys
-          .map(
-            (sourceId) => LiveTvSource(
-              id: sourceId,
-              name: '${managedCatalogBySourceId[sourceId]!.name} (SMB)',
-              type: 'managed',
+      final rawSeries = value['series'];
+      if (rawSeries is List) {
+        for (final rawSeriesItem in rawSeries) {
+          if (rawSeriesItem is! Map) {
+            continue;
+          }
+          final seriesItem = Map<String, dynamic>.from(rawSeriesItem);
+          final seriesTitle = seriesItem['title']?.toString().trim() ?? '';
+          if (seriesTitle.isEmpty) {
+            continue;
+          }
+          final seriesId = '$sourceId:series:${_seriesSlug(seriesTitle)}';
+          final episodes = <LiveTvSeriesEpisode>[];
+          final seasons = seriesItem['seasons'];
+          if (seasons is List) {
+            for (final rawSeason in seasons) {
+              if (rawSeason is! Map) {
+                continue;
+              }
+              final seasonMap = Map<String, dynamic>.from(rawSeason);
+              final seasonNumber =
+                  int.tryParse(seasonMap['season']?.toString() ?? '') ?? 0;
+              final episodesRaw = seasonMap['episodes'];
+              if (episodesRaw is! List) {
+                continue;
+              }
+              for (final rawEpisode in episodesRaw) {
+                if (rawEpisode is! Map) {
+                  continue;
+                }
+                final episodeMap = Map<String, dynamic>.from(rawEpisode);
+                final episodeId = episodeMap['id']?.toString().trim() ?? '';
+                final episodeTitle =
+                    episodeMap['title']?.toString().trim() ?? '';
+                final path = episodeMap['path']?.toString().trim() ?? '';
+                if (episodeId.isEmpty || episodeTitle.isEmpty || path.isEmpty) {
+                  continue;
+                }
+                episodes.add(
+                  LiveTvSeriesEpisode(
+                    id: '$seriesId:$episodeId',
+                    title: episodeTitle,
+                    streamUrl: _managedPathToStreamUrl(path),
+                    season: seasonNumber,
+                    episode:
+                        int.tryParse(episodeMap['episode']?.toString() ?? '') ??
+                        0,
+                    posterUrl: episodeMap['posterUrl']?.toString(),
+                    description: episodeMap['overview']?.toString(),
+                  ),
+                );
+              }
+            }
+          }
+          if (episodes.isEmpty) {
+            continue;
+          }
+          episodes.sort((a, b) {
+            final bySeason = a.season.compareTo(b.season);
+            if (bySeason != 0) {
+              return bySeason;
+            }
+            final byEpisode = a.episode.compareTo(b.episode);
+            if (byEpisode != 0) {
+              return byEpisode;
+            }
+            return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+          });
+          final details = LiveTvSeriesDetails(
+            seriesId: seriesId,
+            title: seriesTitle,
+            description: null,
+            posterUrl: episodes.first.posterUrl,
+            backdropUrl: null,
+            episodes: episodes,
+          );
+          seriesDetailsById[seriesId] = details;
+          series.add(
+            LiveTvMediaItem(
+              id: seriesId,
+              title: seriesTitle,
+              streamUrl: episodes.first.streamUrl,
+              posterUrl: details.posterUrl,
+              description: details.description,
+              backdropUrl: details.backdropUrl,
+              group: libraryName,
+              series: true,
+              seriesId: seriesId,
             ),
-          )
-          .toList();
+          );
+        }
+      }
+      parsedCatalogs[sourceId] = _ManagedCatalogLibrary(
+        id: sourceId,
+        name: libraryName,
+        movies: movies,
+        series: series,
+        seriesDetailsById: seriesDetailsById,
+      );
     }
+    managedCatalogBySourceId
+      ..clear()
+      ..addAll(parsedCatalogs);
   }
 
   Future<void> _pullRemoteProfileSnapshot() async {
@@ -738,7 +781,26 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   Future<void> _initialize() async {
     try {
-      await _pullRemoteProfileSnapshot();
+      // Profile sync (history, favorites, playlists, TMDB key) runs alongside
+      // the catalog instead of blocking it.
+      final profileSync = _pullRemoteProfileSnapshot().then((_) async {
+        final nextHistory = await HomePreferences().liveTvRecentMedia(
+          widget.profileId,
+        );
+        final nextFavorites = await HomePreferences().liveTvFavorites(
+          widget.profileId,
+        );
+        final nextPlaylists = await HomePreferences().liveTvPlaylists(
+          widget.profileId,
+        );
+        if (mounted) {
+          setState(() {
+            history = nextHistory;
+            favorites = nextFavorites;
+            playlists = nextPlaylists;
+          });
+        }
+      });
       playbackPerformance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
@@ -752,6 +814,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         return;
       }
       if (sources.isEmpty) {
+        // With no cached dashboard catalog, wait for the profile sync before
+        // concluding that nothing is configured.
+        await profileSync;
+        if (!mounted) {
+          return;
+        }
         setState(() {
           loading = false;
           error =
@@ -781,29 +849,73 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
   }
 
-  Future<void> _loadCatalog() async {
+  void _applyCatalog(
+    List<LiveTvSource> activeSources,
+    List<List<LiveTvMediaItem>> moviesBySource,
+    List<List<LiveTvMediaItem>> seriesBySource,
+  ) {
+    final mergedMovies = <LiveTvMediaItem>[];
+    final mergedSeries = <LiveTvMediaItem>[];
+    mediaItemOrigins.clear();
+    for (var i = 0; i < activeSources.length; i++) {
+      final sourceItem = activeSources[i];
+      final origin = _MediaItemSourceOrigin(
+        sourceId: sourceItem.id,
+        sourceName: sourceItem.name,
+        source: _isManagedSource(sourceItem) ? null : sourceItem,
+      );
+      for (final item in moviesBySource[i]) {
+        mediaItemOrigins[item] = origin;
+        mergedMovies.add(item);
+      }
+      for (final item in seriesBySource[i]) {
+        mediaItemOrigins[item] = origin;
+        mergedSeries.add(item);
+      }
+    }
+    movies = mergedMovies;
+    series = mergedSeries;
+  }
+
+  /// Opens the catalog from the local cache when possible, so the screen is
+  /// usable immediately. Only sources that have never been loaded (or a
+  /// manual reload via [forceRefresh]) block on the network; everything else
+  /// is checked for changes in the background by [_checkCatalogForChanges].
+  Future<void> _loadCatalog({bool forceRefresh = false}) async {
     if (!mounted) {
       return;
     }
     final generation = ++catalogLoadGeneration;
     setState(() {
-      loading = true;
       error = '';
+      checkingForCatalogUpdates = false;
       catalogPhase = 'Checking configured and dashboard sources...';
       catalogSourceName = null;
       catalogStepsCompleted = 0;
       catalogStepsTotal = 0;
       catalogMoviesLoaded = 0;
       catalogSeriesLoaded = 0;
+      if (forceRefresh) {
+        loading = true;
+      }
     });
     try {
       final configuredSources = await _configuredSources();
-      final managedSources = await _managedSources(widget.profileId);
+      final managedSources = await _managedSources(
+        widget.profileId,
+        preferCache: !forceRefresh,
+      );
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
       final previousSourceId = source?.id;
       sources = [...configuredSources, ...managedSources];
+      unawaited(
+        catalogCache.retainSources(
+          widget.profileId,
+          sources.map((item) => item.id),
+        ),
+      );
       if (sources.isEmpty) {
         if (mounted) {
           setState(() {
@@ -826,94 +938,125 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final activeSources = allSourcesSelected
           ? List<LiveTvSource>.from(sources)
           : <LiveTvSource>[selected];
+      final cached = <String, MediaCatalogCacheEntry?>{};
+      for (final activeSource in activeSources) {
+        cached[activeSource.id] = await catalogCache.source(
+          widget.profileId,
+          activeSource,
+        );
+      }
+      final needsFetch = activeSources
+          .where(
+            (item) =>
+                !_isManagedSource(item) &&
+                (forceRefresh || cached[item.id] == null),
+          )
+          .toList();
       setState(() {
-        catalogStepsTotal = activeSources.length * 2;
+        if (needsFetch.isNotEmpty) {
+          loading = true;
+        }
+        catalogStepsTotal = needsFetch.length * 2;
         status = allSourcesSelected
             ? 'Loading movies and series from ${activeSources.length} source(s)...'
             : 'Loading movies and series from ${selected.name}...';
       });
-      final loadedMoviesBySource = <List<LiveTvMediaItem>>[];
-      final loadedSeriesBySource = <List<LiveTvMediaItem>>[];
-      for (final activeSource in activeSources) {
+      final moviesBySource = <List<LiveTvMediaItem>>[];
+      final seriesBySource = <List<LiveTvMediaItem>>[];
+      // Index -> ids that already went through metadata enrichment. A null
+      // value means "enrich everything" (first load of that source).
+      final enrichQueue = <int, Set<String>?>{};
+      final unsaved = <int>{};
+      for (var i = 0; i < activeSources.length; i++) {
+        final activeSource = activeSources[i];
+        final entry = cached[activeSource.id];
+        if (_isManagedSource(activeSource)) {
+          final managed = managedCatalogBySourceId[activeSource.id];
+          moviesBySource.add(
+            MediaCatalogCache.mergeKeepingMetadata(
+              managed?.movies ?? const [],
+              entry?.movies ?? const [],
+            ),
+          );
+          seriesBySource.add(
+            MediaCatalogCache.mergeKeepingMetadata(
+              managed?.series ?? const [],
+              entry?.series ?? const [],
+            ),
+          );
+          enrichQueue[i] = entry == null ? null : _idsOf(entry);
+          continue;
+        }
+        if (entry != null && !forceRefresh) {
+          moviesBySource.add(entry.movies);
+          seriesBySource.add(entry.series);
+          continue;
+        }
         setState(() {
           catalogSourceName = activeSource.name;
           catalogPhase = 'Loading movies...';
         });
-        if (_isManagedSource(activeSource)) {
-          final managed = managedCatalogBySourceId[activeSource.id];
-          loadedMoviesBySource.add(
-            managed == null
-                ? const <LiveTvMediaItem>[]
-                : List<LiveTvMediaItem>.from(managed.movies),
-          );
-          loadedSeriesBySource.add(
-            managed == null
-                ? const <LiveTvMediaItem>[]
-                : List<LiveTvMediaItem>.from(managed.series),
-          );
-          setState(() {
-            catalogMoviesLoaded += loadedMoviesBySource.last.length;
-            catalogSeriesLoaded += loadedSeriesBySource.last.length;
-            catalogStepsCompleted += 2;
-          });
-          continue;
-        }
-        loadedMoviesBySource.add(await service.loadMovies(activeSource));
+        final freshMovies = await service.loadMovies(activeSource);
         if (!mounted || generation != catalogLoadGeneration) {
           return;
         }
         setState(() {
-          catalogMoviesLoaded += loadedMoviesBySource.last.length;
+          catalogMoviesLoaded += freshMovies.length;
           catalogStepsCompleted++;
           catalogPhase = 'Loading series...';
         });
-        loadedSeriesBySource.add(await service.loadSeries(activeSource));
+        final freshSeries = await service.loadSeries(activeSource);
         if (!mounted || generation != catalogLoadGeneration) {
           return;
         }
         setState(() {
-          catalogSeriesLoaded += loadedSeriesBySource.last.length;
+          catalogSeriesLoaded += freshSeries.length;
           catalogStepsCompleted++;
         });
+        moviesBySource.add(
+          MediaCatalogCache.mergeKeepingMetadata(
+            freshMovies,
+            entry?.movies ?? const [],
+          ),
+        );
+        seriesBySource.add(
+          MediaCatalogCache.mergeKeepingMetadata(
+            freshSeries,
+            entry?.series ?? const [],
+          ),
+        );
+        enrichQueue[i] = entry == null ? null : _idsOf(entry);
+        unsaved.add(i);
       }
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
-      final mergedMovies = <LiveTvMediaItem>[];
-      final mergedSeries = <LiveTvMediaItem>[];
-      mediaItemOrigins.clear();
-      for (var i = 0; i < activeSources.length; i++) {
-        final sourceItem = activeSources[i];
-        for (final item in loadedMoviesBySource[i]) {
-          mediaItemOrigins[item] = _MediaItemSourceOrigin(
-            sourceId: sourceItem.id,
-            sourceName: sourceItem.name,
-            source: _isManagedSource(sourceItem) ? null : sourceItem,
-          );
-          mergedMovies.add(item);
-        }
-        for (final item in loadedSeriesBySource[i]) {
-          mediaItemOrigins[item] = _MediaItemSourceOrigin(
-            sourceId: sourceItem.id,
-            sourceName: sourceItem.name,
-            source: _isManagedSource(sourceItem) ? null : sourceItem,
-          );
-          mergedSeries.add(item);
-        }
-      }
       setState(() {
-        movies = mergedMovies;
-        series = mergedSeries;
+        _applyCatalog(activeSources, moviesBySource, seriesBySource);
         loading = false;
-        status =
-            'Loaded ${mergedMovies.length} movies and ${mergedSeries.length} series';
+        status = 'Loaded ${movies.length} movies and ${series.length} series';
       });
+      // Save freshly downloaded lists right away so the next visit is instant
+      // even if metadata enrichment is interrupted.
+      for (final i in unsaved) {
+        unawaited(
+          catalogCache.saveSource(
+            widget.profileId,
+            activeSources[i],
+            movies: moviesBySource[i],
+            series: seriesBySource[i],
+          ),
+        );
+      }
       unawaited(
-        _enrichCatalogMetadataIfConfigured(
-          activeSources: activeSources,
-          loadedMoviesBySource: loadedMoviesBySource,
-          loadedSeriesBySource: loadedSeriesBySource,
+        _checkCatalogForChanges(
           generation: generation,
+          activeSources: activeSources,
+          moviesBySource: moviesBySource,
+          seriesBySource: seriesBySource,
+          cached: cached,
+          enrichQueue: enrichQueue,
+          refreshedSourceIds: {for (final i in unsaved) activeSources[i].id},
         ),
       );
       await _tryAutoResume();
@@ -927,73 +1070,204 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
   }
 
-  Future<void> _enrichCatalogMetadataIfConfigured({
-    required List<LiveTvSource> activeSources,
-    required List<List<LiveTvMediaItem>> loadedMoviesBySource,
-    required List<List<LiveTvMediaItem>> loadedSeriesBySource,
+  static Set<String> _idsOf(MediaCatalogCacheEntry entry) => {
+    for (final item in entry.movies) item.id,
+    for (final item in entry.series) item.id,
+  };
+
+  /// Background pass after the catalog is on screen:
+  /// 1. asks the dashboard whether its SMB catalog changed (version check),
+  /// 2. re-downloads provider lists whose cache is older than
+  ///    [MediaCatalogCache.freshFor],
+  /// 3. looks up TMDB metadata only for titles that are new,
+  /// and updates the grid in place only if something actually changed.
+  Future<void> _checkCatalogForChanges({
     required int generation,
+    required List<LiveTvSource> activeSources,
+    required List<List<LiveTvMediaItem>> moviesBySource,
+    required List<List<LiveTvMediaItem>> seriesBySource,
+    required Map<String, MediaCatalogCacheEntry?> cached,
+    required Map<int, Set<String>?> enrichQueue,
+    required Set<String> refreshedSourceIds,
   }) async {
-    final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
-    if (tmdbApiKey.trim().isEmpty) {
+    bool stale() => !mounted || generation != catalogLoadGeneration;
+    final movieLists = [...moviesBySource];
+    final seriesLists = [...seriesBySource];
+    final changed = <int>{};
+    final before = MediaCatalogCache.signature(movies, series);
+    if (stale()) {
       return;
     }
-    if (!mounted || generation != catalogLoadGeneration) {
-      return;
-    }
-    setState(() => status = 'Enhancing metadata from TMDB...');
-    final mergedMovies = <LiveTvMediaItem>[];
-    final mergedSeries = <LiveTvMediaItem>[];
-    mediaItemOrigins.clear();
-    for (var i = 0; i < activeSources.length; i++) {
-      final sourceItem = activeSources[i];
-      var sourceMovies = loadedMoviesBySource[i];
-      var sourceSeries = loadedSeriesBySource[i];
-      final eligibleForEnrichment =
-          sourceItem.isM3u || _isManagedSource(sourceItem);
-      if (eligibleForEnrichment) {
-        final maxMetadataItems = _isManagedSource(sourceItem) ? 1400 : 320;
-        sourceMovies = await service.enrichM3uMetadata(
-          items: sourceMovies,
-          series: false,
-          tmdbApiKey: tmdbApiKey,
-          maxItems: maxMetadataItems,
-        );
-        sourceSeries = await service.enrichM3uMetadata(
-          items: sourceSeries,
-          series: true,
-          tmdbApiKey: tmdbApiKey,
-          maxItems: maxMetadataItems,
-        );
-        if (!mounted || generation != catalogLoadGeneration) {
+    setState(() => checkingForCatalogUpdates = true);
+    try {
+      final hasManaged = activeSources.any(_isManagedSource);
+      if (hasManaged && managedCatalogFromCache) {
+        final managedChanged = await _refreshManagedCatalog(widget.profileId);
+        if (stale()) {
           return;
         }
+        if (managedChanged) {
+          for (var i = 0; i < activeSources.length; i++) {
+            if (!_isManagedSource(activeSources[i])) {
+              continue;
+            }
+            final managed = managedCatalogBySourceId[activeSources[i].id];
+            final known = {
+              for (final item in movieLists[i]) item.id,
+              for (final item in seriesLists[i]) item.id,
+            };
+            movieLists[i] = MediaCatalogCache.mergeKeepingMetadata(
+              managed?.movies ?? const [],
+              movieLists[i],
+            );
+            seriesLists[i] = MediaCatalogCache.mergeKeepingMetadata(
+              managed?.series ?? const [],
+              seriesLists[i],
+            );
+            enrichQueue[i] = known;
+            changed.add(i);
+          }
+        }
       }
-      for (final item in sourceMovies) {
-        mediaItemOrigins[item] = _MediaItemSourceOrigin(
-          sourceId: sourceItem.id,
-          sourceName: sourceItem.name,
-          source: _isManagedSource(sourceItem) ? null : sourceItem,
-        );
-        mergedMovies.add(item);
+      final now = _now();
+      for (var i = 0; i < activeSources.length; i++) {
+        final activeSource = activeSources[i];
+        final entry = cached[activeSource.id];
+        if (_isManagedSource(activeSource) ||
+            refreshedSourceIds.contains(activeSource.id) ||
+            entry == null ||
+            entry.age(now) < MediaCatalogCache.freshFor) {
+          continue;
+        }
+        try {
+          final freshMovies = await service.loadMovies(activeSource);
+          final freshSeries = await service.loadSeries(activeSource);
+          if (stale()) {
+            return;
+          }
+          movieLists[i] = MediaCatalogCache.mergeKeepingMetadata(
+            freshMovies,
+            entry.movies,
+          );
+          seriesLists[i] = MediaCatalogCache.mergeKeepingMetadata(
+            freshSeries,
+            entry.series,
+          );
+          enrichQueue[i] = _idsOf(entry);
+          changed.add(i);
+        } catch (_) {
+          // Offline or provider hiccup: keep showing the cached list.
+        }
       }
-      for (final item in sourceSeries) {
-        mediaItemOrigins[item] = _MediaItemSourceOrigin(
-          sourceId: sourceItem.id,
-          sourceName: sourceItem.name,
-          source: _isManagedSource(sourceItem) ? null : sourceItem,
+      final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
+      if (tmdbApiKey.trim().isNotEmpty) {
+        for (final i in enrichQueue.keys) {
+          final sourceItem = activeSources[i];
+          if (!(sourceItem.isM3u || _isManagedSource(sourceItem))) {
+            continue;
+          }
+          final known = enrichQueue[i];
+          final maxItems = _isManagedSource(sourceItem) ? 1400 : 320;
+          final enrichedMovies = await _enrichNewItems(
+            movieLists[i],
+            known,
+            series: false,
+            tmdbApiKey: tmdbApiKey,
+            maxItems: maxItems,
+          );
+          final enrichedSeries = await _enrichNewItems(
+            seriesLists[i],
+            known,
+            series: true,
+            tmdbApiKey: tmdbApiKey,
+            maxItems: maxItems,
+          );
+          if (stale()) {
+            return;
+          }
+          if (!identical(enrichedMovies, movieLists[i]) ||
+              !identical(enrichedSeries, seriesLists[i])) {
+            movieLists[i] = enrichedMovies;
+            seriesLists[i] = enrichedSeries;
+            changed.add(i);
+          }
+          // Managed sources were never saved in the foreground pass.
+          if (_isManagedSource(sourceItem) && known == null) {
+            changed.add(i);
+          }
+        }
+      } else {
+        for (final i in enrichQueue.keys) {
+          if (_isManagedSource(activeSources[i]) && enrichQueue[i] == null) {
+            changed.add(i);
+          }
+        }
+      }
+      if (stale()) {
+        return;
+      }
+      for (final i in changed) {
+        await catalogCache.saveSource(
+          widget.profileId,
+          activeSources[i],
+          movies: movieLists[i],
+          series: seriesLists[i],
         );
-        mergedSeries.add(item);
+      }
+      if (changed.isEmpty || stale()) {
+        return;
+      }
+      final previousCount = movies.length + series.length;
+      setState(() {
+        _applyCatalog(activeSources, movieLists, seriesLists);
+        final added = movies.length + series.length - previousCount;
+        if (MediaCatalogCache.signature(movies, series) != before) {
+          status = added > 0
+              ? 'Updated: $added new title${added == 1 ? '' : 's'}. ${movies.length} movies and ${series.length} series'
+              : 'Loaded ${movies.length} movies and ${series.length} series';
+        }
+      });
+    } finally {
+      if (mounted && generation == catalogLoadGeneration) {
+        setState(() => checkingForCatalogUpdates = false);
       }
     }
-    if (!mounted || generation != catalogLoadGeneration) {
-      return;
+  }
+
+  Future<List<LiveTvMediaItem>> _enrichNewItems(
+    List<LiveTvMediaItem> items,
+    Set<String>? known, {
+    required bool series,
+    required String tmdbApiKey,
+    required int maxItems,
+  }) async {
+    if (known == null) {
+      final result = await service.enrichM3uMetadata(
+        items: items,
+        series: series,
+        tmdbApiKey: tmdbApiKey,
+        maxItems: maxItems,
+      );
+      return result;
     }
-    setState(() {
-      movies = mergedMovies;
-      series = mergedSeries;
-      status =
-          'Loaded ${mergedMovies.length} movies and ${mergedSeries.length} series';
-    });
+    final newIndexes = [
+      for (var i = 0; i < items.length; i++)
+        if (!known.contains(items[i].id)) i,
+    ];
+    if (newIndexes.isEmpty) {
+      return items;
+    }
+    final enriched = await service.enrichM3uMetadata(
+      items: [for (final i in newIndexes) items[i]],
+      series: series,
+      tmdbApiKey: tmdbApiKey,
+      maxItems: maxItems,
+    );
+    final updated = [...items];
+    for (var j = 0; j < newIndexes.length; j++) {
+      updated[newIndexes[j]] = enriched[j];
+    }
+    return updated;
   }
 
   Future<void> _tryAutoResume() async {
@@ -2747,7 +3021,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           unawaited(_requestExitToHome());
         },
         const SingleActivator(LogicalKeyboardKey.f5): () {
-          unawaited(_loadCatalog());
+          unawaited(_loadCatalog(forceRefresh: true));
         },
         const SingleActivator(LogicalKeyboardKey.enter): () {
           final focused = focusedMediaId;
@@ -2811,9 +3085,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Reload library',
-                  onPressed: loading ? null : _loadCatalog,
-                  icon: const Icon(Icons.refresh),
+                  tooltip: checkingForCatalogUpdates
+                      ? 'Checking for new titles...'
+                      : 'Reload library',
+                  onPressed: loading || checkingForCatalogUpdates
+                      ? null
+                      : () => unawaited(_loadCatalog(forceRefresh: true)),
+                  icon: checkingForCatalogUpdates
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
                 ),
               ],
             ),

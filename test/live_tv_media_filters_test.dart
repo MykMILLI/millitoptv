@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/screens/live_tv_media_screen.dart';
+import 'package:millitop_tv/services/media_catalog_cache.dart';
 import 'package:millitop_tv/services/live_tv_playlist.dart';
 import 'package:millitop_tv/services/live_tv_source.dart';
 import 'package:millitop_tv/theme/millitop_visual_theme.dart';
@@ -53,6 +54,7 @@ Future<void> _open(
   MaterialApp(
     theme: MillitopThemeController.instance.materialTheme,
     home: LiveTvMediaScreen(
+      catalogCache: MediaCatalogCache.disabled(),
       profileId: 1,
       loadConfiguredSources: (_) => Future.value([_source]),
       playlistService: service,
