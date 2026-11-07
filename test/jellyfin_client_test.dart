@@ -337,6 +337,56 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final size in const [
+    Size(320, 640),
+    Size(360, 740),
+    Size(412, 915),
+    Size(740, 360),
+    Size(800, 1280),
+  ]) {
+    testWidgets('populated Movies & Series home and Connect fit $size', (
+      tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final server = _FakeJellyfin();
+      final store = JellyfinAccountStore(secrets: MemoryJellyfinSecretStore());
+      await store.save(1, _account());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiveTvMediaScreen(
+            profileId: 1,
+            catalogCache: MediaCatalogCache.disabled(),
+            playlistService: const _NoSourcesService(),
+            loadConfiguredSources: (_) async => const [],
+            jellyfinStore: store,
+            jellyfinTransport: server.call,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('media-home')), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: 'home at $size');
+      await tester.tap(find.byKey(const ValueKey('media-tab-movies')));
+      await tester.pumpAndSettle();
+      expect(find.text('Movie 1'), findsWidgets);
+      expect(tester.takeException(), isNull, reason: 'grid at $size');
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: JellyfinConnectScreen(
+            profileId: 2,
+            store: JellyfinAccountStore(secrets: MemoryJellyfinSecretStore()),
+            transport: server.call,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'connect at $size');
+    });
+  }
+
   testWidgets('Connect screen signs in with a password and lists libraries', (
     tester,
   ) async {

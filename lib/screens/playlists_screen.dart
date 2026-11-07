@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:pstube_engine/pstube_engine.dart';
@@ -10,7 +11,9 @@ import '../services/live_tv_control.dart';
 import '../services/live_tv_sync.dart';
 import '../services/music_service.dart';
 import '../services/playlist_hub.dart';
+import '../services/playlist_playback.dart';
 import '../services/podcast_service.dart';
+import '../services/profile_sync.dart';
 import '../theme/millitop_visual_theme.dart';
 import 'live_tv_media_screen.dart';
 import 'live_tv_screen.dart';
@@ -44,6 +47,33 @@ Widget hubDestination(int profile, HubItem item) => switch (item.type) {
     initialVideo: TubeVideo.fromJson(item.payload),
   ),
 };
+
+/// Opens one playlist step: runs of songs play as one Music queue and
+/// YouTube closes itself when the video ends so the next item can start.
+Future<void> openPlaylistSegment(
+  BuildContext context,
+  int profile,
+  PlaylistSegment segment,
+) {
+  final item = segment.first;
+  final Widget page = switch (item.type) {
+    HubMediaType.song => MusicScreen(
+      profileId: profile,
+      initialQueue: [
+        for (final song in segment.items) MusicTrack.fromJson(song.payload),
+      ],
+    ),
+    HubMediaType.youtube => YouTubeScreen(
+      profileId: profile,
+      initialVideo: TubeVideo.fromJson(item.payload),
+      exitWhenFinished: true,
+    ),
+    _ => hubDestination(profile, item),
+  };
+  return Navigator.of(
+    context,
+  ).push<void>(MaterialPageRoute(builder: (_) => page));
+}
 
 IconData _mediaIcon(HubMediaType type) => switch (type) {
   HubMediaType.channel => Icons.live_tv,
@@ -86,6 +116,25 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
   void initState() {
     super.initState();
     unawaited(_load());
+    unawaited(_pullRemote());
+  }
+
+  /// Picks up playlists and favorites saved on the user's other devices.
+  Future<void> _pullRemote() async {
+    final profile = widget.profileId;
+    final changed = await ProfileSync.pullCollections(profile);
+    if (changed && mounted && widget.profileId == profile) await _load();
+  }
+
+  Future<void> _play(HubPlaylist list, {bool shuffle = false}) async {
+    if (list.items.isEmpty) return;
+    final profile = widget.profileId;
+    await PlaylistPlayback(
+      profileId: profile,
+      open: (context, segment) =>
+          openPlaylistSegment(context, profile, segment),
+    ).play(context, name: list.name, items: list.items, shuffle: shuffle);
+    if (mounted) await _load();
   }
 
   @override
@@ -134,7 +183,10 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty || !DeviceConnection.instance.isConnected) {
       if (mounted && widget.profileId == profile) {
-        setState(() => syncWarning = 'Saved on this device. Connect and refresh to sync across your devices.');
+        setState(
+          () => syncWarning =
+              'Saved on this device. Connect and refresh to sync across your devices.',
+        );
       }
       return;
     }
@@ -263,7 +315,9 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
   Future<void> _add(HubItem item, {int? ownerProfile}) async {
     if (!mounted) return;
     if (ownerProfile != null && ownerProfile != widget.profileId) {
-      debugPrint('Saved media selection ignored because the active profile changed.');
+      debugPrint(
+        'Saved media selection ignored because the active profile changed.',
+      );
       return;
     }
     final owner = widget.profileId;
@@ -273,8 +327,8 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Add to playlist'),
         content: SizedBox(
-          width: 480,
-          height: 300,
+          width: math.min(480, MediaQuery.sizeOf(ctx).width - 48),
+          height: math.min(300, MediaQuery.sizeOf(ctx).height * .5),
           child: ListView(
             children: [
               ListTile(
@@ -325,6 +379,10 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
   Future<void> _collectionAction(HubPlaylist list, String action) async {
     final owner = widget.profileId;
     switch (action) {
+      case 'play':
+        await _play(list);
+      case 'shuffle':
+        await _play(list, shuffle: true);
       case 'copy':
         final name = await _name(
           'Copy to global playlist',
@@ -392,6 +450,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
             ownerProfile: owner,
           ),
           onAdd: (item) => _add(item, ownerProfile: owner),
+          onPlay: (current, shuffle) => _play(current, shuffle: shuffle),
           onSave: list.editable
               ? (items) async {
                   HubPlaylist? saved;
@@ -681,6 +740,16 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                             onSelected: (value) =>
                                 unawaited(_collectionAction(list, value)),
                             itemBuilder: (_) => [
+                              if (list.items.isNotEmpty) ...[
+                                const PopupMenuItem(
+                                  value: 'play',
+                                  child: Text('Play all'),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'shuffle',
+                                  child: Text('Shuffle'),
+                                ),
+                              ],
                               const PopupMenuItem(
                                 value: 'copy',
                                 child: Text('Copy to global playlist'),
@@ -828,7 +897,9 @@ class _PlaylistContents extends StatefulWidget {
   final bool Function(HubItem) isFavorite;
   final Future<void> Function(HubItem) onOpen, onFavorite, onAdd;
   final Future<HubPlaylist?> Function(List<HubItem>)? onSave;
+  final Future<void> Function(HubPlaylist playlist, bool shuffle)? onPlay;
   const _PlaylistContents({
+    this.onPlay,
     required this.playlist,
     required this.available,
     required this.isFavorite,
@@ -870,8 +941,8 @@ class _PlaylistContentsState extends State<_PlaylistContents> {
       builder: (ctx) => AlertDialog(
         title: const Text('Add saved media'),
         content: SizedBox(
-          width: 520,
-          height: 360,
+          width: math.min(520, MediaQuery.sizeOf(ctx).width - 48),
+          height: math.min(360, MediaQuery.sizeOf(ctx).height * .55),
           child: choices.isEmpty
               ? const Text(
                   'Favorite media in your apps first, then add it to this playlist.',
@@ -918,6 +989,41 @@ class _PlaylistContentsState extends State<_PlaylistContents> {
     body: Column(
       children: [
         if (busy) const LinearProgressIndicator(),
+        if (widget.onPlay != null && playlist.items.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            child: Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                FilledButton.icon(
+                  key: const ValueKey('playlist-play'),
+                  autofocus: true,
+                  onPressed: busy
+                      ? null
+                      : () => unawaited(widget.onPlay!(playlist, false)),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Play all'),
+                ),
+                OutlinedButton.icon(
+                  key: const ValueKey('playlist-shuffle'),
+                  onPressed: busy
+                      ? null
+                      : () => unawaited(widget.onPlay!(playlist, true)),
+                  icon: const Icon(Icons.shuffle),
+                  label: const Text('Shuffle'),
+                ),
+                Text(
+                  '${playlist.items.length} items · '
+                  '${{for (final item in playlist.items) item.label}.join(', ')}',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
         if (error.isNotEmpty)
           Padding(padding: const EdgeInsets.all(12), child: Text(error)),
         if (!playlist.editable)

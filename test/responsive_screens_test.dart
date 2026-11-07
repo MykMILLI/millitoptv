@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/library/library_models.dart';
 import 'package:millitop_tv/library/library_repository.dart';
 import 'package:millitop_tv/screens/app_settings_screen.dart';
+import 'package:millitop_tv/screens/diagnostics_screen.dart';
 import 'package:millitop_tv/screens/live_tv_screen.dart';
 import 'package:millitop_tv/screens/live_tv_media_screen.dart';
 import 'package:millitop_tv/services/media_catalog_cache.dart';
@@ -40,6 +41,7 @@ void main() {
         addTearDown(() => themes.setTheme(previous));
         for (final screen in [
           const AppSettingsScreen(profileId: 1),
+          const DiagnosticsScreen(),
           MediaLibraryHome(profileId: 1, repository: _EmptyFolders()),
           MediaLibraryHome(
             profileId: 1,

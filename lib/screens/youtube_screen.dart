@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -6,12 +7,16 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:pstube_engine/pstube_engine.dart';
+import '../services/app_log.dart';
 import '../services/device_connection.dart';
+import '../services/global_playlists.dart';
 import '../services/home_preferences.dart';
-import '../services/live_tv_control.dart';
+import '../services/profile_sync.dart';
 import '../services/tube_downloads.dart';
 import '../services/tube_library.dart';
 import '../theme/millitop_visual_theme.dart';
+import '../widgets/mixed_playlist_picker.dart';
+import 'playlists_screen.dart';
 
 String tubeTime(int seconds) {
   if (seconds >= 3600) {
@@ -25,12 +30,16 @@ class YouTubeScreen extends StatefulWidget {
   final TubeEngine? engine;
   final TubeDownloads? downloads;
   final TubeVideo? initialVideo;
+
+  /// Close the screen when [initialVideo] finishes (playlist playback).
+  final bool exitWhenFinished;
   const YouTubeScreen({
     super.key,
     required this.profileId,
     this.engine,
     this.downloads,
     this.initialVideo,
+    this.exitWhenFinished = false,
   });
   @override
   State<YouTubeScreen> createState() => _YouTubeScreenState();
@@ -81,6 +90,9 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
   Future<void> _initialize() async {
     try {
       library = await store.load(widget.profileId);
+      // Pick up subscriptions, favorites and history saved on other paired
+      // devices. Runs alongside the first page so opening is not blocked.
+      unawaited(_pullRemote());
       final prefs = await HomePreferences().tubePipedUrl(widget.profileId);
       if (engine is PsTubeEngine) (engine as PsTubeEngine).pipedUrl = prefs;
       final saved = await downloads.list(widget.profileId);
@@ -106,6 +118,31 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
     }
   }
 
+  static const _librarySections = {
+    'Subscriptions',
+    'Favorites',
+    'Watch later',
+    'History',
+    'Playlists',
+  };
+
+  /// Merges the server copy of this profile's YouTube library and refreshes
+  /// the screen if anything changed.
+  Future<void> _pullRemote() async {
+    final pulled = await ProfileSync.pullCollections(widget.profileId);
+    if (!pulled || !mounted) return;
+    await writes;
+    final merged = await store.load(widget.profileId);
+    if (!mounted) return;
+    final changed = jsonEncode(merged.entries) != jsonEncode(library.entries);
+    setState(() => library = merged);
+    if (changed &&
+        (_librarySections.contains(section) ||
+            section.startsWith('Playlist:'))) {
+      await _load();
+    }
+  }
+
   Future<void> _action(Future<void> Function() action) async {
     try {
       await action();
@@ -117,27 +154,31 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
 
   Future<void> _persist({bool sync = true}) async {
     final snapshot = library;
-    final pending = writes.then((_) => store.save(widget.profileId, snapshot));
+    // Merge rather than overwrite so entries that arrived from another
+    // device in the background are kept.
+    final pending = writes.then(
+      (_) => store.applySync(widget.profileId, snapshot.toJson()),
+    );
     writes = pending.catchError((Object e) {
       debugPrint('Could not save YouTube profile: $e');
       if (mounted) setState(() => error = 'Could not save YouTube profile: $e');
     });
     await pending;
     if (!sync || !DeviceConnection.instance.isConnected) return;
-    final prefs = HomePreferences();
     try {
-      await LiveTvControlService().pushConfig(
-        expectedConnection: DeviceConnection.instance.connectionKey,
-        profileId: widget.profileId,
-        sources: await prefs.liveTvSources(widget.profileId),
-        tmdbApiKey: await prefs.tmdbApiKey(widget.profileId),
-        profileState: await prefs.liveTvProfileSyncState(widget.profileId),
+      await ProfileSync.push(widget.profileId);
+      final merged = await store.load(widget.profileId);
+      if (mounted) setState(() => library = merged);
+    } catch (e, st) {
+      AppLog.warn(
+        LogCategory.sync,
+        'YouTube library sync failed; saved on this device',
+        error: e,
+        stackTrace: st,
       );
-    } catch (e) {
-      debugPrint('YouTube profile sync failed: $e');
       if (mounted) {
         setState(
-          () => error = 'Saved locally; YouTube profile sync failed: $e',
+          () => error = 'Saved on this device; sync failed and will retry. $e',
         );
       }
     }
@@ -147,7 +188,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
     setState(() => library = library.toggle(collection, video));
     await _persist();
     if ([
-      'Liked videos',
+      'Favorites',
       'Watch later',
       'Subscriptions',
       'Playlists',
@@ -178,7 +219,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
       switch (targetSection) {
         case 'History':
           result = TubePage(library.watched);
-        case 'Liked videos':
+        case 'Favorites':
           result = TubePage(library.list('liked'));
         case 'Watch later':
           result = TubePage(library.list('later'));
@@ -187,6 +228,12 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
         case 'Playlists':
           result = TubePage(library.playlists.expand(library.list).toList());
         case 'Subscriptions':
+          // Make sure channels subscribed on another device are included.
+          if (await ProfileSync.pullCollections(widget.profileId)) {
+            await writes;
+            library = await store.load(widget.profileId);
+          }
+          if (!mounted || request != generation) return;
           final channels = library.list('subscriptions');
           final results = <TubePage>[];
           for (var index = 0; index < channels.length; index += 4) {
@@ -351,7 +398,11 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
             }
           }),
           created.stream.completed.listen((value) {
-            if (value) _saveProgress(sync: true);
+            if (!value) return;
+            _saveProgress(sync: true);
+            if (widget.exitWhenFinished && mounted) {
+              unawaited(Navigator.maybePop(context));
+            }
           }),
         ]);
       }
@@ -525,15 +576,26 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
     }
   }
 
+  /// Adds the video to one of the profile's mixed playlists, where it sits
+  /// alongside songs, movies, shows and podcasts.
   Future<void> _playlist(TubeVideo video) async {
-    final name = await _input('Add to local playlist', 'Playlist name');
-    if (name == null) return;
-    if (name.isEmpty || name.length > 80 || name.contains(':')) {
-      throw const FormatException(
-        'Use a playlist name of 1-80 characters without a colon.',
-      );
-    }
-    await _toggle('playlist/$name', video);
+    await addToMixedPlaylist(
+      context,
+      profileId: widget.profileId,
+      item: HubItem.youtube(video),
+    );
+  }
+
+  Future<void> _openMixedPlaylists() async {
+    scaffold.currentState?.closeDrawer();
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PlaylistsScreen(profileId: widget.profileId),
+      ),
+    );
+    if (!mounted) return;
+    final latest = await store.load(widget.profileId);
+    if (mounted) setState(() => library = latest);
   }
 
   Future<void> _settings() async {
@@ -543,7 +605,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
         title: const Text('YouTube / PsTube'),
         content: const Text(
           'Powered by the GPLv3 PsTube engine (YouTubeExplode + Piped). '
-          'Subscriptions, likes, history and playlists belong to this MILLITOPTV profile, not your Google account. '
+          'Subscriptions, favorites, history and playlists belong to this MILLITOPTV profile and sync to every device paired with your account. They are not read from your Google account. '
           'Piped receives public search/video requests when used. Public server availability varies. '
           'Uploads, purchases and posting comments require the official YouTube app.',
         ),
@@ -725,9 +787,21 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
         child: Text('You', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       _nav('History', Icons.history),
-      _nav('Playlists', Icons.playlist_play),
+      ListTile(
+        key: const ValueKey('youtube-mixed-playlists'),
+        dense: true,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        leading: const Icon(Icons.queue_play_next, size: 21),
+        title: const Text(
+          'My playlists',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: const Text('Mixed with music, movies & more'),
+        onTap: () => unawaited(_openMixedPlaylists()),
+      ),
       _nav('Watch later', Icons.schedule),
-      _nav('Liked videos', Icons.thumb_up_outlined),
+      _nav('Favorites', Icons.favorite_border),
       _nav('Downloads', Icons.download_outlined),
       const Divider(height: 28),
       const Padding(
@@ -753,7 +827,14 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
           padding: EdgeInsets.all(8),
           child: Text('Subscribe from a video to build your feed.'),
         ),
-      if (library.playlists.isNotEmpty) const Divider(),
+      if (library.playlists.isNotEmpty) ...[
+        const Divider(),
+        _nav(
+          'Older YouTube playlists',
+          Icons.playlist_play,
+          destination: 'Playlists',
+        ),
+      ],
       for (final name in library.playlists)
         _nav(
           name.substring(9),
@@ -912,8 +993,8 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
                   value: 'liked',
                   child: Text(
                     library.contains('liked', video)
-                        ? 'Remove local like'
-                        : 'Like locally',
+                        ? 'Remove from Favorites'
+                        : 'Add to Favorites',
                   ),
                 ),
                 const PopupMenuItem(
@@ -1004,11 +1085,14 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
                 ),
               ),
               IconButton(
-                tooltip: 'Like locally',
+                key: const ValueKey('youtube-favorite'),
+                tooltip: library.contains('liked', video)
+                    ? 'Remove from Favorites'
+                    : 'Add to Favorites',
                 icon: Icon(
                   library.contains('liked', video)
-                      ? Icons.thumb_up
-                      : Icons.thumb_up_outlined,
+                      ? Icons.favorite
+                      : Icons.favorite_border,
                 ),
                 onPressed: () =>
                     unawaited(_action(() => _toggle('liked', video))),

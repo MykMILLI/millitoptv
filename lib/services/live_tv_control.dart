@@ -1,3 +1,4 @@
+import 'app_log.dart';
 import 'device_connection.dart';
 import 'home_preferences.dart';
 import 'live_tv_source.dart';
@@ -14,13 +15,59 @@ class LiveTvControlService {
     required String tmdbApiKey,
     Map<String, dynamic>? profileState,
   }) async {
+    final state = profileState == null
+        ? null
+        : await _withRemoteCollections(
+            expectedConnection: expectedConnection,
+            profileId: profileId,
+            profileState: profileState,
+          );
     await connection.postDevice('/api/device/live-tv/config', {
       'action': 'set',
       'profileId': profileId,
       'tmdbApiKey': tmdbApiKey,
       'sources': sources.map((item) => item.toJson()).toList(),
-      if (profileState != null) 'profileState': profileState,
+      if (state != null) 'profileState': state,
     }, expectedConnection: expectedConnection);
+  }
+
+  /// The server keeps one profile snapshot and each push replaces it. Before
+  /// uploading, fold in the server's copy of the per-item collections
+  /// (YouTube subscriptions/likes/history, mixed playlists and favorites)
+  /// so a device never erases what another device added since its
+  /// last pull. Those collections merge per item by timestamp, so this is
+  /// safe to run on every push.
+  Future<Map<String, dynamic>> _withRemoteCollections({
+    required String expectedConnection,
+    required int profileId,
+    required Map<String, dynamic> profileState,
+  }) async {
+    try {
+      final remote = await pullConfig(
+        expectedConnection: expectedConnection,
+        profileId: profileId,
+      );
+      final remoteState = remote['profileState'];
+      if (remoteState is! Map) {
+        return profileState;
+      }
+      final prefs = HomePreferences();
+      await prefs.mergeCollectionSyncState(
+        profileId,
+        Map<String, dynamic>.from(remoteState),
+      );
+      return {...profileState, ...await prefs.collectionSyncState(profileId)};
+    } catch (error, stack) {
+      AppLog.warn(
+        LogCategory.sync,
+        'Could not merge the server profile before uploading; '
+        'uploading this device\'s copy',
+        error: error,
+        stackTrace: stack,
+        details: {'profileId': profileId},
+      );
+      return profileState;
+    }
   }
 
   Future<Map<String, dynamic>> pullConfig({

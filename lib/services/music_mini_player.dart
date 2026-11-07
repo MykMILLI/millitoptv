@@ -10,7 +10,8 @@ class MusicMiniPlayerService extends ChangeNotifier {
   static final instance = MusicMiniPlayerService._();
 
   Player? _player;
-  final List<StreamSubscription<dynamic>> _subs = <StreamSubscription<dynamic>>[];
+  final List<StreamSubscription<dynamic>> _subs =
+      <StreamSubscription<dynamic>>[];
 
   bool _visible = false;
   bool _playing = false;
@@ -19,6 +20,10 @@ class MusicMiniPlayerService extends ChangeNotifier {
   List<MusicTrack> _librarySongs = const <MusicTrack>[];
   MusicServerConfig? _config;
 
+  /// Track currently opened in [player].
+  String? loadedTrackId;
+
+  Player? get player => _player;
   bool get visible => _visible && _queue.isNotEmpty;
   bool get playing => _playing;
   List<MusicTrack> get queue => _queue;
@@ -38,7 +43,11 @@ class MusicMiniPlayerService extends ChangeNotifier {
     required Duration position,
     required Duration duration,
     required MusicServerConfig? config,
+    String? loadedTrackId,
   }) {
+    if (loadedTrackId != null) {
+      this.loadedTrackId = loadedTrackId;
+    }
     if (!identical(_player, player)) {
       for (final sub in _subs) {
         unawaited(sub.cancel());
@@ -98,8 +107,9 @@ class MusicMiniPlayerService extends ChangeNotifier {
     if (_playing) {
       await current.pause();
     } else {
-      if (_queue.isNotEmpty) {
-        await playAt(_queueIndex.clamp(0, _queue.length - 1));
+      final index = _queueIndex.clamp(0, _queue.length - 1);
+      if (_queue.isNotEmpty && loadedTrackId != _queue[index].id) {
+        await playAt(index);
       } else {
         await current.play();
       }
@@ -124,6 +134,7 @@ class MusicMiniPlayerService extends ChangeNotifier {
     }
     await current.open(Media(streamUrl));
     await current.play();
+    loadedTrackId = track.id;
     _queueIndex = index;
     notifyListeners();
   }

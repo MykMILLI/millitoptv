@@ -11,6 +11,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
+import '../services/playlist_hub.dart';
+import '../widgets/mixed_playlist_picker.dart';
 import '../services/device_connection.dart';
 import '../services/firefox_browser.dart';
 import '../services/home_preferences.dart';
@@ -2371,6 +2373,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
   }
 
+  static const _mixedPlaylistChoice = '__mixed__';
+
   Future<void> _addToPlaylist(LiveTvLibraryItem item) async {
     if (playlists.isEmpty) {
       await _createPlaylist();
@@ -2394,6 +2398,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
+            ListTile(
+              key: const ValueKey('vod-mixed-playlist'),
+              leading: const Icon(Icons.playlist_add_circle_outlined),
+              title: const Text('Mixed playlist...'),
+              subtitle: const Text('Mix with music, YouTube and podcasts'),
+              onTap: () => Navigator.pop(ctx, _mixedPlaylistChoice),
+            ),
+            const Divider(),
             for (final playlist in playlists)
               ListTile(
                 leading: const Icon(Icons.playlist_add),
@@ -2405,7 +2417,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         ),
       ),
     );
-    if (selectedPlaylistId == null) {
+    if (selectedPlaylistId == null || !mounted) {
+      return;
+    }
+    if (selectedPlaylistId == _mixedPlaylistChoice) {
+      await addToMixedPlaylist(
+        context,
+        profileId: widget.profileId,
+        item: vodHubItem(item),
+      );
       return;
     }
     final playlist = playlists.firstWhere(

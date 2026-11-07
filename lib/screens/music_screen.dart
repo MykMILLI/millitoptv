@@ -12,6 +12,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 
+import '../services/global_playlists.dart';
+import '../widgets/mixed_playlist_picker.dart';
 import '../services/device_connection.dart';
 import '../services/audio_background_service.dart';
 import '../services/group_listening_service.dart';
@@ -545,12 +547,21 @@ class MusicScreen extends StatefulWidget {
   final String? initialSection;
   final String? initialQuery;
   final MusicTrack? initialTrack;
+
+  /// Songs to play in this order (a mixed playlist's run of songs).
+  final List<MusicTrack>? initialQueue;
+
+  /// Start the saved listening session right away, at the saved position
+  /// (used by "Continue Listening" on the home screen).
+  final bool resumeSession;
   const MusicScreen({
     super.key,
     required this.profileId,
     this.initialSection,
     this.initialQuery,
     this.initialTrack,
+    this.initialQueue,
+    this.resumeSession = false,
   });
 
   @override
@@ -559,6 +570,8 @@ class MusicScreen extends StatefulWidget {
 
 class _MusicScreenState extends State<MusicScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
+  bool get _hasInitialPlayback =>
+      widget.initialTrack != null || (widget.initialQueue?.isNotEmpty ?? false);
   final music = MusicService();
   final liveTvControl = LiveTvControlService();
   final widgetService = const MusicWidgetService();
@@ -658,6 +671,14 @@ class _MusicScreenState extends State<MusicScreen>
     'invitePolicy': 'everyone',
   };
 
+  /// Track currently opened in [player]; null when the queue was only
+  /// restored from a saved session and nothing has been loaded yet.
+  String? loadedTrackId;
+
+  /// Where a restored session left off; used the first time Play is pressed.
+  Duration resumePosition = Duration.zero;
+  int _sessionSaveTick = 0;
+
   MusicTrack? get activeTrack {
     if (activeQueue.isEmpty ||
         activeQueueIndex < 0 ||
@@ -694,10 +715,14 @@ class _MusicScreenState extends State<MusicScreen>
     );
     unawaited(_configureAudioSession());
     unawaited(_load());
-    miniSyncTimer = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => _syncMiniPlayerFromState(),
-    );
+    miniSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _syncMiniPlayerFromState();
+      // Keep the saved position fresh so "Continue Listening" resumes close
+      // to where playback actually stopped.
+      if (playing && ++_sessionSaveTick % 10 == 0) {
+        unawaited(_savePlaybackSession());
+      }
+    });
   }
 
   @override
@@ -725,6 +750,7 @@ class _MusicScreenState extends State<MusicScreen>
     }
     sleepTimer?.cancel();
     miniSyncTimer?.cancel();
+    unawaited(_savePlaybackSession());
     unawaited(_persistUiState());
     _syncMiniPlayerFromState(showMini: activeQueue.isNotEmpty);
     vinylController?.dispose();
@@ -745,6 +771,7 @@ class _MusicScreenState extends State<MusicScreen>
       position: position,
       duration: duration,
       config: config,
+      loadedTrackId: loadedTrackId,
     );
     if (showMini) {
       MusicMiniPlayerService.instance.showMini();
@@ -786,7 +813,16 @@ class _MusicScreenState extends State<MusicScreen>
     }
     try {
       MediaKit.ensureInitialized();
-      final created = Player();
+      // Reuse the player that kept running in the mini player so reopening
+      // Music does not start a second, overlapping stream.
+      final shared = MusicMiniPlayerService.instance.player;
+      final created = shared ?? Player();
+      if (shared != null) {
+        loadedTrackId = MusicMiniPlayerService.instance.loadedTrackId;
+        playing = shared.state.playing;
+        position = shared.state.position;
+        duration = shared.state.duration;
+      }
       subs.add(
         created.stream.position.listen((value) {
           if (mounted) {
@@ -1209,12 +1245,12 @@ class _MusicScreenState extends State<MusicScreen>
           status =
               'Could not refresh remote favorites. Showing local favorites.';
         }
-        if (widget.initialTrack == null) {
+        if (!_hasInitialPlayback) {
           picks = await client!.randomSongs(limit: 24);
         }
         loadingLibrary = true;
         unawaited(_hydrateLibrary(client!));
-        if (widget.initialTrack == null) {
+        if (!_hasInitialPlayback) {
           unawaited(_restorePlaybackSession());
         }
       }
@@ -1243,6 +1279,26 @@ class _MusicScreenState extends State<MusicScreen>
               initialTrack.streamUrl,
         );
         await _playTrack(refreshed);
+      }
+      final queue = widget.initialQueue;
+      if (initialTrack == null && queue != null && queue.isNotEmpty) {
+        final tracks = [
+          for (final track in queue)
+            MusicTrack(
+              id: track.id,
+              title: track.title,
+              artist: track.artist,
+              album: track.album,
+              genre: track.genre,
+              year: track.year,
+              durationSeconds: track.durationSeconds,
+              coverArtId: track.coverArtId,
+              streamUrl:
+                  client?.streamUri(track.id).toString() ?? track.streamUrl,
+            ),
+        ];
+        await _playFromList(tracks, 0);
+        queueContextLabel = 'Playlist';
       }
     } catch (e) {
       if (!mounted) {
@@ -1415,8 +1471,29 @@ class _MusicScreenState extends State<MusicScreen>
       repeatMode = repeat;
       queueContextLabel = saved['queueContextLabel']?.toString() ?? '';
       playedQueueHistory = history;
+      final savedPosition = Duration(
+        milliseconds: int.tryParse(saved['positionMs']?.toString() ?? '') ?? 0,
+      );
+      resumePosition = savedPosition;
+      if (loadedTrackId == null) {
+        position = savedPosition;
+        duration = Duration(
+          seconds: restoredEntries[restoredIndex].track.durationSeconds,
+        );
+      }
       status = 'Restored last listening session.';
     });
+    final shared = MusicMiniPlayerService.instance;
+    if (shared.player != null &&
+        shared.loadedTrackId == restoredEntries[restoredIndex].track.id) {
+      // Still playing in the background: attach instead of restarting.
+      await _ensurePlayer();
+      if (mounted) setState(() {});
+      return;
+    }
+    if (widget.resumeSession && mounted) {
+      await _resumeActiveTrack();
+    }
   }
 
   Future<void> _saveSetup(
@@ -1469,6 +1546,7 @@ class _MusicScreenState extends State<MusicScreen>
     int? queueIndex,
     _QueueEntryType queueEntryType = _QueueEntryType.context,
     String? queueSourceLabel,
+    Duration? startAt,
   }) async {
     String? mediaSource;
     final download = downloadIndex[track.id];
@@ -1503,8 +1581,13 @@ class _MusicScreenState extends State<MusicScreen>
     }
     final activePlayer = await _ensurePlayer();
     try {
-      await activePlayer.open(Media(mediaSource));
+      final resumeAt = startAt != null && startAt > const Duration(seconds: 1)
+          ? startAt
+          : null;
+      await activePlayer.open(Media(mediaSource, start: resumeAt));
       await activePlayer.play();
+      loadedTrackId = track.id;
+      resumePosition = Duration.zero;
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -3653,7 +3736,11 @@ class _MusicScreenState extends State<MusicScreen>
 
   Future<void> _pickPlaylistForTrack(MusicTrack track) async {
     if (playlists.isEmpty) {
-      setState(() => status = 'Create a playlist first.');
+      await addToMixedPlaylist(
+        context,
+        profileId: widget.profileId,
+        item: HubItem.song(track),
+      );
       return;
     }
     await showDialog<void>(
@@ -3661,10 +3748,27 @@ class _MusicScreenState extends State<MusicScreen>
       builder: (context) => AlertDialog(
         title: const Text('Add to playlist'),
         content: SizedBox(
-          width: 360,
+          width: math.min(360, MediaQuery.sizeOf(context).width - 48),
           child: ListView(
             shrinkWrap: true,
             children: [
+              ListTile(
+                key: const ValueKey('music-mixed-playlist'),
+                leading: const Icon(Icons.playlist_add_circle_outlined),
+                title: const Text('Mixed playlist...'),
+                subtitle: const Text('Mix with videos, shows and podcasts'),
+                onTap: () {
+                  Navigator.pop(context);
+                  unawaited(
+                    addToMixedPlaylist(
+                      this.context,
+                      profileId: widget.profileId,
+                      item: HubItem.song(track),
+                    ),
+                  );
+                },
+              ),
+              const Divider(),
               for (final list in playlists)
                 ListTile(
                   leading: const Icon(Icons.queue_music),
@@ -3860,13 +3964,59 @@ class _MusicScreenState extends State<MusicScreen>
     unawaited(_savePlaybackSession());
   }
 
+  /// Plays the current queue entry, from the saved position when the queue
+  /// was restored from an earlier session.
+  Future<void> _resumeActiveTrack() async {
+    final track = activeTrack;
+    if (track == null) {
+      return;
+    }
+    await _playTrack(
+      _withFreshStream(track),
+      queue: activeQueue,
+      queueIndex: activeQueueIndex,
+      startAt: resumePosition,
+    );
+  }
+
+  MusicTrack _withFreshStream(MusicTrack track) {
+    final nav = client;
+    if (nav == null) {
+      return track;
+    }
+    return MusicTrack(
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      genre: track.genre,
+      year: track.year,
+      durationSeconds: track.durationSeconds,
+      coverArtId: track.coverArtId,
+      streamUrl: nav.streamUri(track.id).toString(),
+    );
+  }
+
   Future<void> _togglePlayPause() async {
+    final track = activeTrack;
+    if (track == null) {
+      // Nothing queued yet: Play starts the songs on screen.
+      final tracks = _libraryTracks;
+      if (tracks.isNotEmpty) {
+        await _playFromList(tracks, 0);
+      }
+      return;
+    }
     final activePlayer = player;
-    if (activePlayer == null) {
+    if (activePlayer == null || loadedTrackId != track.id) {
+      // The queue came from a saved session (or the track changed) but the
+      // player has nothing loaded, so play() alone would do nothing.
+      await _resumeActiveTrack();
       return;
     }
     if (playing) {
       await activePlayer.pause();
+      unawaited(_savePlaybackSession());
       AudioBackgroundService.instance.updatePlayback(
         playing: false,
         position: position,

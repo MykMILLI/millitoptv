@@ -559,7 +559,8 @@ class _HomeAppTilesState extends State<HomeAppTiles>
   Future<void> _openRecentMusic() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (_) => MusicScreen(profileId: widget.profileId),
+        builder: (_) =>
+            MusicScreen(profileId: widget.profileId, resumeSession: true),
       ),
     );
     await _load();

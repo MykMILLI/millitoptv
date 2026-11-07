@@ -905,6 +905,34 @@ class HomePreferences {
     };
   }
 
+  /// The per-item, timestamp-merged parts of the profile sync state.
+  Future<Map<String, dynamic>> collectionSyncState(int profile) async => {
+    'youtube': (await TubeStore().load(profile)).toJson(),
+    'globalPlaylists': (await GlobalPlaylistStore().load(profile)).toJson(),
+  };
+
+  /// Merges only the timestamped collections from [state]; settings that are
+  /// last-writer-wins (theme, sources, ...) are left untouched.
+  Future<void> mergeCollectionSyncState(
+    int profile,
+    Map<String, dynamic> state,
+  ) async {
+    final globalPlaylistsRaw = state['globalPlaylists'];
+    if (globalPlaylistsRaw is Map) {
+      await GlobalPlaylistStore().applySync(
+        profile,
+        Map<String, dynamic>.from(globalPlaylistsRaw),
+      );
+    }
+    final youtubeRaw = state['youtube'];
+    if (youtubeRaw is Map) {
+      await TubeStore().applySync(
+        profile,
+        Map<String, dynamic>.from(youtubeRaw),
+      );
+    }
+  }
+
   Future<void> applyLiveTvProfileSyncState(
     int profile,
     Map<String, dynamic> state,

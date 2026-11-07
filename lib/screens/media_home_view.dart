@@ -114,7 +114,8 @@ class _HeroBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
-    final height = width < 600 ? 230.0 : 320.0;
+    final phone = width < 600;
+    final height = phone ? 260.0 : 320.0;
     return Container(
       height: height,
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
@@ -148,7 +149,7 @@ class _HeroBanner extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.all(phone ? 16 : 24),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 560),
               child: Column(
@@ -162,8 +163,8 @@ class _HeroBanner extends StatelessWidget {
                     hero.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 30,
+                    style: TextStyle(
+                      fontSize: phone ? 24 : 30,
                       fontWeight: FontWeight.w800,
                       height: 1.1,
                     ),
@@ -172,6 +173,8 @@ class _HeroBanner extends StatelessWidget {
                     const SizedBox(height: 6),
                     Text(
                       hero.meta!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: MediaSourceColors.muted),
                     ),
                   ],

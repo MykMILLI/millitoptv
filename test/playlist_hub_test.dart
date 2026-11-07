@@ -260,23 +260,36 @@ void main() {
     expect((await repository.load(1)).playlists, isNotEmpty);
   });
 
-  test('channel favorites and removals survive legacy snapshots across sources', () async {
-    await _seed(1);
-    final channel = vodHubItem(_vod('channel'));
-    expect(await channelFavoriteKeys(1), contains('provider-1|same-id'));
-    await PlaylistHubRepository().setFavorite(1, channel, false);
-    expect(await channelFavoriteKeys(1), isNot(contains('provider-1|same-id')));
-    await HomePreferences().applyLiveTvProfileSyncState(1, {
-      'favorites': [_vod('channel').toJson()],
-    });
-    expect(await channelFavoriteKeys(1), isEmpty);
-    expect((await PlaylistHubRepository().load(1)).favorites
-      .where((v) => v.type == HubMediaType.channel), isEmpty);
-    await PlaylistHubRepository().setFavorite(1,
-      vodHubItem(_vod('channel', source: 'provider-2')), true);
-    expect(await channelFavoriteKeys(1), {'provider-2|same-id'});
-    expect(await channelFavoriteKeys(2), isEmpty);
-  });
+  test(
+    'channel favorites and removals survive legacy snapshots across sources',
+    () async {
+      await _seed(1);
+      final channel = vodHubItem(_vod('channel'));
+      expect(await channelFavoriteKeys(1), contains('provider-1|same-id'));
+      await PlaylistHubRepository().setFavorite(1, channel, false);
+      expect(
+        await channelFavoriteKeys(1),
+        isNot(contains('provider-1|same-id')),
+      );
+      await HomePreferences().applyLiveTvProfileSyncState(1, {
+        'favorites': [_vod('channel').toJson()],
+      });
+      expect(await channelFavoriteKeys(1), isEmpty);
+      expect(
+        (await PlaylistHubRepository().load(
+          1,
+        )).favorites.where((v) => v.type == HubMediaType.channel),
+        isEmpty,
+      );
+      await PlaylistHubRepository().setFavorite(
+        1,
+        vodHubItem(_vod('channel', source: 'provider-2')),
+        true,
+      );
+      expect(await channelFavoriteKeys(1), {'provider-2|same-id'});
+      expect(await channelFavoriteKeys(2), isEmpty);
+    },
+  );
 
   test(
     'suggestions adapt to history and artist interests without changing saved playlists',
@@ -506,16 +519,28 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(ListTile, _song.title));
       await tester.pumpAndSettle();
-      expect((await GlobalPlaylistStore().load(1)).playlists.values.single.items
-        .map((v) => v.type), [HubMediaType.podcast, HubMediaType.song]);
+      expect(
+        (await GlobalPlaylistStore().load(
+          1,
+        )).playlists.values.single.items.map((v) => v.type),
+        [HubMediaType.podcast, HubMediaType.song],
+      );
       await tester.tap(find.byTooltip('Move down').first);
       await tester.pumpAndSettle();
-      expect((await GlobalPlaylistStore().load(1)).playlists.values.single.items
-        .map((v) => v.type), [HubMediaType.song, HubMediaType.podcast]);
+      expect(
+        (await GlobalPlaylistStore().load(
+          1,
+        )).playlists.values.single.items.map((v) => v.type),
+        [HubMediaType.song, HubMediaType.podcast],
+      );
       await tester.tap(find.byTooltip('Remove from playlist').first);
       await tester.pumpAndSettle();
-      expect((await GlobalPlaylistStore().load(1)).playlists.values.single.items.single.type,
-        HubMediaType.podcast);
+      expect(
+        (await GlobalPlaylistStore().load(
+          1,
+        )).playlists.values.single.items.single.type,
+        HubMediaType.podcast,
+      );
     },
   );
 
@@ -585,14 +610,23 @@ void main() {
     expect(find.text(_song.title), findsNothing);
   });
 
-  testWidgets('a playlist dialog cannot save into a newly selected profile', (tester) async {
-    await tester.pumpWidget(const MaterialApp(home: PlaylistsScreen(profileId: 1)));
+  testWidgets('a playlist dialog cannot save into a newly selected profile', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: PlaylistsScreen(profileId: 1)),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('New playlist'));
     await tester.pumpAndSettle();
-    await tester.pumpWidget(const MaterialApp(home: PlaylistsScreen(profileId: 2)));
+    await tester.pumpWidget(
+      const MaterialApp(home: PlaylistsScreen(profileId: 2)),
+    );
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), 'Previous user playlist');
+    await tester.enterText(
+      find.byType(TextFormField),
+      'Previous user playlist',
+    );
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect((await GlobalPlaylistStore().load(1)).playlists, isEmpty);
@@ -656,6 +690,41 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Favorites (8)'));
         await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await GlobalPlaylistStore().savePlaylist(
+          1,
+          name: 'Mixed night',
+          items: [
+            HubItem.song(_song),
+            HubItem.youtube(_video),
+            HubItem.podcast(_podcast),
+          ],
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: themes.materialTheme,
+            home: PlaylistsScreen(profileId: 1, onOpenItem: (_, __) async {}),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.textContaining('Playlists ('));
+        await tester.pumpAndSettle();
+        await tester.scrollUntilVisible(
+          find.text('Mixed night'),
+          200,
+          scrollable: find
+              .descendant(
+                of: find.byType(ListView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mixed night'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('playlist-play')), findsOneWidget);
+        expect(find.byKey(const ValueKey('playlist-shuffle')), findsOneWidget);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
       });

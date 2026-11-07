@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -204,137 +205,145 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
               ),
             ],
           ),
-          body: Column(
-            children: [
-              Material(
-                color: Colors.transparent,
-                child: Column(
-                  children: [
-                    ListTile(
+          // One scroll view so the controls never push the log list off
+          // screen on phones or in landscape.
+          body: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(
+                child: Material(
+                  color: Colors.transparent,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        dense: true,
+                        title: Text(
+                          'Session ${log.sessionId} · '
+                          '$errors errors · $warnings warnings · '
+                          '${all.length} entries',
+                        ),
+                        subtitle: Text(
+                          'Version ${log.appVersion.isEmpty ? 'unknown' : log.appVersion} '
+                          '· ${log.platform}',
+                        ),
+                      ),
+                      SwitchListTile(
+                        key: const ValueKey('diagnostics-share-usage'),
+                        dense: true,
+                        title: const Text('Share usage & error reports'),
+                        subtitle: const Text(
+                          'Sends warnings, errors and anonymous usage events '
+                          '(no passwords, tokens or URLs with credentials) to '
+                          'your MILLITOP dashboard to help improve the app.',
+                        ),
+                        value: log.shareUsage,
+                        onChanged: (value) async {
+                          await log.setShareUsage(value);
+                          if (mounted) {
+                            setState(() {});
+                          }
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('Verbose logging'),
+                        subtitle: const Text(
+                          'Also records debug details such as every server '
+                          'request. Turn on while reproducing a problem.',
+                        ),
+                        value: log.verbose,
+                        onChanged: (value) async {
+                          await log.setVerbose(value);
+                          if (mounted) {
+                            setState(() {});
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: math.min(
+                          260,
+                          MediaQuery.sizeOf(context).width - 24,
+                        ),
+                        child: TextField(
+                          key: const ValueKey('diagnostics-search'),
+                          controller: query,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            prefixIcon: Icon(Icons.search),
+                            hintText: 'Search logs',
+                          ),
+                        ),
+                      ),
+                      for (final level in LogLevel.values)
+                        ChoiceChip(
+                          label: Text('${level.name}+'),
+                          selected: minLevel == level,
+                          onSelected: (_) => setState(() => minLevel = level),
+                        ),
+                      DropdownButton<String>(
+                        value: category,
+                        onChanged: (value) =>
+                            setState(() => category = value ?? 'all'),
+                        items: [
+                          const DropdownMenuItem(
+                            value: 'all',
+                            child: Text('All areas'),
+                          ),
+                          for (final item in LogCategory.all)
+                            DropdownMenuItem(value: item, child: Text(item)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SliverToBoxAdapter(child: Divider(height: 1)),
+              if (entries.isEmpty)
+                const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Center(child: Text('No log entries match.')),
+                )
+              else
+                SliverList.builder(
+                  itemCount: entries.length,
+                  itemBuilder: (context, index) {
+                    final entry = entries[index];
+                    final time = TimeOfDay.fromDateTime(entry.time);
+                    return ListTile(
                       dense: true,
+                      leading: Icon(
+                        _levelIcon(entry.level),
+                        color: _levelColor(entry.level),
+                      ),
                       title: Text(
-                        'Session ${log.sessionId} · '
-                        '$errors errors · $warnings warnings · '
-                        '${all.length} entries',
+                        entry.message,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(
-                        'Version ${log.appVersion.isEmpty ? 'unknown' : log.appVersion} '
-                        '· ${log.platform}',
+                        [
+                          '${time.format(context)} · ${entry.category}',
+                          if (entry.error != null) entry.error!,
+                          if (entry.hint != null) 'Fix: ${entry.hint}',
+                        ].join('\n'),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    SwitchListTile(
-                      key: const ValueKey('diagnostics-share-usage'),
-                      dense: true,
-                      title: const Text('Share usage & error reports'),
-                      subtitle: const Text(
-                        'Sends warnings, errors and anonymous usage events '
-                        '(no passwords, tokens or URLs with credentials) to '
-                        'your MILLITOP dashboard to help improve the app.',
-                      ),
-                      value: log.shareUsage,
-                      onChanged: (value) async {
-                        await log.setShareUsage(value);
-                        if (mounted) {
-                          setState(() {});
-                        }
-                      },
-                    ),
-                    SwitchListTile(
-                      dense: true,
-                      title: const Text('Verbose logging'),
-                      subtitle: const Text(
-                        'Also records debug details such as every server '
-                        'request. Turn on while reproducing a problem.',
-                      ),
-                      value: log.verbose,
-                      onChanged: (value) async {
-                        await log.setVerbose(value);
-                        if (mounted) {
-                          setState(() {});
-                        }
-                      },
-                    ),
-                  ],
+                      onTap: () => _showEntry(entry),
+                    );
+                  },
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 260,
-                      child: TextField(
-                        key: const ValueKey('diagnostics-search'),
-                        controller: query,
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          prefixIcon: Icon(Icons.search),
-                          hintText: 'Search logs',
-                        ),
-                      ),
-                    ),
-                    for (final level in LogLevel.values)
-                      ChoiceChip(
-                        label: Text('${level.name}+'),
-                        selected: minLevel == level,
-                        onSelected: (_) => setState(() => minLevel = level),
-                      ),
-                    DropdownButton<String>(
-                      value: category,
-                      onChanged: (value) =>
-                          setState(() => category = value ?? 'all'),
-                      items: [
-                        const DropdownMenuItem(
-                          value: 'all',
-                          child: Text('All areas'),
-                        ),
-                        for (final item in LogCategory.all)
-                          DropdownMenuItem(value: item, child: Text(item)),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const Divider(height: 1),
-              Expanded(
-                child: entries.isEmpty
-                    ? const Center(child: Text('No log entries match.'))
-                    : Material(
-                        color: Colors.transparent,
-                        child: ListView.builder(
-                          itemCount: entries.length,
-                          itemBuilder: (context, index) {
-                            final entry = entries[index];
-                            final time = TimeOfDay.fromDateTime(entry.time);
-                            return ListTile(
-                              dense: true,
-                              leading: Icon(
-                                _levelIcon(entry.level),
-                                color: _levelColor(entry.level),
-                              ),
-                              title: Text(
-                                entry.message,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: Text(
-                                [
-                                  '${time.format(context)} · ${entry.category}',
-                                  if (entry.error != null) entry.error!,
-                                  if (entry.hint != null) 'Fix: ${entry.hint}',
-                                ].join('\n'),
-                                maxLines: 4,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              onTap: () => _showEntry(entry),
-                            );
-                          },
-                        ),
-                      ),
-              ),
             ],
           ),
         );
