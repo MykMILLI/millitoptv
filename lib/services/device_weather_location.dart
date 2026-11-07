@@ -13,6 +13,19 @@ class WindowsWeatherLocation implements WeatherLocationProvider {
   static const Duration _futureSkewAllowance = Duration(minutes: 5);
   static const Duration _freshRetryWindow = Duration(seconds: 20);
 
+  /// geolocator_windows (<= 0.2.5) reports `timestamp` as whole seconds since
+  /// the Unix epoch, while the Dart side parses it as milliseconds. Every
+  /// Windows fix therefore appears to be from January 1970 and was rejected
+  /// as stale, so the home-screen weather never loaded. Values that decode to
+  /// before 1973 (< 1e11 ms) are treated as seconds and scaled up.
+  static DateTime normalizeTimestamp(DateTime timestamp) {
+    final raw = timestamp.millisecondsSinceEpoch;
+    if (raw > 0 && raw < 100000000000) {
+      return DateTime.fromMillisecondsSinceEpoch(raw * 1000, isUtc: true);
+    }
+    return timestamp.toUtc();
+  }
+
   bool _isFreshTimestamp(DateTime timestamp, DateTime nowUtc) =>
       !timestamp.isBefore(nowUtc.subtract(_freshLocationAge)) &&
       !timestamp.isAfter(nowUtc.add(_futureSkewAllowance));
@@ -30,7 +43,10 @@ class WindowsWeatherLocation implements WeatherLocationProvider {
           timeLimit: _freshRetryWindow,
         ),
       ).timeout(_freshRetryWindow)) {
-        if (_isFreshTimestamp(next.timestamp, DateTime.now().toUtc())) {
+        if (_isFreshTimestamp(
+          normalizeTimestamp(next.timestamp),
+          DateTime.now().toUtc(),
+        )) {
           return next;
         }
       }
@@ -45,7 +61,7 @@ class WindowsWeatherLocation implements WeatherLocationProvider {
   WeatherCoordinates _toCoordinates(Position position) => WeatherCoordinates(
     latitude: position.latitude,
     longitude: position.longitude,
-    captured: position.timestamp,
+    captured: normalizeTimestamp(position.timestamp),
     accuracy: position.accuracy.isFinite && position.accuracy > 0
         ? position.accuracy
         : null,
@@ -85,12 +101,15 @@ class WindowsWeatherLocation implements WeatherLocationProvider {
         ),
       ).timeout(const Duration(seconds: 30));
       final refreshed =
-          _isFreshTimestamp(position.timestamp, DateTime.now().toUtc())
+          _isFreshTimestamp(
+            normalizeTimestamp(position.timestamp),
+            DateTime.now().toUtc(),
+          )
           ? null
           : await _waitForFreshPosition();
       final chosen = refreshed ?? position;
       final now = DateTime.now().toUtc();
-      if (_isUnusableTimestamp(chosen.timestamp, now)) {
+      if (_isUnusableTimestamp(normalizeTimestamp(chosen.timestamp), now)) {
         throw const WeatherProblem(
           'Windows returned only stale location data. Move this device, wait a few seconds, then select Location again.',
         );
