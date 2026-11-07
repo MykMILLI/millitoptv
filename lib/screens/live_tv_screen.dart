@@ -81,7 +81,11 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   bool openingQuaternary = false;
   bool reconnecting = false;
   bool syncing = false;
-  bool recording = false;
+
+  /// Cloud DVR recordings running in this household, keyed by channel key.
+  Map<String, Map<String, dynamic>> activeRecordings = {};
+  bool dvrBusy = false;
+  Timer? dvrStatusTimer;
   bool osdVisible = false;
   bool mediaActive = false;
   int screenCount = 1;
@@ -278,6 +282,16 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
 
   bool get splitScreen => screenCount > 1;
 
+  LiveTvChannel? get _dvrChannel =>
+      _channelForPane(splitScreen ? focusedPane : 0);
+
+  /// True while the focused channel is being recorded (by any paired device).
+  bool get recording {
+    final channel = _dvrChannel;
+    return channel != null &&
+        activeRecordings.containsKey(_channelKey(channel));
+  }
+
   Player? _playerForPane(int pane) {
     switch (pane) {
       case 1:
@@ -472,10 +486,16 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     super.initState();
     search.addListener(_recomputeChannelViews);
     unawaited(_initialize());
+    unawaited(_refreshActiveRecordings());
+    dvrStatusTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_refreshActiveRecordings()),
+    );
   }
 
   @override
   void dispose() {
+    dvrStatusTimer?.cancel();
     watchdog?.cancel();
     reconnectMessageClear?.cancel();
     osdHide?.cancel();
@@ -811,7 +831,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       savedFavorites = await channelFavoriteKeys(widget.profileId);
     } catch (e) {
       debugPrint('Saved channel favorites could not load: $e');
-      _setState(() => syncStatus = 'Saved channel favorites could not load. $e');
+      _setState(
+        () => syncStatus = 'Saved channel favorites could not load. $e',
+      );
     }
     final sourceIds = next.map((item) => item.id).toSet();
     scopedSourceIds.removeWhere((id) => !sourceIds.contains(id));
@@ -1029,12 +1051,16 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         final requestedSource = widget.initialSourceId;
         if (requestedSource != null &&
             !sources.any((s) => s.id == requestedSource)) {
-          throw StateError('The saved channel source is unavailable. Reconnect it in Manage Sources.');
+          throw StateError(
+            'The saved channel source is unavailable. Reconnect it in Manage Sources.',
+          );
         }
         toOpen = _channelByKey(requested.trim());
         if (toOpen == null ||
             (requestedSource != null && toOpen.sourceId != requestedSource)) {
-          throw StateError('This saved channel is no longer available from its source.');
+          throw StateError(
+            'This saved channel is no longer available from its source.',
+          );
         }
       }
       toOpen ??= history.isNotEmpty ? _channelByKey(history.first) : null;
@@ -1148,7 +1174,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     syncing = true;
     _setState(() => syncStatus = 'Syncing favorites...');
     try {
-      final activeSources = allSourcesSelected ? sources : <LiveTvSource>[source!];
+      final activeSources = allSourcesSelected
+          ? sources
+          : <LiveTvSource>[source!];
       final historyKeys = <String>[];
       var unavailable = 0;
       for (final activeSource in activeSources) {
@@ -1161,16 +1189,22 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         historyKeys.addAll(snapshot.history);
         final library = await GlobalPlaylistStore().load(widget.profileId);
         for (final key in snapshot.favorites) {
-          final matches = channels.where((channel) =>
-            channel.sourceId == activeSource.id &&
-            (_channelKey(channel) == key || _channelToken(channel) == key));
+          final matches = channels.where(
+            (channel) =>
+                channel.sourceId == activeSource.id &&
+                (_channelKey(channel) == key || _channelToken(channel) == key),
+          );
           if (matches.isEmpty) {
             unavailable++;
             continue;
           }
           final saved = vodHubItem(_channelLibraryItem(matches.first));
           if (!library.favorites.containsKey(saved.key)) {
-            await PlaylistHubRepository().setFavorite(widget.profileId, saved, true);
+            await PlaylistHubRepository().setFavorite(
+              widget.profileId,
+              saved,
+              true,
+            );
           }
         }
       }
@@ -1185,7 +1219,8 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
           ...history.where((value) => !historyKeys.contains(value)),
         ].take(50).toList();
         syncStatus = unavailable == 0
-            ? '' : '$unavailable saved channels are unavailable from their sources.';
+            ? ''
+            : '$unavailable saved channels are unavailable from their sources.';
       });
       _recomputeChannelViews();
     } catch (_) {
@@ -1550,8 +1585,11 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       LiveTvLibraryItem(
         sourceId: channel.sourceId ?? source!.id,
         sourceName: channel.sourceName ?? source?.name ?? 'Live TV',
-        mediaType: 'channel', mediaId: _channelToken(channel),
-        title: channel.title, posterUrl: channel.logo, streamUrl: channel.streamUrl,
+        mediaType: 'channel',
+        mediaId: _channelToken(channel),
+        title: channel.title,
+        posterUrl: channel.logo,
+        streamUrl: channel.streamUrl,
       );
 
   Future<void> _toggleFavorite(LiveTvChannel channel) async {
@@ -1562,7 +1600,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     }
     try {
       await PlaylistHubRepository().setFavorite(
-        widget.profileId, vodHubItem(_channelLibraryItem(channel)), next.contains(key),
+        widget.profileId,
+        vodHubItem(_channelLibraryItem(channel)),
+        next.contains(key),
       );
     } catch (e) {
       _setState(() => error = 'Could not save your channel favorite. $e');
@@ -1572,8 +1612,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     favorites = next;
     _recomputeChannelViews();
     final connection = DeviceConnection.instance.connectionKey;
-    if (connection.isEmpty ||
-        !DeviceConnection.instance.isConnected) {
+    if (connection.isEmpty || !DeviceConnection.instance.isConnected) {
       return;
     }
     final selectedSource = sources.firstWhere(
@@ -1585,13 +1624,18 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         expectedConnection: connection,
         profileId: widget.profileId,
         sourceId: selectedSource.id,
-        favorites: next.where((key) => key.startsWith('${selectedSource.id}|')).toSet(),
+        favorites: next
+            .where((key) => key.startsWith('${selectedSource.id}|'))
+            .toSet(),
       );
       await controlService.pushConfig(
-        expectedConnection: connection, profileId: widget.profileId,
+        expectedConnection: connection,
+        profileId: widget.profileId,
         sources: await HomePreferences().liveTvSources(widget.profileId),
         tmdbApiKey: await HomePreferences().tmdbApiKey(widget.profileId),
-        profileState: await HomePreferences().liveTvProfileSyncState(widget.profileId),
+        profileState: await HomePreferences().liveTvProfileSyncState(
+          widget.profileId,
+        ),
       );
       if (mounted) {
         _setState(() => syncStatus = '');
@@ -1708,46 +1752,155 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     } catch (_) {}
   }
 
+  void _dvrNotice(String message, {bool error = false}) {
+    if (!mounted) {
+      return;
+    }
+    _setState(() => syncStatus = message);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.hideCurrentSnackBar();
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? const Color(0xFF8B1E1E) : null,
+        duration: Duration(seconds: error ? 6 : 3),
+      ),
+    );
+  }
+
+  String _dvrErrorText(Object error, String fallback) {
+    if (error is DeviceRequestFailure) {
+      if (error.message.isNotEmpty) {
+        return error.message;
+      }
+      if (error.statusCode == 404) {
+        return 'This Millitop server does not support DVR yet. Update the dashboard server to enable recording.';
+      }
+    }
+    if (error is TimeoutException) {
+      return 'The Millitop server did not respond in time. Try again.';
+    }
+    return fallback;
+  }
+
+  /// Loads recordings running anywhere in the household so the record button
+  /// shows the correct state after reopening Live TV or switching devices.
+  Future<void> _refreshActiveRecordings() async {
+    final connection = DeviceConnection.instance.connectionKey;
+    if (dvrBusy ||
+        connection.isEmpty ||
+        !DeviceConnection.instance.isConnected) {
+      return;
+    }
+    try {
+      final rows = await syncService.dvrActive(expectedConnection: connection);
+      if (!mounted || dvrBusy) {
+        return;
+      }
+      _setState(() {
+        activeRecordings = {
+          for (final row in rows)
+            if ((row['channelId'] ?? '').toString().isNotEmpty)
+              row['channelId'].toString(): row,
+        };
+      });
+    } catch (_) {
+      // Older servers without DVR support; leave the button idle.
+    }
+  }
+
   Future<void> _toggleDvr() async {
-    final channel = _channelForPane(splitScreen ? focusedPane : 0);
-    final selectedSource = channel == null
-        ? null
-        : sources.firstWhere(
-            (item) => item.id == channel.sourceId,
-            orElse: () => source ?? sources.first,
-          );
+    if (dvrBusy) {
+      return;
+    }
+    final channel = _dvrChannel;
+    final selectedSource = channel == null ? null : _sourceForChannel(channel);
     if (channel == null || selectedSource == null) {
+      _dvrNotice('Choose a channel before recording.', error: true);
       return;
     }
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty || !DeviceConnection.instance.isConnected) {
-      _setState(() => syncStatus = 'Connect device to control DVR recording.');
+      _dvrNotice(
+        'Pair this device with your Millitop server to record. Recordings are saved to your DVR on the server.',
+        error: true,
+      );
       return;
     }
-    final start = !recording;
+    final channelKey = _channelKey(channel);
+    final active = activeRecordings[channelKey];
+    final start = active == null;
+    _setState(() => dvrBusy = true);
+    if (start) {
+      _dvrNotice('Starting recording on ${channel.title}...');
+    }
     try {
-      await syncService.dvr(
+      final program = _currentProgram(channel);
+      final now = DateTime.now();
+      final fallbackTitle =
+          '${channel.title} · ${now.month}/${now.day} ${_clockText(now.toUtc())}';
+      final response = await syncService.dvr(
         expectedConnection: connection,
         profileId: widget.profileId,
         sourceId: selectedSource.id,
-        channelId: _channelKey(channel),
+        channelId: channelKey,
         channelName: channel.title,
         start: start,
+        streamUrl: channel.streamUrl,
+        title: program?.title.trim().isNotEmpty == true
+            ? program!.title
+            : fallbackTitle,
+        recordingId: active?['id']?.toString(),
       );
-      if (mounted) {
-        _setState(() {
-          recording = start;
-          syncStatus = start
-              ? 'DVR recording started.'
-              : 'DVR recording stopped.';
-        });
+      final record = response['recording'] is Map
+          ? Map<String, dynamic>.from(response['recording'] as Map)
+          : <String, dynamic>{};
+      if (!mounted) {
+        return;
+      }
+      _setState(() {
+        final next = Map<String, Map<String, dynamic>>.from(activeRecordings);
+        if (start) {
+          next[channelKey] = record;
+        } else {
+          next.remove(channelKey);
+        }
+        activeRecordings = next;
+      });
+      if (start) {
+        _dvrNotice(
+          response['alreadyRecording'] == true
+              ? '${channel.title} is already recording.'
+              : 'Recording ${channel.title}. Press the red button to stop.',
+        );
+      } else if (record['status'] == 'failed') {
+        _dvrNotice(
+          record['note']?.toString() ?? 'The recording could not be saved.',
+          error: true,
+        );
+      } else {
+        _dvrNotice('Recording saved to DVR.');
       }
       _showOsd();
-    } catch (_) {
-      if (mounted) {
-        _setState(
-          () => syncStatus = 'DVR action failed. Verify backend route.',
+    } catch (e) {
+      if (!start && e is DeviceRequestFailure && e.statusCode == 404) {
+        // Already stopped elsewhere (another device or a schedule ending).
+        _setState(() {
+          activeRecordings = Map.of(activeRecordings)..remove(channelKey);
+        });
+        _dvrNotice('Recording already stopped. Find it in DVR.');
+      } else {
+        _dvrNotice(
+          _dvrErrorText(
+            e,
+            start ? 'Recording could not start.' : 'Recording could not stop.',
+          ),
+          error: true,
         );
+      }
+    } finally {
+      if (mounted) {
+        _setState(() => dvrBusy = false);
       }
     }
   }
@@ -1808,14 +1961,14 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         startUtc: selectedProgram.start,
         endUtc: selectedProgram.end,
         title: selectedProgram.title,
+        streamUrl: channel.streamUrl,
       );
-      if (mounted) {
-        _setState(() => syncStatus = 'DVR schedule saved.');
-      }
-    } catch (_) {
-      if (mounted) {
-        _setState(() => syncStatus = 'DVR scheduling failed.');
-      }
+      _dvrNotice(
+        'Scheduled "${selectedProgram.title}". It will appear in DVR.',
+      );
+      unawaited(_refreshActiveRecordings());
+    } catch (e) {
+      _dvrNotice(_dvrErrorText(e, 'DVR scheduling failed.'), error: true);
     }
   }
 
@@ -2715,30 +2868,56 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                         icon: const Icon(Icons.arrow_back),
                       ),
                       actions: [
-                        if (compact) PopupMenuButton<String>(
-                          tooltip: 'Live TV options',
-                          itemBuilder: (_) => [
-                            PopupMenuItem(value: 'sources', enabled: !opening, child: const Text('Manage Sources')),
-                            PopupMenuItem(value: 'reload', enabled: !loading && !opening && source != null, child: const Text('Reload')),
-                            PopupMenuItem(value: 'split', enabled: !loading && !opening, child: Text(screenCount == 4 ? 'Return to single screen' : 'Enable ${screenCount + 1}-screen')),
-                          ],
-                          onSelected: (value) {
-                            switch (value) {
-                              case 'sources': unawaited(_manageSources()); break;
-                              case 'reload': unawaited(_loadChannels()); break;
-                              case 'split': unawaited(_toggleSplitScreen()); break;
-                            }
-                          },
-                        ) else TextButton(
-                          onPressed: opening ? null : _manageSources,
-                          child: const Text('Manage Sources'),
-                        ),
-                        if (!compact) TextButton(
-                          onPressed: loading || opening || source == null
-                              ? null
-                              : _loadChannels,
-                          child: const Text('Reload'),
-                        ),
+                        if (compact)
+                          PopupMenuButton<String>(
+                            tooltip: 'Live TV options',
+                            itemBuilder: (_) => [
+                              PopupMenuItem(
+                                value: 'sources',
+                                enabled: !opening,
+                                child: const Text('Manage Sources'),
+                              ),
+                              PopupMenuItem(
+                                value: 'reload',
+                                enabled: !loading && !opening && source != null,
+                                child: const Text('Reload'),
+                              ),
+                              PopupMenuItem(
+                                value: 'split',
+                                enabled: !loading && !opening,
+                                child: Text(
+                                  screenCount == 4
+                                      ? 'Return to single screen'
+                                      : 'Enable ${screenCount + 1}-screen',
+                                ),
+                              ),
+                            ],
+                            onSelected: (value) {
+                              switch (value) {
+                                case 'sources':
+                                  unawaited(_manageSources());
+                                  break;
+                                case 'reload':
+                                  unawaited(_loadChannels());
+                                  break;
+                                case 'split':
+                                  unawaited(_toggleSplitScreen());
+                                  break;
+                              }
+                            },
+                          )
+                        else
+                          TextButton(
+                            onPressed: opening ? null : _manageSources,
+                            child: const Text('Manage Sources'),
+                          ),
+                        if (!compact)
+                          TextButton(
+                            onPressed: loading || opening || source == null
+                                ? null
+                                : _loadChannels,
+                            child: const Text('Reload'),
+                          ),
                         IconButton(
                           tooltip: 'Guide',
                           onPressed:
@@ -2748,23 +2927,24 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                               : _showEpgGuide,
                           icon: const Icon(Icons.view_agenda_outlined),
                         ),
-                        if (!compact) IconButton(
-                          tooltip: screenCount == 1
-                              ? 'Enable split screen'
-                              : screenCount == 2
-                              ? 'Enable 3-screen'
-                              : screenCount == 3
-                              ? 'Enable 4-screen'
-                              : 'Return to single screen',
-                          onPressed: loading || opening
-                              ? null
-                              : () => unawaited(_toggleSplitScreen()),
-                          icon: Icon(
-                            screenCount == 1
-                                ? Icons.view_week
-                                : Icons.grid_view,
+                        if (!compact)
+                          IconButton(
+                            tooltip: screenCount == 1
+                                ? 'Enable split screen'
+                                : screenCount == 2
+                                ? 'Enable 3-screen'
+                                : screenCount == 3
+                                ? 'Enable 4-screen'
+                                : 'Return to single screen',
+                            onPressed: loading || opening
+                                ? null
+                                : () => unawaited(_toggleSplitScreen()),
+                            icon: Icon(
+                              screenCount == 1
+                                  ? Icons.view_week
+                                  : Icons.grid_view,
+                            ),
                           ),
-                        ),
                         IconButton(
                           tooltip: fullScreenVideo
                               ? 'Exit full screen'
@@ -2789,17 +2969,19 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                 ),
                                 child: Row(
                                   children: [
-                                    Expanded(child: Text(
-                                      splitScreen
-                                          ? '$screenCount screens'
-                                          : 'Single screen',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: themeTokens.mutedColor,
-                                        fontSize: 12.5,
-                                        fontWeight: FontWeight.w600,
-                                      )),
+                                    Expanded(
+                                      child: Text(
+                                        splitScreen
+                                            ? '$screenCount screens'
+                                            : 'Single screen',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: themeTokens.mutedColor,
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
                                     ),
                                     const SizedBox(width: 10),
                                     Text(
@@ -2823,239 +3005,294 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                       const LinearProgressIndicator(),
                     if (!fullScreenVideo)
                       ConstrainedBox(
-                        constraints: BoxConstraints(maxHeight: compact ? (shortScreen ? 80 : 160) : double.infinity),
-                        child: SingleChildScrollView(child: Column(children: [
-                    if (!fullScreenVideo &&
-                        (status.isNotEmpty ||
-                            syncStatus.isNotEmpty ||
-                            error.isNotEmpty))
-                      premiumCard(
-                        margin: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (status.isNotEmpty)
-                              Text(
-                                status,
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            if (syncStatus.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Text(
-                                syncStatus,
-                                style: const TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                            if (error.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Text(
-                                error,
-                                style: const TextStyle(
-                                  color: Colors.orangeAccent,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                          ],
+                        constraints: BoxConstraints(
+                          maxHeight: compact
+                              ? (shortScreen ? 80 : 160)
+                              : double.infinity,
                         ),
-                      ),
-                    if (!fullScreenVideo)
-                      premiumCard(
-                        margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Channel discovery',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            Row(
-                              children: [
-                                Expanded(
-                                  flex: 2,
-                                  child: DropdownButtonFormField<String>(
-                                    isExpanded: true,
-                                    key: ValueKey(
-                                      allSourcesSelected
-                                          ? 'source-all'
-                                          : (source?.id ?? 'no-source'),
-                                    ),
-                                    initialValue: allSourcesSelected
-                                        ? 'all'
-                                        : source?.id,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Source',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                    items: [
-                                      const DropdownMenuItem<String>(
-                                        value: 'all',
-                                        child: Text('All Sources'),
-                                      ),
-                                      ...sources.map(
-                                        (item) => DropdownMenuItem<String>(
-                                          value: item.id,
-                                          child: Text(
-                                            '${item.name} (${item.isXtream ? 'Xtream' : 'M3U'})',
-                                            overflow: TextOverflow.ellipsis,
+                        child: SingleChildScrollView(
+                          child: Column(
+                            children: [
+                              if (!fullScreenVideo &&
+                                  (status.isNotEmpty ||
+                                      syncStatus.isNotEmpty ||
+                                      error.isNotEmpty))
+                                premiumCard(
+                                  margin: const EdgeInsets.fromLTRB(
+                                    12,
+                                    10,
+                                    12,
+                                    10,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      if (status.isNotEmpty)
+                                        Text(
+                                          status,
+                                          style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w700,
                                           ),
                                         ),
-                                      ),
+                                      if (syncStatus.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          syncStatus,
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      ],
+                                      if (error.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          error,
+                                          style: const TextStyle(
+                                            color: Colors.orangeAccent,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      ],
                                     ],
-                                    onChanged: loading || opening
-                                        ? null
-                                        : (value) async {
-                                            if (value == 'all') {
-                                              _setState(() {
-                                                allSourcesSelected = true;
-                                                selectedGroup =
-                                                    selectedGroupByScope[_sourceId()] ??
-                                                    'All';
-                                              });
-                                              await _scheduleProfileSync();
-                                              await _loadChannels();
-                                              return;
-                                            }
-                                            final next = sources.firstWhere(
-                                              (item) => item.id == value,
-                                              orElse: () => sources.first,
-                                            );
-                                            _setState(() {
-                                              source = next;
-                                              allSourcesSelected = false;
-                                              selectedGroup =
-                                                  selectedGroupByScope[_sourceId()] ??
-                                                  'All';
-                                            });
-                                            await _scheduleProfileSync();
-                                            await _loadChannels();
-                                          },
                                   ),
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  flex: 3,
-                                  child: TextField(
-                                    controller: search,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Search channels',
-                                      border: OutlineInputBorder(),
-                                      prefixIcon: Icon(Icons.search),
-                                    ),
+                              if (!fullScreenVideo)
+                                premiumCard(
+                                  margin: const EdgeInsets.fromLTRB(
+                                    12,
+                                    0,
+                                    12,
+                                    10,
                                   ),
-                                ),
-                                const SizedBox(width: 10),
-                                IconButton.filledTonal(
-                                  tooltip: 'Channel Scope',
-                                  onPressed: loading || opening
-                                      ? null
-                                      : _manageChannelScope,
-                                  icon: const Icon(Icons.tune),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    if (!fullScreenVideo)
-                      premiumCard(
-                        margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              flex: 2,
-                              child:
-                                  DropdownButtonFormField<_ChannelFilterMode>(
-                                    isExpanded: true,
-                                    initialValue: filterMode,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Channel Filter',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                    items: const [
-                                      DropdownMenuItem(
-                                        value: _ChannelFilterMode.all,
-                                        child: Text('All Channels'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: _ChannelFilterMode.favorites,
-                                        child: Text('Favorites'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: _ChannelFilterMode.recent,
-                                        child: Text('Continue Watching'),
-                                      ),
-                                    ],
-                                    onChanged: (value) {
-                                      if (value == null) {
-                                        return;
-                                      }
-                                      _setState(() => filterMode = value);
-                                      _recomputeChannelViews();
-                                    },
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    12,
+                                    12,
+                                    12,
                                   ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              flex: 3,
-                              child: DropdownButtonFormField<String>(
-                                isExpanded: true,
-                                key: ValueKey(
-                                  'group-$selectedGroup-${groupOptions.length}',
-                                ),
-                                initialValue:
-                                    groupOptions.contains(selectedGroup)
-                                    ? selectedGroup
-                                    : groupOptions.first,
-                                decoration: const InputDecoration(
-                                  labelText: 'Category',
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: groupOptions
-                                    .map(
-                                      (group) => DropdownMenuItem<String>(
-                                        value: group,
-                                        child: Text(
-                                          group,
-                                          overflow: TextOverflow.ellipsis,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Channel discovery',
+                                        style: TextStyle(
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                    )
-                                    .toList(),
-                                onChanged: (value) {
-                                  if (value == null) {
-                                    return;
-                                  }
-                                  _setState(() {
-                                    selectedGroup = value;
-                                    selectedGroupByScope[_sourceId()] = value;
-                                  });
-                                  _pinCategorySelection(value);
-                                  _recomputeChannelViews();
-                                  unawaited(_scheduleProfileSync());
-                                },
-                              ),
-                            ),
-                          ],
+                                      const SizedBox(height: 10),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            flex: 2,
+                                            child: DropdownButtonFormField<String>(
+                                              isExpanded: true,
+                                              key: ValueKey(
+                                                allSourcesSelected
+                                                    ? 'source-all'
+                                                    : (source?.id ??
+                                                          'no-source'),
+                                              ),
+                                              initialValue: allSourcesSelected
+                                                  ? 'all'
+                                                  : source?.id,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Source',
+                                                border: OutlineInputBorder(),
+                                              ),
+                                              items: [
+                                                const DropdownMenuItem<String>(
+                                                  value: 'all',
+                                                  child: Text('All Sources'),
+                                                ),
+                                                ...sources.map(
+                                                  (
+                                                    item,
+                                                  ) => DropdownMenuItem<String>(
+                                                    value: item.id,
+                                                    child: Text(
+                                                      '${item.name} (${item.isXtream ? 'Xtream' : 'M3U'})',
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                              onChanged: loading || opening
+                                                  ? null
+                                                  : (value) async {
+                                                      if (value == 'all') {
+                                                        _setState(() {
+                                                          allSourcesSelected =
+                                                              true;
+                                                          selectedGroup =
+                                                              selectedGroupByScope[_sourceId()] ??
+                                                              'All';
+                                                        });
+                                                        await _scheduleProfileSync();
+                                                        await _loadChannels();
+                                                        return;
+                                                      }
+                                                      final next = sources
+                                                          .firstWhere(
+                                                            (item) =>
+                                                                item.id ==
+                                                                value,
+                                                            orElse: () =>
+                                                                sources.first,
+                                                          );
+                                                      _setState(() {
+                                                        source = next;
+                                                        allSourcesSelected =
+                                                            false;
+                                                        selectedGroup =
+                                                            selectedGroupByScope[_sourceId()] ??
+                                                            'All';
+                                                      });
+                                                      await _scheduleProfileSync();
+                                                      await _loadChannels();
+                                                    },
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            flex: 3,
+                                            child: TextField(
+                                              controller: search,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Search channels',
+                                                border: OutlineInputBorder(),
+                                                prefixIcon: Icon(Icons.search),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          IconButton.filledTonal(
+                                            tooltip: 'Channel Scope',
+                                            onPressed: loading || opening
+                                                ? null
+                                                : _manageChannelScope,
+                                            icon: const Icon(Icons.tune),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              if (!fullScreenVideo)
+                                premiumCard(
+                                  margin: const EdgeInsets.fromLTRB(
+                                    12,
+                                    0,
+                                    12,
+                                    10,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 2,
+                                        child:
+                                            DropdownButtonFormField<
+                                              _ChannelFilterMode
+                                            >(
+                                              isExpanded: true,
+                                              initialValue: filterMode,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Channel Filter',
+                                                border: OutlineInputBorder(),
+                                              ),
+                                              items: const [
+                                                DropdownMenuItem(
+                                                  value: _ChannelFilterMode.all,
+                                                  child: Text('All Channels'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: _ChannelFilterMode
+                                                      .favorites,
+                                                  child: Text('Favorites'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value:
+                                                      _ChannelFilterMode.recent,
+                                                  child: Text(
+                                                    'Continue Watching',
+                                                  ),
+                                                ),
+                                              ],
+                                              onChanged: (value) {
+                                                if (value == null) {
+                                                  return;
+                                                }
+                                                _setState(
+                                                  () => filterMode = value,
+                                                );
+                                                _recomputeChannelViews();
+                                              },
+                                            ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        flex: 3,
+                                        child: DropdownButtonFormField<String>(
+                                          isExpanded: true,
+                                          key: ValueKey(
+                                            'group-$selectedGroup-${groupOptions.length}',
+                                          ),
+                                          initialValue:
+                                              groupOptions.contains(
+                                                selectedGroup,
+                                              )
+                                              ? selectedGroup
+                                              : groupOptions.first,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Category',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                          items: groupOptions
+                                              .map(
+                                                (group) =>
+                                                    DropdownMenuItem<String>(
+                                                      value: group,
+                                                      child: Text(
+                                                        group,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                    ),
+                                              )
+                                              .toList(),
+                                          onChanged: (value) {
+                                            if (value == null) {
+                                              return;
+                                            }
+                                            _setState(() {
+                                              selectedGroup = value;
+                                              selectedGroupByScope[_sourceId()] =
+                                                  value;
+                                            });
+                                            _pinCategorySelection(value);
+                                            _recomputeChannelViews();
+                                            unawaited(_scheduleProfileSync());
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
-                      ),
-                        ])),
                       ),
                     Expanded(
                       child: Flex(
                         direction: compact ? Axis.vertical : Axis.horizontal,
-                        verticalDirection: compact ? VerticalDirection.up : VerticalDirection.down,
+                        verticalDirection: compact
+                            ? VerticalDirection.up
+                            : VerticalDirection.down,
                         textDirection: channelRailOnRight
                             ? TextDirection.rtl
                             : TextDirection.ltr,
@@ -3065,7 +3302,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                               textDirection: TextDirection.ltr,
                               child: Container(
                                 width: compact ? double.infinity : 470,
-                                height: compact ? (shortScreen ? 96 : 160) : null,
+                                height: compact
+                                    ? (shortScreen ? 96 : 160)
+                                    : null,
                                 margin: const EdgeInsets.fromLTRB(
                                   12,
                                   0,
@@ -3220,8 +3459,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                       if (nowProgram == null &&
                                                           channel.group != null)
                                                         channel.group!,
-                                                      if (!compact && channel.sourceName !=
-                                                          null)
+                                                      if (!compact &&
+                                                          channel.sourceName !=
+                                                              null)
                                                         'Source: ${channel.sourceName!}',
                                                     ].join(' · '),
                                                     maxLines: 1,
@@ -3370,90 +3610,115 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                                   _programsForChannel(
                                                     selected!,
                                                   ).isNotEmpty;
-                                              return Positioned.fill(child: AnimatedOpacity(
-                                                opacity: osdVisible ? 1 : 0,
-                                                duration: const Duration(
-                                                  milliseconds: 200,
-                                                ),
-                                                curve: Curves.easeOutCubic,
-                                                child: IgnorePointer(
-                                                  ignoring: !osdVisible,
-                                                  child: LiveTvOsd(
-                                                channelName: selected!.title,
-                                                channelLogo: selected!.logo,
-                                                nowProgram: nowProgram,
-                                                nextProgram: nextProgram,
-                                                epgProgress: _epgProgress(
-                                                  nowProgram,
-                                                ),
-                                                isFavorite: _favorite(
-                                                  selected!,
-                                                ),
-                                                recording: recording,
-                                                liveOnly:
-                                                    lastDuration <=
-                                                    Duration.zero,
-                                                isPlaying: isPlaying,
-                                                position: lastPosition,
-                                                duration: lastDuration,
-                                                isFullScreen: fullScreenVideo,
-                                                splitScreen: splitScreen,
-                                                screenCount: screenCount,
-                                                hasEpg: hasGuideData,
-                                                onGoLive: () => unawaited(
-                                                  _seekRelative(
-                                                    lastDuration - lastPosition,
+                                              return Positioned.fill(
+                                                child: AnimatedOpacity(
+                                                  opacity: osdVisible ? 1 : 0,
+                                                  duration: const Duration(
+                                                    milliseconds: 200,
                                                   ),
-                                                ),
-                                                onInteraction: _showOsd,
-                                                onFavorite: () => unawaited(
-                                                  _toggleFavorite(selected!),
-                                                ),
-                                                onPlayPause: () => unawaited(
-                                                  _togglePlayPause(),
-                                                ),
-                                                onStop: () => unawaited(
-                                                  _stopCurrentChannel(),
-                                                ),
-                                                onChannelDown: () => unawaited(
-                                                  _zapChannel(
-                                                    -1,
-                                                    secondary: false,
-                                                  ),
-                                                ),
-                                                onChannelUp: () => unawaited(
-                                                  _zapChannel(
-                                                    1,
-                                                    secondary: false,
-                                                  ),
-                                                ),
-                                                onRewind: () => unawaited(
-                                                  _seekRelative(
-                                                    const Duration(
-                                                      seconds: -10,
+                                                  curve: Curves.easeOutCubic,
+                                                  child: IgnorePointer(
+                                                    ignoring: !osdVisible,
+                                                    child: LiveTvOsd(
+                                                      channelName:
+                                                          selected!.title,
+                                                      channelLogo:
+                                                          selected!.logo,
+                                                      nowProgram: nowProgram,
+                                                      nextProgram: nextProgram,
+                                                      epgProgress: _epgProgress(
+                                                        nowProgram,
+                                                      ),
+                                                      isFavorite: _favorite(
+                                                        selected!,
+                                                      ),
+                                                      recording: recording,
+                                                      recordingBusy: dvrBusy,
+                                                      liveOnly:
+                                                          lastDuration <=
+                                                          Duration.zero,
+                                                      isPlaying: isPlaying,
+                                                      position: lastPosition,
+                                                      duration: lastDuration,
+                                                      isFullScreen:
+                                                          fullScreenVideo,
+                                                      splitScreen: splitScreen,
+                                                      screenCount: screenCount,
+                                                      hasEpg: hasGuideData,
+                                                      onGoLive: () => unawaited(
+                                                        _seekRelative(
+                                                          lastDuration -
+                                                              lastPosition,
+                                                        ),
+                                                      ),
+                                                      onInteraction: _showOsd,
+                                                      onFavorite: () =>
+                                                          unawaited(
+                                                            _toggleFavorite(
+                                                              selected!,
+                                                            ),
+                                                          ),
+                                                      onPlayPause: () =>
+                                                          unawaited(
+                                                            _togglePlayPause(),
+                                                          ),
+                                                      onStop: () => unawaited(
+                                                        _stopCurrentChannel(),
+                                                      ),
+                                                      onChannelDown: () =>
+                                                          unawaited(
+                                                            _zapChannel(
+                                                              -1,
+                                                              secondary: false,
+                                                            ),
+                                                          ),
+                                                      onChannelUp: () =>
+                                                          unawaited(
+                                                            _zapChannel(
+                                                              1,
+                                                              secondary: false,
+                                                            ),
+                                                          ),
+                                                      onRewind: () => unawaited(
+                                                        _seekRelative(
+                                                          const Duration(
+                                                            seconds: -10,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      onForward: () =>
+                                                          unawaited(
+                                                            _seekRelative(
+                                                              const Duration(
+                                                                seconds: 10,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                      onRecord: () => unawaited(
+                                                        _toggleDvr(),
+                                                      ),
+                                                      onSchedule: () => unawaited(
+                                                        _scheduleDvrFromGuide(),
+                                                      ),
+                                                      onGuide: _showEpgGuide,
+                                                      onSplit: () => unawaited(
+                                                        _toggleSplitScreen(),
+                                                      ),
+                                                      onFullScreen:
+                                                          _toggleFullScreenVideo,
                                                     ),
                                                   ),
                                                 ),
-                                                onForward: () => unawaited(
-                                                  _seekRelative(
-                                                    const Duration(seconds: 10),
-                                                  ),
-                                                ),
-                                                onRecord: () =>
-                                                    unawaited(_toggleDvr()),
-                                                onSchedule: () => unawaited(
-                                                  _scheduleDvrFromGuide(),
-                                                ),
-                                                onGuide: _showEpgGuide,
-                                                onSplit: () => unawaited(
-                                                  _toggleSplitScreen(),
-                                                ),
-                                                onFullScreen:
-                                                    _toggleFullScreenVideo,
-                                                  ),
-                                                ),
-                                              ));
+                                              );
                                             })(),
+                                          if (recording && !osdVisible)
+                                            const Positioned(
+                                              top: 12,
+                                              left: 12,
+                                              child: IgnorePointer(
+                                                child: DvrRecordingBadge(),
+                                              ),
+                                            ),
                                           if (fullScreenVideo && !osdVisible)
                                             Positioned(
                                               top: 12,

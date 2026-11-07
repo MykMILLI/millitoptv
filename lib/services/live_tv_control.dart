@@ -122,9 +122,11 @@ class LiveTvControlService {
     required DateTime startUtc,
     required DateTime endUtc,
     required String title,
+    String streamUrl = '',
   }) async {
     await connection.postDevice('/api/device/live-tv/dvr/schedule', {
       'action': 'upsert',
+      'streamUrl': streamUrl,
       'profileId': profileId,
       'sourceId': sourceId,
       'channelId': channelId,
@@ -154,6 +156,26 @@ class LiveTvControlService {
     return connection.postDevice('/api/device/live-tv/dvr/recordings', {
       'action': 'list',
       'profileId': profileId,
+    }, expectedConnection: expectedConnection);
+  }
+
+  Future<void> deleteDvrRecording({
+    required String expectedConnection,
+    required String recordingId,
+  }) async {
+    await connection.postDevice('/api/device/live-tv/dvr/recordings', {
+      'action': 'delete',
+      'recordingId': recordingId,
+    }, expectedConnection: expectedConnection);
+  }
+
+  Future<Map<String, dynamic>> stopDvrRecording({
+    required String expectedConnection,
+    required String recordingId,
+  }) {
+    return connection.postDevice('/api/device/live-tv/dvr', {
+      'action': 'stop',
+      'recordingId': recordingId,
     }, expectedConnection: expectedConnection);
   }
 

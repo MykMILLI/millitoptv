@@ -14,6 +14,9 @@ class LiveTvOsd extends StatefulWidget {
   final double? epgProgress;
   final bool isFavorite;
   final bool recording;
+
+  /// True while a start/stop request is in flight.
+  final bool recordingBusy;
   final bool liveOnly;
   final bool splitScreen;
   final int screenCount;
@@ -46,6 +49,7 @@ class LiveTvOsd extends StatefulWidget {
     required this.epgProgress,
     required this.isFavorite,
     required this.recording,
+    this.recordingBusy = false,
     required this.liveOnly,
     required this.splitScreen,
     required this.screenCount,
@@ -681,12 +685,25 @@ class _LiveTvOsdState extends State<LiveTvOsd> {
           ],
           const SizedBox(width: 14),
           if (widget.recording)
-            _OsdIconControl(
-              tooltip: 'Stop recording',
-              icon: Icons.fiber_manual_record,
-              iconColor: const Color(0xFFE5383B),
+            PulsingRecordButton(
+              key: const ValueKey('dvr-stop-recording'),
+              busy: widget.recordingBusy,
               accentColor: tokens.accentColor,
-              onPressed: () => _perform(widget.onRecord),
+              onPressed: widget.recordingBusy
+                  ? null
+                  : () => _perform(widget.onRecord),
+            )
+          else if (widget.recordingBusy)
+            const SizedBox(
+              width: 46,
+              height: 46,
+              child: Padding(
+                padding: EdgeInsets.all(13),
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: Color(0xFFE5383B),
+                ),
+              ),
             )
           else
             PopupMenuButton<String>(
@@ -917,6 +934,144 @@ class _OsdPillButtonState extends State<_OsdPillButton> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+const dvrRecordRed = Color(0xFFE5383B);
+
+/// Red record button that pulses while a DVR recording is running.
+/// Pressing it stops the recording and saves it to DVR.
+class PulsingRecordButton extends StatefulWidget {
+  final VoidCallback? onPressed;
+  final bool busy;
+  final Color accentColor;
+  const PulsingRecordButton({
+    super.key,
+    required this.onPressed,
+    this.busy = false,
+    this.accentColor = Colors.white,
+  });
+
+  @override
+  State<PulsingRecordButton> createState() => _PulsingRecordButtonState();
+}
+
+class _PulsingRecordButtonState extends State<PulsingRecordButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat(reverse: true);
+  bool _focused = false;
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: widget.busy ? 'Saving recording...' : 'Stop recording',
+      child: FocusableActionDetector(
+        onShowFocusHighlight: (value) => setState(() => _focused = value),
+        child: AnimatedBuilder(
+          animation: _pulse,
+          builder: (context, child) {
+            final t = Curves.easeInOut.transform(_pulse.value);
+            return Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: dvrRecordRed.withValues(alpha: 0.14 + 0.18 * t),
+                border: Border.all(
+                  color: _focused ? widget.accentColor : Colors.transparent,
+                  width: _focused ? 2 : 0,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: dvrRecordRed.withValues(alpha: 0.25 + 0.45 * t),
+                    blurRadius: 6 + 12 * t,
+                    spreadRadius: 1 + 3 * t,
+                  ),
+                ],
+              ),
+              child: IconButton(
+                onPressed: widget.onPressed,
+                icon: Opacity(
+                  opacity: 0.55 + 0.45 * t,
+                  child: const Icon(
+                    Icons.fiber_manual_record,
+                    color: dvrRecordRed,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact "REC" badge shown over the video while the controls are hidden.
+class DvrRecordingBadge extends StatefulWidget {
+  const DvrRecordingBadge({super.key});
+
+  @override
+  State<DvrRecordingBadge> createState() => _DvrRecordingBadgeState();
+}
+
+class _DvrRecordingBadgeState extends State<DvrRecordingBadge>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Recording',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xB3000000),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FadeTransition(
+              opacity: Tween(begin: 0.35, end: 1.0).animate(_pulse),
+              child: const Icon(
+                Icons.fiber_manual_record,
+                color: dvrRecordRed,
+                size: 14,
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text(
+              'REC',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+                fontSize: 13,
+              ),
+            ),
+          ],
         ),
       ),
     );

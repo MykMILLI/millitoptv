@@ -3568,6 +3568,46 @@ class _CategoryPickerDialogState extends State<_CategoryPickerDialog> {
   }
 }
 
+/// Plays a cloud DVR recording from the paired Millitop server using the
+/// same player as on-demand media (seek, subtitles, resume, full screen).
+class DvrRecordingPlayerScreen extends StatelessWidget {
+  final int profileId;
+  final String title;
+  final String? subtitle;
+  final String streamUrl;
+  const DvrRecordingPlayerScreen({
+    super.key,
+    required this.profileId,
+    required this.title,
+    required this.streamUrl,
+    this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<PlaybackPerformanceSettings>(
+      future: HomePreferences()
+          .playbackPerformance(profileId)
+          .catchError((_) => const PlaybackPerformanceSettings()),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Scaffold(
+            backgroundColor: Colors.black,
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        return _MediaPlayerScreen(
+          profileKey: 'profile-$profileId',
+          title: title,
+          subtitle: subtitle,
+          streamUrl: streamUrl,
+          playbackPerformance: snapshot.data!,
+        );
+      },
+    );
+  }
+}
+
 class _MediaPlayerScreen extends StatefulWidget {
   final String profileKey;
   final String title;

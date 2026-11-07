@@ -35,6 +35,20 @@ class DeviceConnection {
   bool get isConnected =>
       isEnrolled && !_suspended && status.value == 'Connected';
 
+  /// Base address of the paired Millitop server, used to build signed DVR
+  /// playback links. Null when this device is not paired.
+  Uri? get serverUri {
+    final raw = _record?['serverUrl'];
+    if (raw is! String || raw.isEmpty) {
+      return null;
+    }
+    try {
+      return validateServer(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
   String get connectionKey =>
       _record == null ? '' : '${_record!['serverUrl']}|${_record!['deviceId']}';
 
@@ -71,6 +85,10 @@ class DeviceConnection {
     final saved = _record!;
     final requestTimeout = route == '/api/device/media-library/catalog'
         ? const Duration(seconds: 90)
+        // Starting/stopping a recording waits for the server to open or
+        // finalize the channel stream.
+        : route == '/api/device/live-tv/dvr'
+        ? const Duration(seconds: 40)
         : const Duration(seconds: 15);
     try {
       return await _post(
@@ -405,9 +423,7 @@ class DeviceConnection {
 
       request.write(jsonEncode(body));
 
-      final response = await request.close().timeout(
-        requestTimeout,
-      );
+      final response = await request.close().timeout(requestTimeout);
 
       final text = await response
           .transform(utf8.decoder)
@@ -423,7 +439,16 @@ class DeviceConnection {
       }
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw DeviceRequestFailure(response.statusCode);
+        final serverMessage = data['error'];
+        throw DeviceRequestFailure(
+          response.statusCode,
+          serverMessage is String
+              ? serverMessage.trim().substring(
+                  0,
+                  serverMessage.trim().length.clamp(0, 300),
+                )
+              : '',
+        );
       }
 
       return data;
@@ -625,5 +650,12 @@ class DeviceConnection {
 
 class DeviceRequestFailure implements Exception {
   final int statusCode;
-  const DeviceRequestFailure(this.statusCode);
+
+  /// Short, server-authored explanation (the JSON `error` field), if any.
+  final String message;
+  const DeviceRequestFailure(this.statusCode, [this.message = '']);
+
+  @override
+  String toString() =>
+      message.isNotEmpty ? message : 'Request failed (HTTP $statusCode).';
 }

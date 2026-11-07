@@ -271,10 +271,14 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('add-dvr-folder')), findsOneWidget);
+      expect(find.byKey(const ValueKey('cloud-dvr-panel')), findsOneWidget);
+      expect(find.textContaining('Pair this device'), findsOneWidget);
+      await tester.tap(find.text('Recording settings'));
+      await tester.pumpAndSettle();
       expect(find.text('Schedule from EPG guide'), findsOneWidget);
       expect(find.text('Open IPTVnator (legacy)'), findsOneWidget);
-      expect(find.textContaining('Use Schedule from EPG guide'), findsOneWidget);
+      expect(find.byKey(const ValueKey('add-dvr-folder')), findsOneWidget);
+      expect(find.textContaining('Record now and Schedule'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );

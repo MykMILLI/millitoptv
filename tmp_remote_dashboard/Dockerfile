@@ -14,6 +14,7 @@ RUN node --check server/community-routes.mjs && node --check server/verify-commu
 RUN node --check server/tmdb-discovery.mjs && node --test server/tmdb-discovery.test.mjs
 RUN node --check server/profile-sync-routes.mjs && node --check server/verify-profile-sync-schema.mjs && node --test server/profile-sync.test.mjs
 RUN node --check server/listening-session-routes.mjs && node --check server/verify-listening-session-schema.mjs && node --test server/listening-session-routes.test.mjs
+RUN node --check server/dvr-routes.mjs && node --check server/dvr-recorder.mjs && node --check server/dvr-store.mjs && node --test server/dvr-routes.test.mjs
 RUN npm prune --omit=dev
 
 FROM node:24-bookworm-slim
@@ -21,7 +22,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends smbclient \
+  && apt-get install -y --no-install-recommends smbclient ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/package.json ./
@@ -29,6 +30,8 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/server ./server
 COPY --from=build /app/dist ./dist
 
+RUN mkdir -p /recordings && chown node:node /recordings
+VOLUME ["/recordings"]
 EXPOSE 3000
 CMD ["node", "server/index.mjs"]
 

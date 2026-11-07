@@ -16,11 +16,11 @@ class LiveTvSyncService {
     required int profileId,
     required String sourceId,
   }) async {
-    final response = await connection.postDevice('/api/device/live-tv/favorites', {
-      'action': 'get',
-      'profileId': profileId,
-      'sourceId': sourceId,
-    }, expectedConnection: expectedConnection);
+    final response = await connection.postDevice(
+      '/api/device/live-tv/favorites',
+      {'action': 'get', 'profileId': profileId, 'sourceId': sourceId},
+      expectedConnection: expectedConnection,
+    );
     final favoritesRaw = response['favorites'];
     final historyRaw = response['history'];
     final favorites = <String>{};
@@ -74,20 +74,40 @@ class LiveTvSyncService {
     }, expectedConnection: expectedConnection);
   }
 
-  Future<void> dvr({
+  /// Starts or stops a cloud DVR recording on the paired Millitop server.
+  /// Returns the server's recording record (`recording`).
+  Future<Map<String, dynamic>> dvr({
     required String expectedConnection,
     required int profileId,
     required String sourceId,
     required String channelId,
     required String channelName,
     required bool start,
-  }) async {
-    await connection.postDevice('/api/device/live-tv/dvr', {
+    String streamUrl = '',
+    String title = '',
+    String? recordingId,
+  }) {
+    return connection.postDevice('/api/device/live-tv/dvr', {
       'action': start ? 'start' : 'stop',
       'profileId': profileId,
       'sourceId': sourceId,
       'channelId': channelId,
       'channelName': channelName,
+      if (start) 'streamUrl': streamUrl,
+      if (start && title.trim().isNotEmpty) 'title': title.trim(),
+      if (!start && recordingId != null) 'recordingId': recordingId,
     }, expectedConnection: expectedConnection);
+  }
+
+  /// Recordings currently running anywhere in the household.
+  Future<List<Map<String, dynamic>>> dvrActive({
+    required String expectedConnection,
+  }) async {
+    final response = await connection.postDevice('/api/device/live-tv/dvr', {
+      'action': 'status',
+    }, expectedConnection: expectedConnection);
+    return [
+      ...(response['recordings'] as List? ?? const []),
+    ].whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
   }
 }

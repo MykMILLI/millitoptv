@@ -12,6 +12,8 @@ import '../services/device_connection.dart';
 import '../services/live_tv_control.dart';
 import '../theme/millitop_visual_theme.dart';
 import 'live_tv_screen.dart';
+import 'live_tv_media_screen.dart' show DvrRecordingPlayerScreen;
+import '../widgets/live_tv_osd.dart' show DvrRecordingBadge, dvrRecordRed;
 import 'library_browser_screen.dart';
 
 class MediaLibraryHome extends StatefulWidget {
@@ -41,6 +43,9 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
   List<LiveTvRecentChannel> recentLiveTv = [];
   List<Map<String, dynamic>> remoteSchedules = [];
   List<Map<String, dynamic>> remoteRecordings = [];
+  bool cloudDvrConnected = false, cloudDvrLoaded = false;
+  String cloudDvrError = '';
+  Timer? cloudDvrRefresh;
   bool busy = false, loading = true;
   bool metadataScanning = false;
   String error = '';
@@ -49,6 +54,12 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
   void initState() {
     super.initState();
     _attach();
+  }
+
+  @override
+  void dispose() {
+    cloudDvrRefresh?.cancel();
+    super.dispose();
   }
 
   void _attach() {
@@ -104,37 +115,360 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
   Future<void> _loadRemoteDvr(int profile) async {
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty || !DeviceConnection.instance.isConnected) {
+      cloudDvrRefresh?.cancel();
       if (mounted) {
         setState(() {
+          cloudDvrConnected = false;
+          cloudDvrLoaded = true;
           remoteSchedules = [];
           remoteRecordings = [];
         });
       }
       return;
     }
+    List<Map<String, dynamic>> rows(Map<String, dynamic> data, String key) => [
+      ...(data[key] as List? ?? const []),
+    ].whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
     try {
-      final schedules = await liveTvControl.dvrSchedules(
-        expectedConnection: connection,
-        profileId: profile,
-      );
       final recordings = await liveTvControl.dvrRecordings(
         expectedConnection: connection,
         profileId: profile,
       );
+      var schedules = <Map<String, dynamic>>[];
+      try {
+        schedules = rows(
+          await liveTvControl.dvrSchedules(
+            expectedConnection: connection,
+            profileId: profile,
+          ),
+          'schedules',
+        );
+      } catch (_) {}
+      if (!mounted || widget.profileId != profile) {
+        return;
+      }
+      final next = rows(recordings, 'recordings');
+      setState(() {
+        cloudDvrConnected = true;
+        cloudDvrLoaded = true;
+        cloudDvrError = '';
+        remoteSchedules = schedules;
+        remoteRecordings = next;
+      });
+      // Keep "Recording now" entries fresh while something is recording.
+      cloudDvrRefresh?.cancel();
+      if (next.any((item) => item['status'] == 'recording') ||
+          schedules.isNotEmpty) {
+        cloudDvrRefresh = Timer(
+          const Duration(seconds: 15),
+          () => unawaited(_loadRemoteDvr(profile)),
+        );
+      }
+    } catch (e) {
       if (!mounted || widget.profileId != profile) {
         return;
       }
       setState(() {
-        remoteSchedules = [...(schedules['schedules'] as List? ?? const [])]
-            .whereType<Map>()
-            .map((item) => Map<String, dynamic>.from(item))
-            .toList();
-        remoteRecordings = [...(recordings['recordings'] as List? ?? const [])]
-            .whereType<Map>()
-            .map((item) => Map<String, dynamic>.from(item))
-            .toList();
+        cloudDvrConnected = true;
+        cloudDvrLoaded = true;
+        cloudDvrError = e is DeviceRequestFailure && e.statusCode == 404
+            ? 'Your Millitop server does not support DVR yet. Update the dashboard server to enable recordings.'
+            : 'Recordings could not load. ${e is DeviceRequestFailure && e.message.isNotEmpty ? e.message : 'Check your connection and refresh.'}';
       });
-    } catch (_) {}
+    }
+  }
+
+  Uri? _playbackUri(Map<String, dynamic> item) {
+    final path = item['playbackPath']?.toString() ?? '';
+    final server = DeviceConnection.instance.serverUri;
+    if (path.isEmpty || server == null) {
+      return null;
+    }
+    return server.resolve(path);
+  }
+
+  Future<void> _playRecording(Map<String, dynamic> item) async {
+    final uri = _playbackUri(item);
+    if (uri == null) {
+      setState(
+        () => cloudDvrError = 'This recording is not available to play.',
+      );
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => DvrRecordingPlayerScreen(
+          profileId: widget.profileId,
+          title: item['title']?.toString() ?? 'Recording',
+          subtitle: item['channelName']?.toString(),
+          streamUrl: uri.toString(),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _stopRecording(Map<String, dynamic> item) async {
+    final connection = DeviceConnection.instance.connectionKey;
+    final id = item['id']?.toString() ?? '';
+    if (connection.isEmpty || id.isEmpty) {
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      await liveTvControl.stopDvrRecording(
+        expectedConnection: connection,
+        recordingId: id,
+      );
+    } catch (e) {
+      if (mounted && !(e is DeviceRequestFailure && e.statusCode == 404)) {
+        setState(() => cloudDvrError = 'Could not stop the recording. $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => busy = false);
+      }
+      await _loadRemoteDvr(widget.profileId);
+    }
+  }
+
+  Future<void> _deleteRecording(Map<String, dynamic> item) async {
+    final connection = DeviceConnection.instance.connectionKey;
+    final id = item['id']?.toString() ?? '';
+    if (connection.isEmpty || id.isEmpty) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete recording?'),
+        content: Text(
+          '"${item['title'] ?? 'Recording'}" will be removed from DVR on all paired devices.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      await liveTvControl.deleteDvrRecording(
+        expectedConnection: connection,
+        recordingId: id,
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => cloudDvrError = 'Could not delete the recording. $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => busy = false);
+      }
+      await _loadRemoteDvr(widget.profileId);
+    }
+  }
+
+  static String _durationText(int seconds) {
+    final h = seconds ~/ 3600, m = (seconds % 3600) ~/ 60, s = seconds % 60;
+    if (h > 0) return '${h}h ${m}m';
+    if (m > 0) return '${m}m ${s.toString().padLeft(2, '0')}s';
+    return '${s}s';
+  }
+
+  static String _sizeText(num bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+    }
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  }
+
+  String _whenText(String? iso) {
+    final value = iso == null ? null : DateTime.tryParse(iso)?.toLocal();
+    if (value == null) return '';
+    final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '${value.month}/${value.day} $hour:$minute ${value.hour >= 12 ? 'PM' : 'AM'}';
+  }
+
+  Widget _cloudDvrPanel() {
+    final active = remoteRecordings
+        .where((item) => item['status'] == 'recording')
+        .toList();
+    final saved = remoteRecordings
+        .where((item) => item['status'] != 'recording')
+        .toList();
+    final upcoming = remoteSchedules
+        .where((item) => item['status'] == 'scheduled')
+        .toList();
+    return _premiumPanel(
+      child: Column(
+        key: const ValueKey('cloud-dvr-panel'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Your recordings',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: busy
+                    ? null
+                    : () => unawaited(_loadRemoteDvr(widget.profileId)),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (cloudDvrLoaded && !cloudDvrConnected)
+            const Text(
+              'Pair this device with your Millitop server to see recordings saved from any of your devices.',
+            )
+          else if (!cloudDvrLoaded)
+            const LinearProgressIndicator()
+          else ...[
+            if (cloudDvrError.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  cloudDvrError,
+                  style: const TextStyle(color: Colors.orangeAccent),
+                ),
+              ),
+            if (active.isNotEmpty) ...[
+              const Text(
+                'Recording now',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              for (final item in active)
+                ListTile(
+                  key: ValueKey('dvr-active-${item['id']}'),
+                  leading: const DvrRecordingBadge(),
+                  title: Text(item['title']?.toString() ?? 'Recording'),
+                  subtitle: Text(
+                    '${item['channelName'] ?? ''} · started ${_whenText(item['startedAtUtc']?.toString())}',
+                  ),
+                  trailing: Wrap(
+                    spacing: 6,
+                    children: [
+                      if (_playbackUri(item) != null)
+                        IconButton(
+                          tooltip: 'Watch from the beginning',
+                          onPressed: busy ? null : () => _playRecording(item),
+                          icon: const Icon(Icons.play_arrow),
+                        ),
+                      OutlinedButton.icon(
+                        onPressed: busy ? null : () => _stopRecording(item),
+                        icon: const Icon(Icons.stop, color: dvrRecordRed),
+                        label: const Text('Stop'),
+                      ),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 8),
+            ],
+            if (upcoming.isNotEmpty) ...[
+              const Text(
+                'Scheduled',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              for (final item in upcoming.take(10))
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.event_note),
+                  title: Text(item['title']?.toString() ?? 'Scheduled item'),
+                  subtitle: Text(
+                    '${item['channelName'] ?? ''} · ${_whenText(item['startUtc']?.toString())}',
+                  ),
+                  trailing: (item['scheduleId'] ?? item['id']) == null
+                      ? null
+                      : IconButton(
+                          tooltip: 'Cancel schedule',
+                          onPressed: busy
+                              ? null
+                              : () => unawaited(
+                                  _cancelRemoteSchedule(
+                                    (item['scheduleId'] ?? item['id'])
+                                        .toString(),
+                                  ),
+                                ),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
+                ),
+              const SizedBox(height: 8),
+            ],
+            if (saved.isEmpty && active.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'No recordings yet. In Live TV, press the record button and choose Record now, or schedule a program from the guide.',
+                ),
+              ),
+            for (final item in saved)
+              ListTile(
+                key: ValueKey('dvr-recording-${item['id']}'),
+                leading: Icon(
+                  item['status'] == 'failed'
+                      ? Icons.error_outline
+                      : Icons.fiber_smart_record,
+                  color: item['status'] == 'failed'
+                      ? Colors.orangeAccent
+                      : null,
+                ),
+                title: Text(item['title']?.toString() ?? 'Recording'),
+                subtitle: Text(
+                  [
+                    item['channelName']?.toString() ?? '',
+                    _whenText(item['startedAtUtc']?.toString()),
+                    if (item['status'] != 'failed') ...[
+                      _durationText(
+                        (item['durationSeconds'] as num?)?.toInt() ?? 0,
+                      ),
+                      _sizeText((item['sizeBytes'] as num?) ?? 0),
+                    ],
+                    if (item['status'] == 'failed')
+                      item['note']?.toString() ?? 'Recording failed',
+                  ].where((part) => part.isNotEmpty).join(' · '),
+                ),
+                onTap: busy || _playbackUri(item) == null
+                    ? null
+                    : () => _playRecording(item),
+                trailing: Wrap(
+                  spacing: 4,
+                  children: [
+                    if (_playbackUri(item) != null)
+                      IconButton(
+                        tooltip: 'Play',
+                        onPressed: busy ? null : () => _playRecording(item),
+                        icon: const Icon(Icons.play_arrow),
+                      ),
+                    IconButton(
+                      tooltip: 'Delete recording',
+                      onPressed: busy ? null : () => _deleteRecording(item),
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
   }
 
   Future<void> _scanMetadata() async {
@@ -509,7 +843,7 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
               ),
               SizedBox(height: 8),
               Text(
-                'Schedule from DVR or EPG guide, then choose your recordings to play.',
+                'Recordings from Live TV are saved to your Millitop server and appear on every paired device.',
                 style: TextStyle(
                   fontSize: 20,
                   color: Colors.white70,
@@ -522,16 +856,23 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
         if (busy || loading) const LinearProgressIndicator(),
         if (error.isNotEmpty)
           Text(error, style: const TextStyle(color: Colors.orangeAccent)),
-        if (!loading && visible.isEmpty)
-          const Text('Choose your recordings folder once to get started.'),
+        _cloudDvrPanel(),
+        if (visible.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          const Text(
+            'Recording folders on this device',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+        ],
         for (final folder in visible)
           Padding(
             padding: const EdgeInsets.only(bottom: 14),
             child: SizedBox(
               width: 450,
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.all(24),
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.all(20),
                 ),
                 onPressed: busy
                     ? null
@@ -544,100 +885,20 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
                           ),
                         ),
                       ),
-                icon: const Icon(Icons.video_library_outlined, size: 36),
-                label: Text(
-                  visible.length == 1 ? 'Watch recordings' : folder.label,
-                  style: const TextStyle(fontSize: 24),
-                ),
-              ),
-            ),
-          ),
-        const SizedBox(height: 16),
-        if (remoteSchedules.isNotEmpty || remoteRecordings.isNotEmpty)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Cloud DVR',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 10),
-                  if (remoteSchedules.isNotEmpty) ...[
-                    const Text(
-                      'Scheduled',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 6),
-                    for (final item in remoteSchedules.take(5))
-                      ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.event_note),
-                        title: Text(
-                          item['title']?.toString() ?? 'Scheduled item',
-                        ),
-                        subtitle: Text(
-                          '${item['channelName'] ?? ''} ${item['startUtc'] ?? ''}',
-                          style: const TextStyle(height: 1.3),
-                        ),
-                        trailing: (item['scheduleId'] ?? item['id']) == null
-                            ? null
-                            : IconButton(
-                                tooltip: 'Cancel schedule',
-                                onPressed: busy
-                                    ? null
-                                    : () => unawaited(
-                                        _cancelRemoteSchedule(
-                                          (item['scheduleId'] ?? item['id'])
-                                              .toString(),
-                                        ),
-                                      ),
-                                icon: const Icon(Icons.delete_outline),
-                              ),
-                      ),
-                  ],
-                  if (remoteRecordings.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Recent recordings',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 6),
-                    for (final item in remoteRecordings.take(5))
-                      ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.fiber_smart_record),
-                        title: Text(item['title']?.toString() ?? 'Recording'),
-                        subtitle: Text(
-                          '${item['channelName'] ?? ''} ${item['recordedAtUtc'] ?? ''}',
-                          style: const TextStyle(height: 1.3),
-                        ),
-                      ),
-                  ],
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: () =>
-                          unawaited(_loadRemoteDvr(widget.profileId)),
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Refresh Cloud DVR'),
-                    ),
-                  ),
-                ],
+                icon: const Icon(Icons.video_library_outlined, size: 30),
+                label: Text(folder.label, style: const TextStyle(fontSize: 20)),
               ),
             ),
           ),
         const SizedBox(height: 8),
         ExpansionTile(
           title: const Text('Recording settings'),
-          initiallyExpanded: visible.isEmpty,
+          initiallyExpanded: false,
           childrenPadding: const EdgeInsets.all(16),
           expandedCrossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Choose where your recorder saves its files. Use Schedule from EPG guide to create DVR jobs and use Cloud DVR above to review or cancel jobs.',
+              'Record now and Schedule from the Live TV guide save to your Millitop server. You can also add folders from another recorder on this device.',
               style: TextStyle(height: 1.35),
             ),
             const SizedBox(height: 12),
@@ -649,7 +910,7 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
                   key: const ValueKey('add-dvr-folder'),
                   onPressed: busy || loading ? null : () => _add(),
                   icon: const Icon(Icons.create_new_folder_outlined),
-                  label: const Text('Choose recordings folder'),
+                  label: const Text('Add recordings folder'),
                 ),
                 OutlinedButton.icon(
                   onPressed: busy ? null : _load,
@@ -780,11 +1041,11 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
                   label: const Text('Refresh folders'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: metadataScanning ? null : () => unawaited(_scanMetadata()),
+                  onPressed: metadataScanning
+                      ? null
+                      : () => unawaited(_scanMetadata()),
                   icon: Icon(
-                    metadataScanning
-                        ? Icons.sync
-                        : Icons.movie_filter_outlined,
+                    metadataScanning ? Icons.sync : Icons.movie_filter_outlined,
                   ),
                   label: Text(
                     metadataScanning

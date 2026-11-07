@@ -9,6 +9,9 @@ import { registerDeviceRoutes } from './device-routes.mjs';
 import { registerLiveTvRoutes } from './live-tv-routes.mjs';
 import { registerMediaLibraryRoutes } from './media-library-routes.mjs';
 import { registerListeningSessionRoutes } from './listening-session-routes.mjs';
+import { registerDvrRoutes } from './dvr-routes.mjs';
+import { DvrRecorder, DvrSigner } from './dvr-recorder.mjs';
+import { PgDvrStore } from './dvr-store.mjs';
 import express from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
@@ -326,6 +329,25 @@ registerMediaLibraryRoutes(
     legacyHeaders: false
   })
 );
+const dvr = registerDvrRoutes(app, {
+  store: new PgDvrStore(pool),
+  recorder: new DvrRecorder({
+    storageDir: process.env.DVR_STORAGE_DIR ?? '/recordings',
+    ffmpegPath: process.env.DVR_FFMPEG_PATH ?? 'ffmpeg',
+    minFreeBytes: Number(process.env.DVR_MIN_FREE_GB ?? 5) * 1024 * 1024 * 1024
+  }),
+  signer: new DvrSigner(process.env.DVR_SIGNING_SECRET),
+  deviceLimit: rateLimit({
+    windowMs: 60000,
+    limit: 120,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false
+  }),
+  options: {
+    maxConcurrent: Number(process.env.DVR_MAX_CONCURRENT ?? 4),
+    maxRecordingHours: Number(process.env.DVR_MAX_RECORDING_HOURS ?? 4)
+  }
+});
 registerProfileSyncRoutes(app,pool,rateLimit({windowMs:60000,limit:90,keyGenerator:billingRateKey,standardHeaders:'draft-8',legacyHeaders:false}));
 const tmdbDiscovery=new TmdbDiscovery();tmdbDiscovery.start();
 registerCommunityRoutes(app,pool,rateLimit({windowMs:60000,limit:60,standardHeaders:'draft-8',legacyHeaders:false}),{discovery:tmdbDiscovery});
@@ -383,6 +405,8 @@ const server = app.listen(3000, '0.0.0.0', () => {
 
 async function shutdown() {
   tmdbDiscovery.stop();
+  // Finalize in-progress recordings before the database pool closes.
+  await dvr.shutdown().catch(() => {});
   server.close(async () => {
     await pool.end();
     process.exit(0);
