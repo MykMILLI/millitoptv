@@ -56,6 +56,8 @@ Future<void> _open(
     home: LiveTvMediaScreen(
       catalogCache: MediaCatalogCache.disabled(),
       profileId: 1,
+      // These tests exercise the poster grid, not the Home hub.
+      initialMediaType: 'movie',
       loadConfiguredSources: (_) => Future.value([_source]),
       playlistService: service,
       now: now,

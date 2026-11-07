@@ -14,12 +14,15 @@ import 'package:window_manager/window_manager.dart';
 import '../services/device_connection.dart';
 import '../services/firefox_browser.dart';
 import '../services/home_preferences.dart';
+import '../services/jellyfin_client.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/live_tv_source.dart';
 import '../services/media_catalog_cache.dart';
+import 'jellyfin_connect_screen.dart';
+import 'media_home_view.dart';
 import '../services/subtitle_provider_service.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
@@ -325,6 +328,8 @@ class LiveTvMediaScreen extends StatefulWidget {
   loadConfiguredSources;
   final DateTime Function()? now;
   final MediaCatalogCache? catalogCache;
+  final JellyfinAccountStore? jellyfinStore;
+  final JellyfinTransport? jellyfinTransport;
   const LiveTvMediaScreen({
     super.key,
     required this.profileId,
@@ -337,6 +342,8 @@ class LiveTvMediaScreen extends StatefulWidget {
     this.loadConfiguredSources,
     this.now,
     this.catalogCache,
+    this.jellyfinStore,
+    this.jellyfinTransport,
   });
 
   @override
@@ -358,6 +365,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   bool managedCatalogFromCache = false;
   String? managedCatalogVersion;
   bool checkingForCatalogUpdates = false;
+  late final JellyfinAccountStore jellyfinStore =
+      widget.jellyfinStore ?? JellyfinAccountStore.instance();
+  JellyfinAccount? jellyfinAccount;
+  JellyfinApi? jellyfinApi;
+  bool jellyfinAccountLoaded = false;
+  final Map<String, Future<List<JellyfinEntry>>> jellyfinLibraryFetches = {};
+  final Map<String, JellyfinUserData> jellyfinUserData = {};
+  List<JellyfinEntry> jellyfinResume = const [];
+  List<JellyfinEntry> jellyfinNextUp = const [];
+  List<JellyfinEntry> jellyfinLatest = const [];
+  List<JellyfinEntry> jellyfinSimilar = const [];
+  String? jellyfinSimilarTo;
+  String jellyfinHomeError = '';
   LiveTvSource? source;
   List<LiveTvMediaItem> movies = [];
   List<LiveTvMediaItem> series = [];
@@ -365,6 +385,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvLibraryItem> favorites = [];
   List<LiveTvUserPlaylist> playlists = [];
   _MediaTab tab = _MediaTab.movies;
+
+  /// Home hub (rows) vs. the poster grid. Home is the default landing page.
+  bool homeView = true;
   _MediaSortMode sortMode = _MediaSortMode.relevance;
   String groupFilter = 'All';
   Set<String> selectedGenres = {};
@@ -417,6 +440,201 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   String _managedSourceId(String libraryId) =>
       '$_managedSourcePrefix$libraryId';
+
+  // ---- Jellyfin -----------------------------------------------------------
+
+  Future<List<LiveTvSource>> _jellyfinSources({bool reload = false}) async {
+    if (!jellyfinAccountLoaded || reload) {
+      jellyfinAccount = await jellyfinStore.load(widget.profileId);
+      jellyfinApi = jellyfinAccount == null
+          ? null
+          : JellyfinApi.forAccount(
+              jellyfinAccount!,
+              transport: widget.jellyfinTransport,
+            );
+      jellyfinAccountLoaded = true;
+    }
+    return jellyfinAccount?.sources ?? const [];
+  }
+
+  bool _isJellyfinSource(LiveTvSource item) => isJellyfinSourceId(item.id);
+
+  void _rememberJellyfin(Iterable<JellyfinEntry> entries) {
+    for (final entry in entries) {
+      jellyfinUserData[entry.itemId] = entry.userData;
+    }
+  }
+
+  /// Downloads one Jellyfin library. Movies and series come from the same
+  /// request, so concurrent callers share it.
+  Future<List<JellyfinEntry>> _jellyfinLibraryEntries(LiveTvSource source) {
+    return jellyfinLibraryFetches.putIfAbsent(source.id, () async {
+      final account = jellyfinAccount;
+      final api = jellyfinApi;
+      if (account == null || api == null) {
+        return const <JellyfinEntry>[];
+      }
+      final libraryId = source.id.substring(jellyfinSourcePrefix.length);
+      final library = account.libraries.firstWhere(
+        (item) => item.id == libraryId,
+        orElse: () => JellyfinLibrary(
+          id: libraryId,
+          name: source.name,
+          collectionType: '',
+        ),
+      );
+      try {
+        final entries = await api.libraryItems(account.userId, library);
+        _rememberJellyfin(entries);
+        return entries;
+      } catch (_) {
+        jellyfinLibraryFetches.remove(source.id);
+        rethrow;
+      }
+    });
+  }
+
+  Future<List<LiveTvMediaItem>> _loadMoviesFor(LiveTvSource source) async {
+    if (_isJellyfinSource(source)) {
+      final entries = await _jellyfinLibraryEntries(source);
+      return [
+        for (final entry in entries)
+          if (!entry.isSeries) entry.media,
+      ];
+    }
+    return service.loadMovies(source);
+  }
+
+  Future<List<LiveTvMediaItem>> _loadSeriesFor(LiveTvSource source) async {
+    if (_isJellyfinSource(source)) {
+      final entries = await _jellyfinLibraryEntries(source);
+      return [
+        for (final entry in entries)
+          if (entry.isSeries) entry.media,
+      ];
+    }
+    return service.loadSeries(source);
+  }
+
+  Future<LiveTvSeriesDetails?> _jellyfinSeriesDetails(
+    LiveTvMediaItem item,
+  ) async {
+    final account = jellyfinAccount;
+    final api = jellyfinApi;
+    if (account == null || api == null) {
+      return null;
+    }
+    final seriesId = item.seriesId ?? item.id.replaceFirst('jf:', '');
+    final entries = await api.episodes(account.userId, seriesId);
+    _rememberJellyfin(entries);
+    return LiveTvSeriesDetails(
+      seriesId: seriesId,
+      title: item.title,
+      description: item.description,
+      posterUrl: item.posterUrl,
+      backdropUrl: item.backdropUrl,
+      episodes: [
+        for (final entry in entries)
+          LiveTvSeriesEpisode(
+            id: entry.media.id,
+            title: entry.media.title,
+            streamUrl: entry.media.streamUrl,
+            season: entry.season ?? 1,
+            episode: entry.episode ?? 0,
+            posterUrl: entry.media.backdropUrl ?? entry.media.posterUrl,
+            description: entry.media.description,
+          ),
+      ],
+    );
+  }
+
+  /// Builds the playback hook for a Jellyfin stream placeholder. Returns
+  /// null for every other kind of source.
+  JellyfinPlaybackReporter? _jellyfinReporter(String streamUrl) {
+    final itemId = jellyfinItemIdFromUrl(streamUrl);
+    final account = jellyfinAccount;
+    final api = jellyfinApi;
+    if (itemId == null || account == null || api == null) {
+      return null;
+    }
+    final userData = jellyfinUserData[itemId];
+    return JellyfinPlaybackReporter(
+      api: api,
+      itemId: itemId,
+      resumeMs: userData == null || userData.played
+          ? null
+          : userData.positionMs,
+      enabled: account.syncProgress,
+    );
+  }
+
+  /// Home rows from Jellyfin: resume, next up, recently added, similar.
+  Future<void> _loadJellyfinHome() async {
+    final account = jellyfinAccount;
+    final api = jellyfinApi;
+    if (account == null || api == null) {
+      if (mounted) {
+        setState(() {
+          jellyfinResume = const [];
+          jellyfinNextUp = const [];
+          jellyfinLatest = const [];
+          jellyfinSimilar = const [];
+        });
+      }
+      return;
+    }
+    try {
+      final libraryIds = account.selectedLibraryIds;
+      final results = await Future.wait([
+        api.resume(account.userId).catchError((_) => <JellyfinEntry>[]),
+        api.nextUp(account.userId).catchError((_) => <JellyfinEntry>[]),
+        Future.wait([
+          for (final id in libraryIds)
+            api
+                .latest(account.userId, parentId: id, limit: 12)
+                .catchError((_) => <JellyfinEntry>[]),
+        ]).then((lists) => lists.expand((list) => list).toList()),
+      ]);
+      final resume = List<JellyfinEntry>.from(results[0]);
+      final nextUp = List<JellyfinEntry>.from(results[1]);
+      final latest = [...results[2]]
+        ..sort(
+          (a, b) => (b.media.addedAt ?? DateTime(1970)).compareTo(
+            a.media.addedAt ?? DateTime(1970),
+          ),
+        );
+      _rememberJellyfin([...resume, ...nextUp, ...latest]);
+      var similar = const <JellyfinEntry>[];
+      String? similarTo;
+      final seed = resume.isNotEmpty ? resume.first : null;
+      if (seed != null) {
+        final seedId = seed.isEpisode
+            ? (seed.seriesId ?? seed.itemId)
+            : seed.itemId;
+        similarTo = seed.isEpisode
+            ? (seed.seriesName ?? seed.media.title)
+            : seed.media.title;
+        similar = await api
+            .similar(account.userId, seedId)
+            .catchError((_) => <JellyfinEntry>[]);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        jellyfinResume = account.showContinueWatching ? resume : const [];
+        jellyfinNextUp = nextUp;
+        jellyfinLatest = latest.take(24).toList();
+        jellyfinSimilar = similar;
+        jellyfinSimilarTo = similarTo;
+        jellyfinHomeError = '';
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => jellyfinHomeError = e.toString());
+      }
+    }
+  }
 
   String _managedPathToStreamUrl(String value) {
     final path = value.trim();
@@ -806,7 +1024,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       );
       final configuredSources = await _configuredSources();
       final managedSources = await _managedSources(widget.profileId);
-      sources = [...configuredSources, ...managedSources];
+      final jellyfinSources = await _jellyfinSources();
+      sources = [...configuredSources, ...managedSources, ...jellyfinSources];
+      unawaited(_loadJellyfinHome());
       history = await HomePreferences().liveTvRecentMedia(widget.profileId);
       favorites = await HomePreferences().liveTvFavorites(widget.profileId);
       playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
@@ -835,8 +1055,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           widget.initialSourceId == null || widget.initialSourceId!.isEmpty;
       if (widget.initialMediaType == 'series') {
         tab = _MediaTab.series;
+        homeView = false;
       } else if (widget.initialMediaType == 'movie') {
         tab = _MediaTab.movies;
+        homeView = false;
       }
       await _loadCatalog();
     } catch (e) {
@@ -908,8 +1130,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       if (!mounted || generation != catalogLoadGeneration) {
         return;
       }
+      final jellyfinSources = await _jellyfinSources();
+      if (forceRefresh) {
+        jellyfinLibraryFetches.clear();
+        unawaited(_loadJellyfinHome());
+      }
+      if (!mounted || generation != catalogLoadGeneration) {
+        return;
+      }
       final previousSourceId = source?.id;
-      sources = [...configuredSources, ...managedSources];
+      sources = [...configuredSources, ...managedSources, ...jellyfinSources];
       unawaited(
         catalogCache.retainSources(
           widget.profileId,
@@ -996,7 +1226,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           catalogSourceName = activeSource.name;
           catalogPhase = 'Loading movies...';
         });
-        final freshMovies = await service.loadMovies(activeSource);
+        final freshMovies = await _loadMoviesFor(activeSource);
         if (!mounted || generation != catalogLoadGeneration) {
           return;
         }
@@ -1005,7 +1235,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           catalogStepsCompleted++;
           catalogPhase = 'Loading series...';
         });
-        final freshSeries = await service.loadSeries(activeSource);
+        final freshSeries = await _loadSeriesFor(activeSource);
         if (!mounted || generation != catalogLoadGeneration) {
           return;
         }
@@ -1140,8 +1370,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           continue;
         }
         try {
-          final freshMovies = await service.loadMovies(activeSource);
-          final freshSeries = await service.loadSeries(activeSource);
+          jellyfinLibraryFetches.remove(activeSource.id);
+          final freshMovies = await _loadMoviesFor(activeSource);
+          final freshSeries = await _loadSeriesFor(activeSource);
           if (stale()) {
             return;
           }
@@ -1803,6 +2034,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             title: item.title,
             subtitle: item.subtitle ?? item.sourceName,
             streamUrl: stream,
+            jellyfin: _jellyfinReporter(stream),
+            jellyfinFor: _jellyfinReporter,
             streamUrlCandidates: _playbackUrlCandidates(stream),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
@@ -1856,7 +2089,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             ? const <LiveTvMediaItem>[]
             : List<LiveTvMediaItem>.from(managed.series);
       } else {
-        candidates = await service.loadSeries(selectedSource);
+        candidates = await _loadSeriesFor(selectedSource);
       }
     }
     final match = candidates
@@ -1951,9 +2184,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     final year = metadata?.year ?? _yearFromTitle(item.title);
     final runtime = metadata?.runtimeMinutes;
     final watchedState = await playbackMemory.loadProgress(item.streamUrl);
-    final watched = watchedState['complete'] == true;
-    final resumeMs =
-        int.tryParse(watchedState['positionMs']?.toString() ?? '') ?? 0;
+    final jellyfinItemId = jellyfinItemIdFromUrl(item.streamUrl);
+    final remoteState = jellyfinItemId == null
+        ? null
+        : jellyfinUserData[jellyfinItemId];
+    // Jellyfin's state includes other devices, so it wins when present.
+    final watched = remoteState?.played ?? watchedState['complete'] == true;
+    final resumeMs = (remoteState?.positionMs ?? 0) > 0
+        ? remoteState!.positionMs
+        : int.tryParse(watchedState['positionMs']?.toString() ?? '') ?? 0;
     final editions = _editionsFor(item);
     final relatedLocal = _relatedLocalTitlesFor(item);
     final quality = _qualityHint(item);
@@ -2109,6 +2348,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                   OutlinedButton.icon(
                                     onPressed: () {
                                       Navigator.pop(ctx);
+                                      if (jellyfinItemId != null) {
+                                        jellyfinUserData[jellyfinItemId] =
+                                            const JellyfinUserData();
+                                      }
                                       unawaited(
                                         playbackMemory
                                             .saveProgress(
@@ -2131,6 +2374,26 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                     },
                                     icon: const Icon(Icons.play_arrow),
                                     label: const Text('Resume'),
+                                  ),
+                                if (!item.series)
+                                  OutlinedButton.icon(
+                                    key: const ValueKey('media-mark-watched'),
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      unawaited(
+                                        _setWatched(item, played: !watched),
+                                      );
+                                    },
+                                    icon: Icon(
+                                      watched
+                                          ? Icons.remove_done
+                                          : Icons.done_all,
+                                    ),
+                                    label: Text(
+                                      watched
+                                          ? 'Mark unwatched'
+                                          : 'Mark watched',
+                                    ),
                                   ),
                                 if (trailerUrl != null && trailerUrl.isNotEmpty)
                                   TextButton.icon(
@@ -2240,21 +2503,35 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     ]),
                   ],
                   if (editions.length > 1) ...[
-                    section('Available editions', [
+                    section('Play from', [
                       Wrap(
                         spacing: 8,
                         runSpacing: 8,
-                        children: editions
-                            .map(
-                              (entry) => ActionChip(
-                                label: Text(entry.title),
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  unawaited(_showMediaDetails(entry));
-                                },
-                              ),
-                            )
-                            .toList(),
+                        children: editions.map((entry) {
+                          final origin = mediaItemOrigins[entry];
+                          final badge = origin == null
+                              ? null
+                              : _sourceBadge(origin.sourceId);
+                          return ActionChip(
+                            key: ValueKey('media-play-from-${entry.id}'),
+                            avatar: CircleAvatar(
+                              backgroundColor:
+                                  badge?.color ?? _LiveTvMediaPaint.accent,
+                              radius: 8,
+                            ),
+                            label: Text(
+                              [
+                                entry.title,
+                                ?origin?.sourceName,
+                                if (identical(entry, item)) 'this copy',
+                              ].join(' · '),
+                            ),
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              unawaited(_openMovie(entry));
+                            },
+                          );
+                        }).toList(),
                       ),
                     ]),
                   ],
@@ -2392,6 +2669,34 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
+  /// Marks a movie watched/unwatched locally and, for Jellyfin titles, on
+  /// the server so other Jellyfin apps agree.
+  Future<void> _setWatched(LiveTvMediaItem item, {required bool played}) async {
+    await playbackMemory.saveProgress(
+      item.streamUrl,
+      positionMs: 0,
+      durationMs: 0,
+      complete: played,
+    );
+    final itemId = jellyfinItemIdFromUrl(item.streamUrl);
+    final account = jellyfinAccount;
+    final api = jellyfinApi;
+    if (itemId == null || account == null || api == null) {
+      return;
+    }
+    jellyfinUserData[itemId] = JellyfinUserData(played: played);
+    try {
+      await api.setPlayed(account.userId, itemId, played);
+      unawaited(_loadJellyfinHome());
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Jellyfin did not save that: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _openMovie(LiveTvMediaItem item) async {
     await _saveHistory(item, subtitle: item.group);
     final libraryItem = _libraryItemFromMedia(item);
@@ -2409,6 +2714,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             title: item.title,
             subtitle: item.group,
             streamUrl: item.streamUrl,
+            jellyfin: _jellyfinReporter(item.streamUrl),
+            jellyfinFor: _jellyfinReporter,
             streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
@@ -2418,6 +2725,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     } finally {
       if (libraryItem != null) {
         unawaited(_reportMediaPlayback(libraryItem, active: false));
+      }
+      if (jellyfinItemIdFromUrl(item.streamUrl) != null) {
+        unawaited(_loadJellyfinHome());
       }
     }
   }
@@ -2448,6 +2758,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               title: item.title,
               subtitle: item.group ?? 'Series',
               streamUrl: item.streamUrl,
+              jellyfin: _jellyfinReporter(item.streamUrl),
+              jellyfinFor: _jellyfinReporter,
               streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
               posterUrl: item.posterUrl,
               playbackPerformance: playbackPerformance,
@@ -2466,6 +2778,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             sourceId: origin.sourceId,
             seriesId: item.seriesId!,
           )
+        : isJellyfinSourceId(origin.sourceId)
+        ? await _jellyfinSeriesDetails(item)
         : await service.loadSeriesDetails(
             selected!,
             item.seriesId!,
@@ -2621,6 +2935,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     subtitle:
                         'S${episode.season}E${episode.episode} · ${episode.title}',
                     streamUrl: episode.streamUrl,
+                    jellyfin: _jellyfinReporter(episode.streamUrl),
+                    jellyfinFor: _jellyfinReporter,
                     streamUrlCandidates: _playbackUrlCandidates(
                       episode.streamUrl,
                     ),
@@ -2690,7 +3006,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         LiveTvRecentMedia(
           sourceId: origin.sourceId,
           sourceName: origin.sourceName,
-          mediaType: tab == _MediaTab.movies ? 'movie' : 'series',
+          mediaType: item.series ? 'series' : 'movie',
           mediaId: item.id,
           title: item.title,
           subtitle: subtitle,
@@ -3000,6 +3316,528 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     search.text = value;
   }
 
+  // ---- Home hub -------------------------------------------------------------
+
+  List<Widget> _tabChips() => [
+    ChoiceChip(
+      key: const ValueKey('media-tab-home'),
+      label: const Text('Home'),
+      selected: homeView,
+      onSelected: (selected) {
+        if (!selected) {
+          return;
+        }
+        _showHome();
+      },
+    ),
+    ChoiceChip(
+      key: const ValueKey('media-tab-movies'),
+      label: const Text('Movies'),
+      selected: !homeView && tab == _MediaTab.movies,
+      onSelected: (selected) {
+        if (!selected) {
+          return;
+        }
+        setState(() {
+          homeView = false;
+          tab = _MediaTab.movies;
+          groupFilter = 'All';
+        });
+      },
+    ),
+    ChoiceChip(
+      key: const ValueKey('media-tab-series'),
+      label: const Text('Series'),
+      selected: !homeView && tab == _MediaTab.series,
+      onSelected: (selected) {
+        if (!selected) {
+          return;
+        }
+        setState(() {
+          homeView = false;
+          tab = _MediaTab.series;
+          groupFilter = 'All';
+        });
+      },
+    ),
+  ];
+
+  /// Home always shows every source, so switch back to "All Sources".
+  void _showHome() {
+    final reload = !allSourcesSelected;
+    setState(() {
+      homeView = true;
+      allSourcesSelected = true;
+    });
+    if (reload) {
+      unawaited(_loadCatalog());
+    }
+  }
+
+  void _openLibrary(LiveTvSource library) {
+    final hasMovies = movies.any(
+      (item) => mediaItemOrigins[item]?.sourceId == library.id,
+    );
+    setState(() {
+      source = library;
+      allSourcesSelected = false;
+      homeView = false;
+      tab = hasMovies ? _MediaTab.movies : _MediaTab.series;
+      groupFilter = 'All';
+    });
+    unawaited(_loadCatalog());
+  }
+
+  Future<void> _openJellyfinConnect() async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => JellyfinConnectScreen(
+          profileId: widget.profileId,
+          store: jellyfinStore,
+          transport: widget.jellyfinTransport,
+        ),
+      ),
+    );
+    if (changed != true || !mounted) {
+      return;
+    }
+    jellyfinLibraryFetches.clear();
+    jellyfinUserData.clear();
+    await _jellyfinSources(reload: true);
+    unawaited(_loadJellyfinHome());
+    setState(() => allSourcesSelected = true);
+    await _loadCatalog();
+  }
+
+  ({String label, Color color}) _sourceBadge(String sourceId) {
+    if (isJellyfinSourceId(sourceId)) {
+      return (label: 'JELLYFIN', color: MediaSourceColors.jellyfin);
+    }
+    if (_isManagedSourceId(sourceId)) {
+      return (label: 'NAS', color: MediaSourceColors.nas);
+    }
+    return (label: 'IPTV', color: MediaSourceColors.iptv);
+  }
+
+  MediaHomeCard _cardForItem(LiveTvMediaItem item, {bool landscape = false}) {
+    final origin = mediaItemOrigins[item];
+    final badge = origin == null ? null : _sourceBadge(origin.sourceId);
+    final copies = _versionCountFor(item);
+    final yearText = item.year?.toString();
+    return MediaHomeCard(
+      id: 'item-${item.id}',
+      title: item.title,
+      subtitle: [
+        ?yearText,
+        if (item.series) 'Series',
+        if (copies > 1) '$copies sources',
+      ].join(' · '),
+      imageUrl: landscape
+          ? (item.backdropUrl ?? item.posterUrl)
+          : (item.posterUrl ?? item.backdropUrl),
+      badge: badge?.label,
+      badgeColor: badge?.color,
+      icon: item.series ? Icons.tv : Icons.movie_outlined,
+      onTap: () =>
+          unawaited(item.series ? _openSeries(item) : _showMediaDetails(item)),
+    );
+  }
+
+  MediaHomeCard _cardForJellyfin(
+    JellyfinEntry entry, {
+    bool landscape = false,
+    bool play = false,
+  }) {
+    final episodeLabel = entry.isEpisode
+        ? 'S${entry.season ?? 0}E${entry.episode ?? 0} · ${entry.media.title}'
+        : null;
+    return MediaHomeCard(
+      id: 'jf-${entry.itemId}',
+      title: entry.isEpisode
+          ? (entry.seriesName ?? entry.media.title)
+          : entry.media.title,
+      subtitle:
+          episodeLabel ??
+          [
+            if (entry.media.year != null) '${entry.media.year}',
+            if (entry.isSeries) 'Series',
+          ].join(' · '),
+      imageUrl: landscape
+          ? (entry.media.backdropUrl ?? entry.media.posterUrl)
+          : (entry.media.posterUrl ?? entry.media.backdropUrl),
+      progress: entry.progress > 0 ? entry.progress : null,
+      badge: 'JELLYFIN',
+      badgeColor: MediaSourceColors.jellyfin,
+      icon: entry.isSeries || entry.isEpisode ? Icons.tv : Icons.movie_outlined,
+      onTap: () => unawaited(_openJellyfinEntry(entry, play: play)),
+    );
+  }
+
+  /// Opens a Jellyfin title from a Home row. Episodes play straight away
+  /// (like Jellyfin's Next Up); movies open details unless [play].
+  Future<void> _openJellyfinEntry(
+    JellyfinEntry entry, {
+    bool play = false,
+  }) async {
+    if (entry.isEpisode) {
+      await _playJellyfinEpisode(entry);
+      return;
+    }
+    final list = entry.isSeries ? series : movies;
+    final item = list.firstWhere(
+      (candidate) => candidate.id == entry.media.id,
+      orElse: () => entry.media,
+    );
+    if (!mediaItemOrigins.containsKey(item)) {
+      final jellyfinSources = jellyfinAccount?.sources ?? const [];
+      if (jellyfinSources.isEmpty) {
+        return;
+      }
+      final first = jellyfinSources.first;
+      mediaItemOrigins[item] = _MediaItemSourceOrigin(
+        sourceId: first.id,
+        sourceName: first.name,
+        source: first,
+      );
+    }
+    if (entry.isSeries) {
+      await _openSeries(item);
+    } else if (play) {
+      await _openMovie(item);
+    } else {
+      await _showMediaDetails(item);
+    }
+  }
+
+  Future<void> _playJellyfinEpisode(JellyfinEntry entry) async {
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _MediaPlayerScreen(
+          profileKey: 'profile-${widget.profileId}',
+          title: entry.seriesName ?? entry.media.title,
+          subtitle:
+              'S${entry.season ?? 0}E${entry.episode ?? 0} · ${entry.media.title}',
+          streamUrl: entry.media.streamUrl,
+          posterUrl: entry.media.posterUrl,
+          playbackPerformance: playbackPerformance,
+          jellyfin: _jellyfinReporter(entry.media.streamUrl),
+          jellyfinFor: _jellyfinReporter,
+        ),
+      ),
+    );
+    unawaited(_loadJellyfinHome());
+  }
+
+  Widget _homeHeader({required bool compact, required Size viewport}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          ..._tabChips(),
+          SizedBox(
+            width: compact ? viewport.width - 24 : 360,
+            child: TextField(
+              controller: search,
+              focusNode: searchFocus,
+              decoration: const InputDecoration(
+                hintText: 'Search movies or series',
+                isDense: true,
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.search),
+              ),
+            ),
+          ),
+          if (error.isNotEmpty)
+            Text(error, style: TextStyle(color: _LiveTvMediaPaint.warning)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHome() {
+    final rows = <MediaHomeRow>[];
+    final resume = jellyfinResume;
+
+    // Continue watching: Jellyfin resume points first, then local history
+    // from IPTV / NAS sources (Jellyfin titles are already covered above).
+    final localRecent = history
+        .where(
+          (entry) =>
+              !isJellyfinSourceId(entry.sourceId) &&
+              sources.any((item) => item.id == entry.sourceId),
+        )
+        .take(20)
+        .toList();
+    rows.add(
+      MediaHomeRow(
+        title: 'Continue Watching',
+        shape: MediaHomeCardShape.landscape,
+        cards: [
+          for (final entry in resume)
+            _cardForJellyfin(entry, landscape: true, play: true),
+          for (final entry in localRecent)
+            MediaHomeCard(
+              id: 'recent-${entry.sourceId}-${entry.mediaId}',
+              title: entry.title,
+              subtitle: entry.subtitle ?? entry.sourceName,
+              imageUrl: entry.posterUrl,
+              badge: _sourceBadge(entry.sourceId).label,
+              badgeColor: _sourceBadge(entry.sourceId).color,
+              icon: entry.mediaType == 'series'
+                  ? Icons.tv
+                  : Icons.movie_outlined,
+              onTap: () => unawaited(_resumeRecentMedia(entry)),
+            ),
+        ],
+      ),
+    );
+    rows.add(
+      MediaHomeRow(
+        title: 'Next Up',
+        shape: MediaHomeCardShape.landscape,
+        cards: [
+          for (final entry in jellyfinNextUp)
+            _cardForJellyfin(entry, landscape: true, play: true),
+        ],
+      ),
+    );
+
+    final counts = <String, int>{};
+    for (final entry in mediaItemOrigins.entries) {
+      counts[entry.value.sourceId] = (counts[entry.value.sourceId] ?? 0) + 1;
+    }
+    rows.add(
+      MediaHomeRow(
+        title: 'Your Libraries',
+        shape: MediaHomeCardShape.tile,
+        cards: [
+          for (final library in sources)
+            MediaHomeCard(
+              id: 'library-${library.id}',
+              title: library.name,
+              subtitle: [
+                _sourceBadge(library.id).label,
+                if (counts[library.id] != null) '${counts[library.id]} titles',
+              ].join(' · '),
+              badgeColor: _sourceBadge(library.id).color,
+              icon: isJellyfinSourceId(library.id)
+                  ? Icons.dns
+                  : (_isManagedSourceId(library.id)
+                        ? Icons.storage
+                        : Icons.live_tv),
+              onTap: () => _openLibrary(library),
+            ),
+          if (jellyfinAccount == null)
+            MediaHomeCard(
+              id: 'library-connect-jellyfin',
+              title: 'Connect Jellyfin',
+              subtitle: 'Add your Jellyfin libraries',
+              badgeColor: MediaSourceColors.jellyfin,
+              icon: Icons.add_link,
+              onTap: () => unawaited(_openJellyfinConnect()),
+            ),
+        ],
+      ),
+    );
+
+    // Recently added: Jellyfin's own list, then newest catalog titles.
+    final seen = <String>{};
+    final recentCards = <MediaHomeCard>[];
+    for (final entry in jellyfinLatest) {
+      if (seen.add(entry.media.id)) {
+        recentCards.add(_cardForJellyfin(entry));
+      }
+    }
+    final dated =
+        [...movies, ...series].where((item) => item.addedAt != null).toList()
+          ..sort((a, b) => b.addedAt!.compareTo(a.addedAt!));
+    for (final item in dated) {
+      if (recentCards.length >= 24) {
+        break;
+      }
+      if (seen.add(item.id)) {
+        recentCards.add(_cardForItem(item));
+      }
+    }
+    rows.add(MediaHomeRow(title: 'Recently Added', cards: recentCards));
+
+    // Because you watched: Jellyfin's similar items, else a genre match
+    // against the most recent local title.
+    if (jellyfinSimilar.isNotEmpty && jellyfinSimilarTo != null) {
+      rows.add(
+        MediaHomeRow(
+          title: 'Because you watched $jellyfinSimilarTo',
+          cards: [for (final entry in jellyfinSimilar) _cardForJellyfin(entry)],
+        ),
+      );
+    } else if (history.isNotEmpty) {
+      final last = history.first;
+      final pool = last.mediaType == 'series' ? series : movies;
+      final seed = pool.where((item) => item.id == last.mediaId).toList();
+      if (seed.isNotEmpty && seed.first.genres.isNotEmpty) {
+        final genres = seed.first.genres.map((g) => g.toLowerCase()).toSet();
+        final matches = pool
+            .where(
+              (item) =>
+                  item.id != seed.first.id &&
+                  item.genres.any((g) => genres.contains(g.toLowerCase())),
+            )
+            .take(16)
+            .toList();
+        rows.add(
+          MediaHomeRow(
+            title: 'Because you watched ${seed.first.title}',
+            cards: [for (final item in matches) _cardForItem(item)],
+          ),
+        );
+      }
+    }
+
+    void seeAll(_MediaTab next) => setState(() {
+      homeView = false;
+      tab = next;
+      groupFilter = 'All';
+    });
+    rows.add(
+      MediaHomeRow(
+        title: 'Movies',
+        actionLabel: 'See all',
+        onAction: () => seeAll(_MediaTab.movies),
+        cards: [for (final item in movies.take(24)) _cardForItem(item)],
+      ),
+    );
+    rows.add(
+      MediaHomeRow(
+        title: 'Series',
+        actionLabel: 'See all',
+        onAction: () => seeAll(_MediaTab.series),
+        cards: [for (final item in series.take(24)) _cardForItem(item)],
+      ),
+    );
+    rows.add(
+      MediaHomeRow(
+        title: 'My List',
+        cards: [
+          for (final item in favorites.take(24))
+            MediaHomeCard(
+              id: 'fav-${item.sourceId}-${item.mediaId}',
+              title: item.title,
+              subtitle: item.subtitle ?? item.sourceName,
+              imageUrl: item.posterUrl,
+              badge: _sourceBadge(item.sourceId).label,
+              badgeColor: _sourceBadge(item.sourceId).color,
+              icon: item.mediaType == 'series'
+                  ? Icons.tv
+                  : Icons.movie_outlined,
+              onTap: () => unawaited(_playLibraryItem(item)),
+            ),
+        ],
+      ),
+    );
+    rows.add(
+      MediaHomeRow(
+        title: 'Playlists',
+        shape: MediaHomeCardShape.tile,
+        actionLabel: 'Manage',
+        onAction: () => unawaited(_managePlaylists()),
+        cards: [
+          for (final playlist in playlists)
+            MediaHomeCard(
+              id: 'playlist-${playlist.id}',
+              title: playlist.name,
+              subtitle: '${playlist.items.length} items',
+              icon: Icons.playlist_play,
+              onTap: () => unawaited(_managePlaylists()),
+            ),
+        ],
+      ),
+    );
+
+    // Hero: the title you were last watching on Jellyfin, else the newest
+    // title that has artwork.
+    MediaHomeHero? hero;
+    if (resume.isNotEmpty) {
+      final entry = resume.first;
+      hero = MediaHomeHero(
+        title: entry.isEpisode
+            ? (entry.seriesName ?? entry.media.title)
+            : entry.media.title,
+        meta: entry.isEpisode
+            ? 'S${entry.season ?? 0}E${entry.episode ?? 0} · ${entry.media.title}'
+            : entry.media.year?.toString(),
+        overview: entry.media.description,
+        backdropUrl: entry.media.backdropUrl ?? entry.media.posterUrl,
+        badge: 'CONTINUE · JELLYFIN',
+        badgeColor: MediaSourceColors.jellyfin,
+        playLabel: 'Resume',
+        progress: entry.progress,
+        onPlay: () => unawaited(_openJellyfinEntry(entry, play: true)),
+        onDetails: () => unawaited(_openJellyfinEntry(entry)),
+      );
+    } else {
+      final featured = dated.where((item) => item.backdropUrl != null).toList();
+      final pick = featured.isNotEmpty
+          ? featured.first
+          : [
+              ...movies,
+              ...series,
+            ].where((item) => item.backdropUrl != null).firstOrNull;
+      if (pick != null) {
+        final badge = mediaItemOrigins[pick] == null
+            ? null
+            : _sourceBadge(mediaItemOrigins[pick]!.sourceId);
+        hero = MediaHomeHero(
+          title: pick.title,
+          meta: [
+            if (pick.year != null) '${pick.year}',
+            if (pick.genres.isNotEmpty) pick.genres.take(3).join(', '),
+          ].join(' · '),
+          overview: pick.description,
+          backdropUrl: pick.backdropUrl,
+          badge: badge == null ? 'FEATURED' : 'FEATURED · ${badge.label}',
+          badgeColor: badge?.color,
+          onPlay: () =>
+              unawaited(pick.series ? _openSeries(pick) : _openMovie(pick)),
+          onDetails: () => unawaited(
+            pick.series ? _openSeries(pick) : _showMediaDetails(pick),
+          ),
+        );
+      }
+    }
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _loadJellyfinHome();
+      },
+      child: MediaHomeView(
+        hero: hero,
+        rows: rows,
+        emptyState: loading
+            ? const SizedBox.shrink()
+            : Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Nothing here yet.'),
+                    const SizedBox(height: 12),
+                    if (jellyfinAccount == null)
+                      FilledButton.icon(
+                        onPressed: () => unawaited(_openJellyfinConnect()),
+                        icon: const Icon(Icons.add_link),
+                        label: const Text('Connect Jellyfin'),
+                      ),
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+
   Future<void> _requestExitToHome() async {
     if (!mounted) {
       return;
@@ -3012,6 +3850,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     final items = visibleItems;
     final viewport = MediaQuery.sizeOf(context);
     final compact = viewport.width < 600;
+    final showingHome = homeView && search.text.trim().isEmpty;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -3062,6 +3901,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               title: const Text('Movies & Series'),
               actions: [
                 IconButton(
+                  key: const ValueKey('media-jellyfin-settings'),
+                  tooltip: jellyfinAccount == null
+                      ? 'Connect Jellyfin'
+                      : 'Jellyfin settings',
+                  onPressed: () => unawaited(_openJellyfinConnect()),
+                  icon: Icon(
+                    jellyfinAccount == null ? Icons.add_link : Icons.dns,
+                    color: jellyfinAccount == null
+                        ? null
+                        : MediaSourceColors.jellyfin,
+                  ),
+                ),
+                IconButton(
                   tooltip: 'Playlists',
                   onPressed: _managePlaylists,
                   icon: Stack(
@@ -3109,637 +3961,624 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     excluding: loading,
                     child: Column(
                       children: [
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxHeight: viewport.height < 500
-                                ? 150
-                                : (compact
-                                      ? 340
-                                      : min(viewport.height * 0.55, 480.0)),
-                          ),
-                          child: SingleChildScrollView(
-                            child: Column(
-                              children: [
-                                if (status.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child: Text(status),
-                                  ),
-                                if (error.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
+                        if (showingHome) ...[
+                          _homeHeader(compact: compact, viewport: viewport),
+                          Expanded(child: _buildHome()),
+                        ] else ...[
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: viewport.height < 500
+                                  ? 150
+                                  : (compact
+                                        ? 340
+                                        : min(viewport.height * 0.55, 480.0)),
+                            ),
+                            child: SingleChildScrollView(
+                              child: Column(
+                                children: [
+                                  if (status.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: Text(status),
                                     ),
-                                    child: Text(
-                                      error,
-                                      style: TextStyle(
-                                        color: _LiveTvMediaPaint.warning,
+                                  if (error.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                      ),
+                                      child: Text(
+                                        error,
+                                        style: TextStyle(
+                                          color: _LiveTvMediaPaint.warning,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    8,
-                                    12,
-                                    4,
-                                  ),
-                                  child: Wrap(
-                                    runSpacing: 8,
-                                    crossAxisAlignment:
-                                        WrapCrossAlignment.center,
-                                    children: [
-                                      SizedBox(
-                                        width: compact
-                                            ? viewport.width - 24
-                                            : (viewport.width - 148) * 0.6,
-                                        child: TextField(
-                                          controller: search,
-                                          focusNode: searchFocus,
-                                          decoration: const InputDecoration(
-                                            labelText:
-                                                'Search movies or series',
-                                            border: OutlineInputBorder(),
-                                            prefixIcon: Icon(Icons.search),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      8,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Wrap(
+                                      runSpacing: 8,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      children: [
+                                        SizedBox(
+                                          width: compact
+                                              ? viewport.width - 24
+                                              : (viewport.width - 148) * 0.6,
+                                          child: TextField(
+                                            controller: search,
+                                            focusNode: searchFocus,
+                                            decoration: const InputDecoration(
+                                              labelText:
+                                                  'Search movies or series',
+                                              border: OutlineInputBorder(),
+                                              prefixIcon: Icon(Icons.search),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      IconButton.filledTonal(
-                                        tooltip: 'On-screen keyboard search',
-                                        onPressed: () =>
-                                            unawaited(_openSearchKeyboard()),
-                                        icon: const Icon(Icons.keyboard),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      IconButton.filledTonal(
-                                        tooltip: 'Voice search',
-                                        onPressed: () =>
-                                            unawaited(_openVoiceSearch()),
-                                        icon: const Icon(Icons.mic),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    4,
-                                    12,
-                                    4,
-                                  ),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        ChoiceChip(
-                                          label: const Text('All Sources'),
-                                          selected: allSourcesSelected,
-                                          onSelected: loading
-                                              ? null
-                                              : (_) async {
-                                                  setState(
-                                                    () => allSourcesSelected =
-                                                        true,
-                                                  );
-                                                  await _loadCatalog();
-                                                },
+                                        const SizedBox(width: 8),
+                                        IconButton.filledTonal(
+                                          tooltip: 'On-screen keyboard search',
+                                          onPressed: () =>
+                                              unawaited(_openSearchKeyboard()),
+                                          icon: const Icon(Icons.keyboard),
                                         ),
-                                        ...sources.map(
-                                          (item) => ChoiceChip(
-                                            label: Text(
-                                              item.name,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                            selected:
-                                                !allSourcesSelected &&
-                                                source?.id == item.id,
+                                        const SizedBox(width: 8),
+                                        IconButton.filledTonal(
+                                          tooltip: 'Voice search',
+                                          onPressed: () =>
+                                              unawaited(_openVoiceSearch()),
+                                          icon: const Icon(Icons.mic),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        children: [
+                                          ChoiceChip(
+                                            label: const Text('All Sources'),
+                                            selected: allSourcesSelected,
                                             onSelected: loading
                                                 ? null
                                                 : (_) async {
-                                                    setState(() {
-                                                      source = item;
-                                                      allSourcesSelected =
-                                                          false;
-                                                    });
+                                                    setState(
+                                                      () => allSourcesSelected =
+                                                          true,
+                                                    );
                                                     await _loadCatalog();
                                                   },
                                           ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    4,
-                                    12,
-                                    4,
-                                  ),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        ChoiceChip(
-                                          label: const Text('Movies'),
-                                          selected: tab == _MediaTab.movies,
-                                          onSelected: (selected) {
-                                            if (!selected) {
-                                              return;
-                                            }
-                                            setState(() {
-                                              tab = _MediaTab.movies;
-                                              groupFilter = 'All';
-                                            });
-                                          },
-                                        ),
-                                        ChoiceChip(
-                                          label: const Text('Series'),
-                                          selected: tab == _MediaTab.series,
-                                          onSelected: (selected) {
-                                            if (!selected) {
-                                              return;
-                                            }
-                                            setState(() {
-                                              tab = _MediaTab.series;
-                                              groupFilter = 'All';
-                                            });
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                if (activeSeasonalCollections.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: activeSeasonalCollections.map(
-                                          (collection) {
-                                            return FilterChip(
-                                              avatar: Icon(
-                                                collection.icon,
-                                                size: 18,
+                                          ...sources.map(
+                                            (item) => ChoiceChip(
+                                              label: Text(
+                                                item.name,
+                                                overflow: TextOverflow.ellipsis,
                                               ),
-                                              label: Text(collection.label),
                                               selected:
-                                                  activeCollectionId ==
-                                                  collection.id,
-                                              onSelected: (_) =>
-                                                  _toggleCollection(
-                                                    collection.id,
-                                                  ),
-                                            );
-                                          },
-                                        ).toList(),
-                                      ),
-                                    ),
-                                  ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    4,
-                                    12,
-                                    4,
-                                  ),
-                                  child: InkWell(
-                                    key: ValueKey(
-                                      'media-group-$groupFilter-${groups.length}',
-                                    ),
-                                    borderRadius: BorderRadius.circular(4),
-                                    onTap: () => _showCategoryPicker(groups),
-                                    child: InputDecorator(
-                                      decoration: const InputDecoration(
-                                        labelText: 'Category',
-                                        border: OutlineInputBorder(),
-                                        isDense: true,
-                                        prefixIcon: Icon(
-                                          Icons.filter_alt_outlined,
-                                        ),
-                                        suffixIcon: Icon(Icons.arrow_drop_down),
-                                      ),
-                                      child: Text(
-                                        groups.contains(groupFilter)
-                                            ? groupFilter
-                                            : groups.first,
-                                        overflow: TextOverflow.ellipsis,
-                                        maxLines: 1,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                if (availableGenres.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        crossAxisAlignment:
-                                            WrapCrossAlignment.center,
-                                        children: [
-                                          ...availableGenres.map(
-                                            (genre) => FilterChip(
-                                              label: Text(genre),
-                                              selected: selectedGenres.contains(
-                                                genre,
-                                              ),
-                                              onSelected: (_) =>
-                                                  _toggleGenre(genre),
+                                                  !allSourcesSelected &&
+                                                  source?.id == item.id,
+                                              onSelected: loading
+                                                  ? null
+                                                  : (_) async {
+                                                      setState(() {
+                                                        source = item;
+                                                        allSourcesSelected =
+                                                            false;
+                                                      });
+                                                      await _loadCatalog();
+                                                    },
                                             ),
-                                          ),
-                                          IconButton(
-                                            tooltip: 'Shuffle from selection',
-                                            onPressed: visibleItems.isEmpty
-                                                ? null
-                                                : () => unawaited(
-                                                    _shuffleWithinFilters(),
-                                                  ),
-                                            icon: const Icon(Icons.shuffle),
                                           ),
                                         ],
                                       ),
                                     ),
                                   ),
-                                const SizedBox(height: 8),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        flex: 2,
-                                        child:
-                                            DropdownButtonFormField<
-                                              _MediaSortMode
-                                            >(
-                                              isExpanded: true,
-                                              initialValue: sortMode,
-                                              decoration: const InputDecoration(
-                                                labelText: 'Sort',
-                                                border: OutlineInputBorder(),
-                                              ),
-                                              items: const [
-                                                DropdownMenuItem(
-                                                  value:
-                                                      _MediaSortMode.relevance,
-                                                  child: Text('Relevance'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: _MediaSortMode.title,
-                                                  child: Text('Title'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: _MediaSortMode.source,
-                                                  child: Text('Source'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value:
-                                                      _MediaSortMode.inTheaters,
-                                                  child: Text('In Theaters'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: _MediaSortMode
-                                                      .recentlyAdded,
-                                                  child: Text('Recently Added'),
-                                                ),
-                                              ],
-                                              onChanged: (value) {
-                                                if (value == null) {
-                                                  return;
-                                                }
-                                                setState(
-                                                  () => sortMode = value,
-                                                );
-                                              },
-                                            ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        children: [..._tabChips()],
                                       ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        flex: 3,
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: FilterChip(
-                                            selected: versionAwareOnly,
-                                            onSelected: (selected) {
-                                              setState(
-                                                () =>
-                                                    versionAwareOnly = selected,
-                                              );
-                                            },
-                                            avatar: const Icon(
-                                              Icons
-                                                  .collections_bookmark_outlined,
-                                            ),
-                                            label: Text(
-                                              _multiVersionCount == 0
-                                                  ? 'Multiple versions only'
-                                                  : 'Multiple versions only ($_multiVersionCount titles)',
-                                            ),
-                                          ),
+                                    ),
+                                  ),
+                                  if (activeSeasonalCollections.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        12,
+                                        4,
+                                        12,
+                                        4,
+                                      ),
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: activeSeasonalCollections
+                                              .map((collection) {
+                                                return FilterChip(
+                                                  avatar: Icon(
+                                                    collection.icon,
+                                                    size: 18,
+                                                  ),
+                                                  label: Text(collection.label),
+                                                  selected:
+                                                      activeCollectionId ==
+                                                      collection.id,
+                                                  onSelected: (_) =>
+                                                      _toggleCollection(
+                                                        collection.id,
+                                                      ),
+                                                );
+                                              })
+                                              .toList(),
                                         ),
                                       ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    0,
-                                    12,
-                                    8,
-                                  ),
-                                  child: _continueWatchingCard(),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    4,
-                                    12,
-                                    8,
-                                  ),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: _historyPanel(),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    0,
-                                    12,
-                                    8,
-                                  ),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: _favoritesPanel(),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: items.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    'No items match the current filter.',
-                                  ),
-                                )
-                              : LayoutBuilder(
-                                  builder: (context, constraints) {
-                                    final width = constraints.maxWidth;
-                                    final maxCardWidth = max(
-                                      190.0,
-                                      width / 5.2,
-                                    ).toDouble();
-                                    final titleLines = width > 1200 ? 3 : 2;
-                                    return GridView.builder(
-                                      padding: const EdgeInsets.all(12),
-                                      gridDelegate:
-                                          SliverGridDelegateWithMaxCrossAxisExtent(
-                                            maxCrossAxisExtent: maxCardWidth,
-                                            childAspectRatio: .70,
-                                            crossAxisSpacing: 12,
-                                            mainAxisSpacing: 14,
+                                    ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: InkWell(
+                                      key: ValueKey(
+                                        'media-group-$groupFilter-${groups.length}',
+                                      ),
+                                      borderRadius: BorderRadius.circular(4),
+                                      onTap: () => _showCategoryPicker(groups),
+                                      child: InputDecorator(
+                                        decoration: const InputDecoration(
+                                          labelText: 'Category',
+                                          border: OutlineInputBorder(),
+                                          isDense: true,
+                                          prefixIcon: Icon(
+                                            Icons.filter_alt_outlined,
                                           ),
-                                      itemCount: items.length,
-                                      itemBuilder: (context, index) {
-                                        final item = items[index];
-                                        final origin = mediaItemOrigins[item];
-                                        final favorite = origin == null
-                                            ? false
-                                            : _isFavorite(
-                                                origin.sourceId,
-                                                item.series
-                                                    ? 'series'
-                                                    : 'movie',
-                                                item.id,
-                                              );
-                                        final focused =
-                                            focusedMediaId == item.id;
-                                        return InkWell(
-                                          onTap: () {
-                                            setState(
-                                              () => focusedMediaId = item.id,
-                                            );
-                                            unawaited(_showMediaDetails(item));
-                                          },
-                                          child: FocusableActionDetector(
-                                            onFocusChange: (value) {
-                                              if (value) {
-                                                setState(
-                                                  () =>
-                                                      focusedMediaId = item.id,
-                                                );
-                                              }
-                                            },
-                                            child: Card(
-                                              clipBehavior: Clip.antiAlias,
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(12),
-                                                side: BorderSide(
-                                                  color: focused
-                                                      ? _LiveTvMediaPaint.accent
-                                                      : _LiveTvMediaPaint
-                                                            .transparent,
-                                                  width: 2,
-                                                ),
+                                          suffixIcon: Icon(
+                                            Icons.arrow_drop_down,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          groups.contains(groupFilter)
+                                              ? groupFilter
+                                              : groups.first,
+                                          overflow: TextOverflow.ellipsis,
+                                          maxLines: 1,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  if (availableGenres.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        12,
+                                        4,
+                                        12,
+                                        4,
+                                      ),
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          crossAxisAlignment:
+                                              WrapCrossAlignment.center,
+                                          children: [
+                                            ...availableGenres.map(
+                                              (genre) => FilterChip(
+                                                label: Text(genre),
+                                                selected: selectedGenres
+                                                    .contains(genre),
+                                                onSelected: (_) =>
+                                                    _toggleGenre(genre),
                                               ),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Expanded(
-                                                    child:
-                                                        item.posterUrl ==
-                                                                null ||
-                                                            item.posterUrl!
-                                                                .trim()
-                                                                .isEmpty
-                                                        ? ColoredBox(
-                                                            color:
-                                                                _LiveTvMediaPaint
-                                                                    .panel,
-                                                            child: Center(
-                                                              child: Icon(
-                                                                Icons.live_tv,
-                                                                size: 46,
-                                                              ),
-                                                            ),
-                                                          )
-                                                        : Image.network(
-                                                            item.posterUrl!,
-                                                            fit: BoxFit.cover,
-                                                            width:
-                                                                double.infinity,
-                                                            errorBuilder:
-                                                                (
-                                                                  _,
-                                                                  __,
-                                                                  ___,
-                                                                ) => ColoredBox(
-                                                                  color:
-                                                                      _LiveTvMediaPaint
-                                                                          .panel,
-                                                                  child: Center(
-                                                                    child: Icon(
-                                                                      Icons
-                                                                          .movie_outlined,
-                                                                      size: 46,
-                                                                    ),
-                                                                  ),
-                                                                ),
-                                                          ),
+                                            ),
+                                            IconButton(
+                                              tooltip: 'Shuffle from selection',
+                                              onPressed: visibleItems.isEmpty
+                                                  ? null
+                                                  : () => unawaited(
+                                                      _shuffleWithinFilters(),
+                                                    ),
+                                              icon: const Icon(Icons.shuffle),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  const SizedBox(height: 8),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          flex: 2,
+                                          child:
+                                              DropdownButtonFormField<
+                                                _MediaSortMode
+                                              >(
+                                                isExpanded: true,
+                                                initialValue: sortMode,
+                                                decoration:
+                                                    const InputDecoration(
+                                                      labelText: 'Sort',
+                                                      border:
+                                                          OutlineInputBorder(),
+                                                    ),
+                                                items: const [
+                                                  DropdownMenuItem(
+                                                    value: _MediaSortMode
+                                                        .relevance,
+                                                    child: Text('Relevance'),
                                                   ),
-                                                  Padding(
-                                                    padding:
-                                                        const EdgeInsets.all(
-                                                          10,
-                                                        ),
-                                                    child: Column(
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        Row(
-                                                          children: [
-                                                            Expanded(
-                                                              child: Text(
-                                                                item.title,
-                                                                maxLines:
-                                                                    titleLines,
-                                                                overflow:
-                                                                    TextOverflow
-                                                                        .ellipsis,
-                                                                style: const TextStyle(
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w700,
-                                                                  fontSize: 14,
-                                                                ),
-                                                              ),
-                                                            ),
-                                                            if (_versionCountFor(
-                                                                  item,
-                                                                ) >
-                                                                1) ...[
-                                                              const SizedBox(
-                                                                width: 6,
-                                                              ),
-                                                              DecoratedBox(
-                                                                decoration: BoxDecoration(
-                                                                  color: _LiveTvMediaPaint
-                                                                      .onSurface
-                                                                      .withAlpha(
-                                                                        42,
-                                                                      ),
-                                                                  borderRadius:
-                                                                      BorderRadius.circular(
-                                                                        999,
-                                                                      ),
-                                                                ),
-                                                                child: Padding(
-                                                                  padding:
-                                                                      const EdgeInsets.symmetric(
-                                                                        horizontal:
-                                                                            6,
-                                                                        vertical:
-                                                                            2,
-                                                                      ),
-                                                                  child: Text(
-                                                                    'x${_versionCountFor(item)}',
-                                                                    style: TextStyle(
-                                                                      fontSize:
-                                                                          11,
-                                                                      color: _LiveTvMediaPaint
-                                                                          .onSurface70,
-                                                                    ),
-                                                                  ),
-                                                                ),
-                                                              ),
-                                                            ],
-                                                            Icon(
-                                                              favorite
-                                                                  ? Icons
-                                                                        .favorite
-                                                                  : Icons
-                                                                        .favorite_border,
-                                                              size: 16,
-                                                              color: favorite
-                                                                  ? _LiveTvMediaPaint
-                                                                        .error
-                                                                  : _LiveTvMediaPaint
-                                                                        .onSurface54,
-                                                            ),
-                                                          ],
-                                                        ),
-                                                        if (item.group !=
-                                                                null &&
-                                                            item.group!
-                                                                .trim()
-                                                                .isNotEmpty)
-                                                          Text(
-                                                            item.group!,
-                                                            maxLines: 1,
-                                                            overflow:
-                                                                TextOverflow
-                                                                    .ellipsis,
-                                                            style: TextStyle(
-                                                              color: _LiveTvMediaPaint
-                                                                  .onSurface70,
-                                                              fontSize: 12,
-                                                            ),
-                                                          ),
-                                                        if (origin != null)
-                                                          Text(
-                                                            origin.sourceName,
-                                                            maxLines: 1,
-                                                            overflow:
-                                                                TextOverflow
-                                                                    .ellipsis,
-                                                            style: TextStyle(
-                                                              color: _LiveTvMediaPaint
-                                                                  .onSurface54,
-                                                              fontSize: 11,
-                                                            ),
-                                                          ),
-                                                      ],
+                                                  DropdownMenuItem(
+                                                    value: _MediaSortMode.title,
+                                                    child: Text('Title'),
+                                                  ),
+                                                  DropdownMenuItem(
+                                                    value:
+                                                        _MediaSortMode.source,
+                                                    child: Text('Source'),
+                                                  ),
+                                                  DropdownMenuItem(
+                                                    value: _MediaSortMode
+                                                        .inTheaters,
+                                                    child: Text('In Theaters'),
+                                                  ),
+                                                  DropdownMenuItem(
+                                                    value: _MediaSortMode
+                                                        .recentlyAdded,
+                                                    child: Text(
+                                                      'Recently Added',
                                                     ),
                                                   ),
                                                 ],
+                                                onChanged: (value) {
+                                                  if (value == null) {
+                                                    return;
+                                                  }
+                                                  setState(
+                                                    () => sortMode = value,
+                                                  );
+                                                },
+                                              ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          flex: 3,
+                                          child: Align(
+                                            alignment: Alignment.centerLeft,
+                                            child: FilterChip(
+                                              selected: versionAwareOnly,
+                                              onSelected: (selected) {
+                                                setState(
+                                                  () => versionAwareOnly =
+                                                      selected,
+                                                );
+                                              },
+                                              avatar: const Icon(
+                                                Icons
+                                                    .collections_bookmark_outlined,
+                                              ),
+                                              label: Text(
+                                                _multiVersionCount == 0
+                                                    ? 'Multiple versions only'
+                                                    : 'Multiple versions only ($_multiVersionCount titles)',
                                               ),
                                             ),
                                           ),
-                                        );
-                                      },
-                                    );
-                                  },
-                                ),
-                        ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      0,
+                                      12,
+                                      8,
+                                    ),
+                                    child: _continueWatchingCard(),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      4,
+                                      12,
+                                      8,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: _historyPanel(),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      0,
+                                      12,
+                                      8,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: _favoritesPanel(),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: items.isEmpty
+                                ? const Center(
+                                    child: Text(
+                                      'No items match the current filter.',
+                                    ),
+                                  )
+                                : LayoutBuilder(
+                                    builder: (context, constraints) {
+                                      final width = constraints.maxWidth;
+                                      final maxCardWidth = max(
+                                        190.0,
+                                        width / 5.2,
+                                      ).toDouble();
+                                      final titleLines = width > 1200 ? 3 : 2;
+                                      return GridView.builder(
+                                        padding: const EdgeInsets.all(12),
+                                        gridDelegate:
+                                            SliverGridDelegateWithMaxCrossAxisExtent(
+                                              maxCrossAxisExtent: maxCardWidth,
+                                              childAspectRatio: .70,
+                                              crossAxisSpacing: 12,
+                                              mainAxisSpacing: 14,
+                                            ),
+                                        itemCount: items.length,
+                                        itemBuilder: (context, index) {
+                                          final item = items[index];
+                                          final origin = mediaItemOrigins[item];
+                                          final favorite = origin == null
+                                              ? false
+                                              : _isFavorite(
+                                                  origin.sourceId,
+                                                  item.series
+                                                      ? 'series'
+                                                      : 'movie',
+                                                  item.id,
+                                                );
+                                          final focused =
+                                              focusedMediaId == item.id;
+                                          return InkWell(
+                                            onTap: () {
+                                              setState(
+                                                () => focusedMediaId = item.id,
+                                              );
+                                              unawaited(
+                                                _showMediaDetails(item),
+                                              );
+                                            },
+                                            child: FocusableActionDetector(
+                                              onFocusChange: (value) {
+                                                if (value) {
+                                                  setState(
+                                                    () => focusedMediaId =
+                                                        item.id,
+                                                  );
+                                                }
+                                              },
+                                              child: Card(
+                                                clipBehavior: Clip.antiAlias,
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius:
+                                                      BorderRadius.circular(12),
+                                                  side: BorderSide(
+                                                    color: focused
+                                                        ? _LiveTvMediaPaint
+                                                              .accent
+                                                        : _LiveTvMediaPaint
+                                                              .transparent,
+                                                    width: 2,
+                                                  ),
+                                                ),
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Expanded(
+                                                      child:
+                                                          item.posterUrl ==
+                                                                  null ||
+                                                              item.posterUrl!
+                                                                  .trim()
+                                                                  .isEmpty
+                                                          ? ColoredBox(
+                                                              color:
+                                                                  _LiveTvMediaPaint
+                                                                      .panel,
+                                                              child: Center(
+                                                                child: Icon(
+                                                                  Icons.live_tv,
+                                                                  size: 46,
+                                                                ),
+                                                              ),
+                                                            )
+                                                          : Image.network(
+                                                              item.posterUrl!,
+                                                              fit: BoxFit.cover,
+                                                              width: double
+                                                                  .infinity,
+                                                              errorBuilder:
+                                                                  (
+                                                                    _,
+                                                                    __,
+                                                                    ___,
+                                                                  ) => ColoredBox(
+                                                                    color: _LiveTvMediaPaint
+                                                                        .panel,
+                                                                    child: Center(
+                                                                      child: Icon(
+                                                                        Icons
+                                                                            .movie_outlined,
+                                                                        size:
+                                                                            46,
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                            ),
+                                                    ),
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.all(
+                                                            10,
+                                                          ),
+                                                      child: Column(
+                                                        crossAxisAlignment:
+                                                            CrossAxisAlignment
+                                                                .start,
+                                                        children: [
+                                                          Row(
+                                                            children: [
+                                                              Expanded(
+                                                                child: Text(
+                                                                  item.title,
+                                                                  maxLines:
+                                                                      titleLines,
+                                                                  overflow:
+                                                                      TextOverflow
+                                                                          .ellipsis,
+                                                                  style: const TextStyle(
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w700,
+                                                                    fontSize:
+                                                                        14,
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                              if (_versionCountFor(
+                                                                    item,
+                                                                  ) >
+                                                                  1) ...[
+                                                                const SizedBox(
+                                                                  width: 6,
+                                                                ),
+                                                                DecoratedBox(
+                                                                  decoration: BoxDecoration(
+                                                                    color: _LiveTvMediaPaint
+                                                                        .onSurface
+                                                                        .withAlpha(
+                                                                          42,
+                                                                        ),
+                                                                    borderRadius:
+                                                                        BorderRadius.circular(
+                                                                          999,
+                                                                        ),
+                                                                  ),
+                                                                  child: Padding(
+                                                                    padding: const EdgeInsets.symmetric(
+                                                                      horizontal:
+                                                                          6,
+                                                                      vertical:
+                                                                          2,
+                                                                    ),
+                                                                    child: Text(
+                                                                      'x${_versionCountFor(item)}',
+                                                                      style: TextStyle(
+                                                                        fontSize:
+                                                                            11,
+                                                                        color: _LiveTvMediaPaint
+                                                                            .onSurface70,
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                              Icon(
+                                                                favorite
+                                                                    ? Icons
+                                                                          .favorite
+                                                                    : Icons
+                                                                          .favorite_border,
+                                                                size: 16,
+                                                                color: favorite
+                                                                    ? _LiveTvMediaPaint
+                                                                          .error
+                                                                    : _LiveTvMediaPaint
+                                                                          .onSurface54,
+                                                              ),
+                                                            ],
+                                                          ),
+                                                          if (item.group !=
+                                                                  null &&
+                                                              item.group!
+                                                                  .trim()
+                                                                  .isNotEmpty)
+                                                            Text(
+                                                              item.group!,
+                                                              maxLines: 1,
+                                                              overflow:
+                                                                  TextOverflow
+                                                                      .ellipsis,
+                                                              style: TextStyle(
+                                                                color: _LiveTvMediaPaint
+                                                                    .onSurface70,
+                                                                fontSize: 12,
+                                                              ),
+                                                            ),
+                                                          if (origin != null)
+                                                            Text(
+                                                              origin.sourceName,
+                                                              maxLines: 1,
+                                                              overflow:
+                                                                  TextOverflow
+                                                                      .ellipsis,
+                                                              style: TextStyle(
+                                                                color: _LiveTvMediaPaint
+                                                                    .onSurface54,
+                                                                fontSize: 11,
+                                                              ),
+                                                            ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      );
+                                    },
+                                  ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -3902,6 +4741,12 @@ class _MediaPlayerScreen extends StatefulWidget {
   final PlaybackPerformanceSettings playbackPerformance;
   final String? nextEpisodeStreamUrl;
   final String? nextEpisodeTitle;
+
+  /// Set for Jellyfin titles: supplies the real stream URL and reports
+  /// progress back to the server. [jellyfinFor] builds one for the next
+  /// episode when autoplay advances.
+  final JellyfinPlaybackReporter? jellyfin;
+  final JellyfinPlaybackReporter? Function(String streamUrl)? jellyfinFor;
   const _MediaPlayerScreen({
     required this.profileKey,
     required this.title,
@@ -3912,6 +4757,8 @@ class _MediaPlayerScreen extends StatefulWidget {
     required this.playbackPerformance,
     this.nextEpisodeStreamUrl,
     this.nextEpisodeTitle,
+    this.jellyfin,
+    this.jellyfinFor,
   });
 
   @override
@@ -3922,6 +4769,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     with WidgetsBindingObserver {
   final memory = VideoPlaybackMemory();
   final subtitleProviders = const SubtitleProviderService();
+  late JellyfinPlaybackReporter? jellyfin = widget.jellyfin;
   Player? player;
   VideoController? video;
   Track selectedTrack = const Track();
@@ -4040,10 +4888,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     Player created, {
     required bool compatibleMode,
   }) async {
-    final candidates = <String>[
-      ...widget.streamUrlCandidates,
-      widget.streamUrl,
-    ];
+    final candidates = jellyfin != null
+        ? <String>[jellyfin!.playUrl]
+        : <String>[...widget.streamUrlCandidates, widget.streamUrl];
     Object? lastError;
     for (final candidate in candidates) {
       try {
@@ -4117,6 +4964,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       final priorPosition = int.tryParse(prior['positionMs']?.toString() ?? '');
       if (priorPosition != null && priorPosition > 0) {
         resumePositionMs = priorPosition;
+      }
+      // Jellyfin's resume point wins: it includes progress from other devices.
+      final remoteResume = jellyfin?.resumeMs ?? 0;
+      if (remoteResume > 0) {
+        resumePositionMs = remoteResume;
       }
       MediaKit.ensureInitialized();
       final created = Player(
@@ -4314,13 +5166,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     return false;
   }
 
+  String get _effectiveStreamUrl => jellyfin?.playUrl ?? widget.streamUrl;
+
   String _streamHost() {
-    final uri = Uri.tryParse(widget.streamUrl);
+    final uri = Uri.tryParse(_effectiveStreamUrl);
     return uri?.host.toLowerCase() ?? '';
   }
 
   int _maxBandwidthKbpsForCurrentRoute() {
-    final uri = Uri.tryParse(widget.streamUrl);
+    final uri = Uri.tryParse(_effectiveStreamUrl);
     final host = uri?.host ?? '';
     final local = host.isNotEmpty && _isLocalAddress(host);
     playbackRoute = local ? 'local-network' : 'remote-streaming';
@@ -4756,6 +5610,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     final complete =
         durationMs > 0 &&
         positionMs >= (durationMs - const Duration(seconds: 8).inMilliseconds);
+    if (positionMs > 0) {
+      jellyfin?.progress(positionMs, paused: !playing);
+    }
     await memory.saveProgress(
       widget.streamUrl,
       positionMs: positionMs,
@@ -4777,6 +5634,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Future<void> _saveFinalProgress() async {
     try {
       await _saveProgressSnapshot();
+      await jellyfin?.stopped(position.inMilliseconds);
       await memory.appendStatsEvent(
         widget.profileKey,
         type: 'final_progress',
@@ -4918,7 +5776,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (current == null) {
       return;
     }
-    await current.open(Media(nextStream), play: true);
+    jellyfin = widget.jellyfinFor?.call(nextStream);
+    await current.open(Media(jellyfin?.playUrl ?? nextStream), play: true);
     resumePositionMs = 0;
     nextEpisodePrompted = false;
     if (mounted) {
