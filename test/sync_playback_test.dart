@@ -140,10 +140,84 @@ void main() {
       expect(steps.map((s) => s.isMusic), [true, false, true]);
     });
 
+    test(
+      'session entries keep distinct queue identities for repeated media',
+      () {
+        final repeated = HubItem.youtube(_video);
+        final entries = PlaylistPlayback.segments([repeated, repeated]).first;
+        expect(entries.entries.length, 1);
+        final session = PlaylistPlaybackSession(
+          profileId: 1,
+          playlistId: 'mix',
+          playlistName: 'Mix',
+          entries: [
+            const PlaylistPlaybackEntry(
+              entryId: 'a',
+              item: HubItem(
+                type: HubMediaType.youtube,
+                sourceId: 'youtube',
+                id: 'v1',
+                title: 'Video one',
+                sourceName: 'YouTube',
+                payload: {
+                  'id': 'v1',
+                  'title': 'Video one',
+                  'author': 'Creator',
+                },
+              ),
+            ),
+            const PlaylistPlaybackEntry(
+              entryId: 'b',
+              item: HubItem(
+                type: HubMediaType.youtube,
+                sourceId: 'youtube',
+                id: 'v1',
+                title: 'Video one',
+                sourceName: 'YouTube',
+                payload: {
+                  'id': 'v1',
+                  'title': 'Video one',
+                  'author': 'Creator',
+                },
+              ),
+            ),
+          ],
+          startIndex: 0,
+          shuffled: false,
+        );
+        expect(session.entries[0].entryId, isNot(session.entries[1].entryId));
+        expect(session.entries[0].item.id, session.entries[1].item.id);
+      },
+    );
+
+    test('pending queue reorder and removal keep current item protected', () {
+      final session = PlaylistPlaybackSession(
+        profileId: 1,
+        playlistId: 'mix',
+        playlistName: 'Mix',
+        entries: [
+          PlaylistPlaybackEntry(entryId: 'now', item: HubItem.youtube(_video)),
+          PlaylistPlaybackEntry(entryId: 'two', item: HubItem.youtube(_video2)),
+          PlaylistPlaybackEntry(
+            entryId: 'three',
+            item: HubItem.song(_song('c')),
+          ),
+        ],
+        startIndex: 0,
+        shuffled: false,
+      );
+      expect(session.reorderPending(0, 1), isFalse);
+      expect(session.removePending('now'), isFalse);
+      expect(session.reorderPending(2, 1), isTrue);
+      expect(session.entries[1].entryId, 'three');
+      expect(session.removePending('two'), isTrue);
+      expect(session.entries.map((entry) => entry.entryId), ['now', 'three']);
+    });
+
     test('shuffle reorders a copy and keeps every item', () {
       final player = PlaylistPlayback(
         profileId: 1,
-        open: (_, _) async {},
+        open: (_, __, ___) async => const PlaylistPlaybackExit.explicitBack(),
         random: math.Random(3),
       );
       final shuffled = player.order(items, shuffle: true);
@@ -160,7 +234,7 @@ void main() {
       ]);
     });
 
-    testWidgets('plays mixed items in order and Stop ends playback', (
+    testWidgets('plays mixed items in order and explicit stop ends playback', (
       tester,
     ) async {
       final opened = <String>[];
@@ -177,25 +251,26 @@ void main() {
       );
       final player = PlaylistPlayback(
         profileId: 1,
-        upNextSeconds: 0,
-        open: (_, segment) async =>
-            opened.add(segment.items.map((i) => i.id).join(',')),
+        open: (_, __, segment) async {
+          opened.add(segment.items.map((i) => i.id).join(','));
+          if (opened.length == 1) {
+            return const PlaylistPlaybackExit.completed();
+          }
+          return const PlaylistPlaybackExit.explicitStop();
+        },
       );
-      final run = player.play(context, name: 'Mix', items: items);
-      await tester.pumpAndSettle();
-      expect(opened, ['a,b']);
-      expect(find.text('Up next in Mix'), findsOneWidget);
-      expect(find.text('Video one'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('playlist-up-next-play')));
-      await tester.pumpAndSettle();
-      expect(opened, ['a,b', 'v1']);
-      await tester.tap(find.byKey(const ValueKey('playlist-up-next-stop')));
-      await tester.pumpAndSettle();
+      final run = player.play(
+        context,
+        playlistId: 'mix',
+        name: 'Mix',
+        items: items,
+      );
+      await tester.pump();
       await run;
       expect(opened, ['a,b', 'v1']);
     });
 
-    testWidgets('Up next continues on its own after the countdown', (
+    testWidgets('completion advances once without a blocking up-next modal', (
       tester,
     ) async {
       final opened = <String>[];
@@ -212,21 +287,80 @@ void main() {
       );
       final player = PlaylistPlayback(
         profileId: 1,
-        upNextSeconds: 2,
-        open: (_, segment) async => opened.add(segment.first.id),
+        open: (_, __, segment) async {
+          opened.add(segment.first.item.id);
+          return const PlaylistPlaybackExit.completed();
+        },
       );
       final run = player.play(
         context,
+        playlistId: 'mix',
         name: 'Mix',
         items: [HubItem.youtube(_video), HubItem.youtube(_video2)],
       );
-      await tester.pump();
-      expect(find.textContaining('starts in 2s'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 1));
-      await tester.pump(const Duration(seconds: 1));
-      await tester.pumpAndSettle();
       await run;
       expect(opened, ['v1', 'v2']);
+      expect(find.byKey(const ValueKey('playlist-up-next')), findsNothing);
     });
+
+    testWidgets(
+      'switch commands move across provider boundaries without reshuffling',
+      (tester) async {
+        final opened = <String>[];
+        late BuildContext context;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (ctx) {
+                context = ctx;
+                return const Scaffold();
+              },
+            ),
+          ),
+        );
+        final mixed = [
+          HubItem.youtube(_video),
+          HubItem(
+            type: HubMediaType.movie,
+            sourceId: 'provider-a',
+            id: 'movie-b',
+            title: 'Movie B',
+            sourceName: 'Provider A',
+            payload: const {
+              'sourceId': 'provider-a',
+              'sourceName': 'Provider A',
+              'mediaType': 'movie',
+              'mediaId': 'movie-b',
+              'title': 'Movie B',
+              'streamUrl': 'https://example.invalid/movie-b.mp4',
+            },
+          ),
+          HubItem.youtube(_video2),
+        ];
+        final player = PlaylistPlayback(
+          profileId: 1,
+          random: math.Random(2),
+          open: (_, session, segment) async {
+            opened.add(segment.first.item.id);
+            if (opened.length == 1) {
+              final target = session.entries.firstWhere(
+                (entry) => entry.item.id == 'movie-b',
+              );
+              return PlaylistPlaybackExit.switched(target.entryId);
+            }
+            return const PlaylistPlaybackExit.explicitStop();
+          },
+        );
+        await player.play(
+          context,
+          playlistId: 'mixed',
+          name: 'Mixed',
+          items: mixed,
+          shuffle: true,
+        );
+        expect(opened.length, 2);
+        expect(opened[1], 'movie-b');
+      },
+    );
   });
 }

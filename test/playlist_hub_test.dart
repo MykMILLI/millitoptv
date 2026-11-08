@@ -20,6 +20,7 @@ import 'package:millitop_tv/services/global_playlists.dart';
 import 'package:millitop_tv/services/home_preferences.dart';
 import 'package:millitop_tv/services/music_service.dart';
 import 'package:millitop_tv/services/playlist_hub.dart';
+import 'package:millitop_tv/services/playlist_playback.dart';
 import 'package:millitop_tv/services/podcast_service.dart';
 import 'package:millitop_tv/services/tube_library.dart';
 import 'package:millitop_tv/theme/millitop_visual_theme.dart';
@@ -404,12 +405,34 @@ void main() {
   );
 
   test('destinations carry exact profile, source and media identifiers', () {
+    final mixedSession = PlaylistPlaybackSession(
+      profileId: 7,
+      playlistId: 'mix',
+      playlistName: 'Mix',
+      entries: [
+        PlaylistPlaybackEntry(
+          entryId: 'entry-1',
+          item: HubItem.youtube(_video),
+        ),
+      ],
+      startIndex: 0,
+      shuffled: false,
+    );
     for (final kind in ['movie', 'series', 'episode']) {
       final saved = _vod(kind, source: 'provider-2');
-      final screen = hubDestination(7, vodHubItem(saved)) as LiveTvMediaScreen;
+      final screen =
+          hubDestination(
+                7,
+                vodHubItem(saved),
+                mixedSession: mixedSession,
+                mixedSessionEntryId: 'entry-1',
+              )
+              as LiveTvMediaScreen;
       expect(screen.profileId, 7);
       expect(screen.initialSourceId, saved.sourceId);
       expect(screen.initialLibraryItem!.key, saved.key);
+      expect(screen.mixedSession, same(mixedSession));
+      expect(screen.mixedSessionEntryId, 'entry-1');
     }
     final channel =
         hubDestination(7, vodHubItem(_vod('channel'))) as LiveTvScreen;

@@ -24,6 +24,7 @@ import '../services/live_tv_control.dart';
 import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
+import '../services/playlist_playback.dart';
 import '../services/live_tv_source.dart';
 import '../services/media_catalog_cache.dart';
 import '../services/adult_content.dart';
@@ -342,6 +343,8 @@ class LiveTvMediaScreen extends StatefulWidget {
   final MediaCatalogCache? catalogCache;
   final JellyfinAccountStore? jellyfinStore;
   final JellyfinTransport? jellyfinTransport;
+  final PlaylistPlaybackSession? mixedSession;
+  final String? mixedSessionEntryId;
   const LiveTvMediaScreen({
     super.key,
     required this.profileId,
@@ -356,6 +359,8 @@ class LiveTvMediaScreen extends StatefulWidget {
     this.catalogCache,
     this.jellyfinStore,
     this.jellyfinTransport,
+    this.mixedSession,
+    this.mixedSessionEntryId,
   });
 
   @override
@@ -2442,8 +2447,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     unawaited(_reportMediaPlayback(item, active: true));
     try {
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(
+      await Navigator.of(context).push<Object?>(
+        MaterialPageRoute<Object?>(
           builder: (_) => _MediaPlayerScreen(
             profileKey: 'profile-${widget.profileId}',
             title: item.title,
@@ -2524,7 +2529,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   Future<void> _managePlaylists() async {
     await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
+      MaterialPageRoute<Object?>(
         builder: (_) => PlaylistsScreen(profileId: widget.profileId),
       ),
     );
@@ -3115,8 +3120,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final normalizedQueueIndex = movieQueue.isEmpty
           ? 0
           : queueIndex.clamp(0, movieQueue.length - 1).toInt();
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(
+      final result = await Navigator.of(context).push<Object?>(
+        MaterialPageRoute<Object?>(
           builder: (_) => _MediaPlayerScreen(
             profileKey: 'profile-${widget.profileId}',
             title: item.title,
@@ -3130,9 +3135,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             playbackPerformance: playbackPerformance,
             movieQueue: movieQueue,
             movieQueueIndex: normalizedQueueIndex,
+            mixedSession: widget.mixedSession,
+            mixedSessionEntryId: widget.mixedSessionEntryId,
           ),
         ),
       );
+      if (widget.mixedSession != null &&
+          result is PlaylistPlaybackExit &&
+          mounted) {
+        Navigator.of(context).pop<Object?>(result);
+      }
     } finally {
       if (libraryItem != null) {
         unawaited(_reportMediaPlayback(libraryItem, active: false));
@@ -3151,6 +3163,34 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     final selected = origin.source;
     if (selected != null && source?.id != selected.id && mounted) {
       setState(() => source = selected);
+    }
+    if (widget.mixedSession != null) {
+      await _saveHistory(item, subtitle: item.group ?? 'Series');
+      if (!mounted) {
+        return;
+      }
+      final result = await Navigator.of(context).push<Object?>(
+        MaterialPageRoute<void>(
+          builder: (_) => _MediaPlayerScreen(
+            profileKey: 'profile-${widget.profileId}',
+            title: item.title,
+            subtitle: item.group ?? 'Series',
+            streamUrl: item.streamUrl,
+            jellyfin: _jellyfinReporter(item.streamUrl),
+            jellyfinFor: _jellyfinReporter,
+            streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
+            posterUrl: item.posterUrl,
+            description: item.description,
+            playbackPerformance: playbackPerformance,
+            mixedSession: widget.mixedSession,
+            mixedSessionEntryId: widget.mixedSessionEntryId,
+          ),
+        ),
+      );
+      if (result is PlaylistPlaybackExit && mounted) {
+        Navigator.of(context).pop<Object?>(result);
+      }
+      return;
     }
     if (item.seriesId == null || item.seriesId!.trim().isEmpty) {
       await _saveHistory(item, subtitle: item.group);
@@ -5501,6 +5541,8 @@ class _MediaPlayerScreen extends StatefulWidget {
   final int movieQueueIndex;
   final List<_SeriesEpisodeEntry> seriesEpisodes;
   final int seriesEpisodeIndex;
+  final PlaylistPlaybackSession? mixedSession;
+  final String? mixedSessionEntryId;
 
   /// Set for Jellyfin titles: supplies the real stream URL and reports
   /// progress back to the server. [jellyfinFor] builds one for the next
@@ -5525,6 +5567,8 @@ class _MediaPlayerScreen extends StatefulWidget {
     this.seriesEpisodeIndex = 0,
     this.jellyfin,
     this.jellyfinFor,
+    this.mixedSession,
+    this.mixedSessionEntryId,
   });
 
   @override
@@ -5625,6 +5669,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   late _ActivePlaybackMedia _activeMedia = _initialActiveMedia();
   bool showMovieQueuePanel = false;
   bool showSeriesEpisodesPanel = false;
+  bool get _hasMixedSession =>
+      widget.mixedSession != null && widget.mixedSessionEntryId != null;
   bool get _hasMovieQueue => _movieQueue.isNotEmpty;
   bool get _hasPreviousMovieQueueItem => _hasMovieQueue && _movieQueueIndex > 0;
   bool get _hasNextMovieQueueItem =>
@@ -6960,6 +7006,23 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _handlePlaybackCompleted({bool force = false}) async {
     await _saveFinalProgress();
+    if (_hasMixedSession) {
+      final session = widget.mixedSession!;
+      final current = session.current;
+      if (current == null || current.entryId != widget.mixedSessionEntryId) {
+        return;
+      }
+      if (!session.autoplay && !force) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(
+        context,
+      ).pop<Object?>(const PlaylistPlaybackExit.completed());
+      return;
+    }
     if (!autoplayNext && !force) {
       return;
     }
@@ -7355,6 +7418,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Widget _buildMovieQueueSidePanel() {
+    if (_hasMixedSession) {
+      return _buildMixedQueueSidePanel();
+    }
     bool canMoveUp(int index) => index > _movieQueueIndex + 1;
     bool canMoveDown(int index) =>
         index > _movieQueueIndex && index < _movieQueue.length - 1;
@@ -7450,6 +7516,147 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         _moveQueueItem(oldIndex, newIndex);
       },
     );
+  }
+
+  Widget _buildMixedQueueSidePanel() {
+    final session = widget.mixedSession!;
+    bool canMoveUp(int index) => index > session.currentIndex + 1;
+    bool canMoveDown(int index) =>
+        index > session.currentIndex && index < session.entries.length - 1;
+    bool canRemove(int index) => index > session.currentIndex;
+    return AnimatedBuilder(
+      animation: session,
+      builder: (_, __) => Column(
+        children: [
+          ListTile(
+            title: Text(session.playlistName),
+            subtitle: Text(
+              session.shuffled
+                  ? 'Mixed playlist queue · shuffled'
+                  : 'Mixed playlist queue',
+            ),
+            trailing: Wrap(
+              spacing: 4,
+              children: [
+                IconButton(
+                  tooltip: 'Previous item',
+                  onPressed: session.hasPrevious
+                      ? () => unawaited(_switchToMixedPrevious())
+                      : null,
+                  icon: const Icon(Icons.skip_previous),
+                ),
+                IconButton(
+                  tooltip: 'Next item',
+                  onPressed: session.hasNext
+                      ? () => unawaited(_switchToMixedNext())
+                      : null,
+                  icon: const Icon(Icons.skip_next),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: MovieQueuePanel(
+              items: [
+                for (var i = 0; i < session.entries.length; i++)
+                  MediaQueueRow(
+                    id: session.entries[i].entryId,
+                    title: session.entries[i].item.title,
+                    subtitle: session.entries[i].item.subtitle.trim().isEmpty
+                        ? session.entries[i].item.sourceName
+                        : '${session.entries[i].item.sourceName} · ${session.entries[i].item.subtitle}',
+                    nowPlaying: i == session.currentIndex,
+                    canMoveUp: canMoveUp(i),
+                    canMoveDown: canMoveDown(i),
+                    canRemove: canRemove(i),
+                    poster: session.entries[i].item.artwork.trim().isNotEmpty
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.network(
+                              session.entries[i].item.artwork,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) =>
+                                  const Icon(Icons.movie_outlined),
+                            ),
+                          )
+                        : null,
+                  ),
+              ],
+              autoplay: session.autoplay,
+              onAutoplayChanged: session.setAutoplay,
+              onPlay: (entryId) {
+                unawaited(_switchToMixedEntry(entryId));
+              },
+              onMoveUp: (entryId) {
+                final oldIndex = session.entries.indexWhere(
+                  (entry) => entry.entryId == entryId,
+                );
+                if (oldIndex > 0) {
+                  session.reorderPending(oldIndex, oldIndex - 1);
+                }
+              },
+              onMoveDown: (entryId) {
+                final oldIndex = session.entries.indexWhere(
+                  (entry) => entry.entryId == entryId,
+                );
+                if (oldIndex >= 0) {
+                  session.reorderPending(oldIndex, oldIndex + 1);
+                }
+              },
+              onRemove: session.removePending,
+              onReorder: session.reorderPending,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _switchToMixedEntry(String entryId) async {
+    final session = widget.mixedSession;
+    if (session == null || !session.playEntry(entryId)) {
+      return;
+    }
+    await _saveFinalProgress(allowDuringTransition: true);
+    if (mounted) {
+      Navigator.of(
+        context,
+      ).pop<Object?>(PlaylistPlaybackExit.switched(entryId));
+    }
+  }
+
+  Future<void> _switchToMixedPrevious() async {
+    final session = widget.mixedSession;
+    if (session == null || !session.previous()) {
+      return;
+    }
+    final current = session.current;
+    if (current == null) {
+      return;
+    }
+    await _saveFinalProgress(allowDuringTransition: true);
+    if (mounted) {
+      Navigator.of(
+        context,
+      ).pop<Object?>(PlaylistPlaybackExit.switched(current.entryId));
+    }
+  }
+
+  Future<void> _switchToMixedNext() async {
+    final session = widget.mixedSession;
+    if (session == null || !session.next()) {
+      return;
+    }
+    final current = session.current;
+    if (current == null) {
+      return;
+    }
+    await _saveFinalProgress(allowDuringTransition: true);
+    if (mounted) {
+      Navigator.of(
+        context,
+      ).pop<Object?>(PlaylistPlaybackExit.switched(current.entryId));
+    }
   }
 
   void _moveQueueItem(int oldIndex, int newIndex) {
@@ -7612,7 +7819,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
     if (mounted && !_routeExitTriggered) {
       _routeExitTriggered = true;
-      Navigator.of(context).pop();
+      if (_hasMixedSession) {
+        widget.mixedSession?.stop();
+        Navigator.of(
+          context,
+        ).pop<Object?>(const PlaylistPlaybackExit.explicitBack());
+      } else {
+        Navigator.of(context).pop();
+      }
     }
     if (!_routeExitTriggered) {
       _backActionInProgress = false;

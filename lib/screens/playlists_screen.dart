@@ -21,7 +21,12 @@ import 'music_screen.dart';
 import 'podcasts_screen.dart';
 import 'youtube_screen.dart';
 
-Widget hubDestination(int profile, HubItem item) => switch (item.type) {
+Widget hubDestination(
+  int profile,
+  HubItem item, {
+  PlaylistPlaybackSession? mixedSession,
+  String? mixedSessionEntryId,
+}) => switch (item.type) {
   HubMediaType.channel => LiveTvScreen(
     profileId: profile,
     initialSourceId: item.sourceId,
@@ -33,6 +38,8 @@ Widget hubDestination(int profile, HubItem item) => switch (item.type) {
     profileId: profile,
     initialSourceId: item.sourceId,
     initialLibraryItem: LiveTvLibraryItem.fromJson(item.payload),
+    mixedSession: mixedSession,
+    mixedSessionEntryId: mixedSessionEntryId,
   ),
   HubMediaType.song => MusicScreen(
     profileId: profile,
@@ -48,31 +55,41 @@ Widget hubDestination(int profile, HubItem item) => switch (item.type) {
   ),
 };
 
-/// Opens one playlist step: runs of songs play as one Music queue and
-/// YouTube closes itself when the video ends so the next item can start.
-Future<void> openPlaylistSegment(
+/// Opens one playlist step for the shared mixed-playlist session.
+Future<PlaylistPlaybackExit?> openPlaylistSegment(
   BuildContext context,
-  int profile,
+  PlaylistPlaybackSession session,
   PlaylistSegment segment,
-) {
-  final item = segment.first;
+) async {
+  final entry = segment.first;
+  final item = entry.item;
   final Widget page = switch (item.type) {
     HubMediaType.song => MusicScreen(
-      profileId: profile,
+      profileId: session.profileId,
       initialQueue: [
         for (final song in segment.items) MusicTrack.fromJson(song.payload),
       ],
     ),
     HubMediaType.youtube => YouTubeScreen(
-      profileId: profile,
+      profileId: session.profileId,
       initialVideo: TubeVideo.fromJson(item.payload),
-      exitWhenFinished: true,
+      mixedSession: session,
+      mixedSessionEntryId: entry.entryId,
     ),
-    _ => hubDestination(profile, item),
+    _ => hubDestination(
+      session.profileId,
+      item,
+      mixedSession: session,
+      mixedSessionEntryId: entry.entryId,
+    ),
   };
-  return Navigator.of(
+  final result = await Navigator.of(
     context,
-  ).push<void>(MaterialPageRoute(builder: (_) => page));
+  ).push<Object?>(MaterialPageRoute(builder: (_) => page));
+  if (result is PlaylistPlaybackExit) {
+    return result;
+  }
+  return const PlaylistPlaybackExit.explicitBack();
 }
 
 IconData _mediaIcon(HubMediaType type) => switch (type) {
@@ -128,12 +145,16 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
 
   Future<void> _play(HubPlaylist list, {bool shuffle = false}) async {
     if (list.items.isEmpty) return;
-    final profile = widget.profileId;
     await PlaylistPlayback(
-      profileId: profile,
-      open: (context, segment) =>
-          openPlaylistSegment(context, profile, segment),
-    ).play(context, name: list.name, items: list.items, shuffle: shuffle);
+      profileId: widget.profileId,
+      open: openPlaylistSegment,
+    ).play(
+      context,
+      playlistId: list.id,
+      name: list.name,
+      items: list.items,
+      shuffle: shuffle,
+    );
     if (mounted) await _load();
   }
 

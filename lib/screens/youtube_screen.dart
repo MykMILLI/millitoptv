@@ -12,11 +12,13 @@ import '../services/device_connection.dart';
 import '../services/global_playlists.dart';
 import '../services/home_preferences.dart';
 import '../services/pip_playback.dart';
+import '../services/playlist_playback.dart';
 import '../services/profile_sync.dart';
 import '../services/tube_downloads.dart';
 import '../services/tube_library.dart';
 import '../theme/millitop_visual_theme.dart';
 import '../widgets/mixed_playlist_picker.dart';
+import '../widgets/redesign/media_side_panels.dart';
 import 'playlists_screen.dart';
 
 String tubeTime(int seconds) {
@@ -31,8 +33,10 @@ class YouTubeScreen extends StatefulWidget {
   final TubeEngine? engine;
   final TubeDownloads? downloads;
   final TubeVideo? initialVideo;
+  final PlaylistPlaybackSession? mixedSession;
+  final String? mixedSessionEntryId;
 
-  /// Close the screen when [initialVideo] finishes (playlist playback).
+  /// Legacy route behavior retained for non-session callers.
   final bool exitWhenFinished;
   const YouTubeScreen({
     super.key,
@@ -40,6 +44,8 @@ class YouTubeScreen extends StatefulWidget {
     this.engine,
     this.downloads,
     this.initialVideo,
+    this.mixedSession,
+    this.mixedSessionEntryId,
     this.exitWhenFinished = false,
   });
   @override
@@ -74,6 +80,16 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
   String? downloading;
   final downloadedIds = <String>{};
   bool handedOffToMiniPlayer = false;
+  PlaylistPlaybackSession? get _mixedSession => widget.mixedSession;
+  bool get _hasMixedSession =>
+      _mixedSession != null && widget.mixedSessionEntryId != null;
+
+  void _exitMixed(PlaylistPlaybackExit exit) {
+    if (!mounted) {
+      return;
+    }
+    Navigator.of(context).pop<Object?>(exit);
+  }
 
   @override
   void initState() {
@@ -402,6 +418,17 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
           created.stream.completed.listen((value) {
             if (!value) return;
             _saveProgress(sync: true);
+            final session = _mixedSession;
+            if (session != null) {
+              final current = session.current;
+              if (current != null &&
+                  current.entryId == widget.mixedSessionEntryId &&
+                  session.autoplay &&
+                  mounted) {
+                _exitMixed(const PlaylistPlaybackExit.completed());
+              }
+              return;
+            }
             if (widget.exitWhenFinished && mounted) {
               unawaited(Navigator.maybePop(context));
             }
@@ -504,6 +531,145 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
         opening = false;
       });
     }
+  }
+
+  Future<void> _switchMixedEntry(String entryId) async {
+    final session = _mixedSession;
+    if (session == null || !session.playEntry(entryId)) {
+      return;
+    }
+    _saveProgress(sync: true);
+    await player?.stop();
+    _exitMixed(PlaylistPlaybackExit.switched(entryId));
+  }
+
+  Future<void> _mixedNext() async {
+    final session = _mixedSession;
+    if (session == null || !session.next()) {
+      return;
+    }
+    final target = session.current;
+    if (target == null) {
+      return;
+    }
+    _saveProgress(sync: true);
+    await player?.stop();
+    _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
+  }
+
+  Future<void> _mixedPrevious() async {
+    final session = _mixedSession;
+    if (session == null || !session.previous()) {
+      return;
+    }
+    final target = session.current;
+    if (target == null) {
+      return;
+    }
+    _saveProgress(sync: true);
+    await player?.stop();
+    _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
+  }
+
+  Future<void> _mixedStop() async {
+    final session = _mixedSession;
+    if (session == null) {
+      await _stop();
+      return;
+    }
+    session.stop();
+    _saveProgress(sync: true);
+    await player?.stop();
+    _exitMixed(const PlaylistPlaybackExit.explicitStop());
+  }
+
+  Future<void> _openMixedQueue() async {
+    final session = _mixedSession;
+    if (session == null || !mounted) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.75,
+          child: AnimatedBuilder(
+            animation: session,
+            builder: (_, __) {
+              final rows = [
+                for (var index = 0; index < session.entries.length; index++)
+                  MediaQueueRow(
+                    id: session.entries[index].entryId,
+                    title: session.entries[index].item.title,
+                    subtitle:
+                        session.entries[index].item.subtitle.trim().isEmpty
+                        ? session.entries[index].item.sourceName
+                        : '${session.entries[index].item.sourceName} · ${session.entries[index].item.subtitle}',
+                    nowPlaying: index == session.currentIndex,
+                    canMoveUp: index > session.currentIndex + 1,
+                    canMoveDown:
+                        index > session.currentIndex &&
+                        index < session.entries.length - 1,
+                    canRemove: index > session.currentIndex,
+                  ),
+              ];
+              return Column(
+                children: [
+                  ListTile(
+                    title: Text(session.playlistName),
+                    subtitle: Text(
+                      session.shuffled
+                          ? 'Mixed playlist queue · shuffled'
+                          : 'Mixed playlist queue',
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('Autoplay'),
+                        Switch(
+                          value: session.autoplay,
+                          onChanged: session.setAutoplay,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: MovieQueuePanel(
+                      items: rows,
+                      autoplay: session.autoplay,
+                      onAutoplayChanged: session.setAutoplay,
+                      onPlay: (entryId) {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(_switchMixedEntry(entryId));
+                      },
+                      onRemove: session.removePending,
+                      onMoveUp: (entryId) {
+                        final oldIndex = session.entries.indexWhere(
+                          (entry) => entry.entryId == entryId,
+                        );
+                        if (oldIndex > 0) {
+                          session.reorderPending(oldIndex, oldIndex - 1);
+                        }
+                      },
+                      onMoveDown: (entryId) {
+                        final oldIndex = session.entries.indexWhere(
+                          (entry) => entry.entryId == entryId,
+                        );
+                        if (oldIndex >= 0) {
+                          session.reorderPending(oldIndex, oldIndex + 1);
+                        }
+                      },
+                      onReorder: session.reorderPending,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _goHomeWithMiniPlayer() async {
@@ -1190,10 +1356,29 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
                 ],
                 icon: const Icon(Icons.speed),
               ),
+              if (_hasMixedSession)
+                IconButton(
+                  tooltip: 'Previous item',
+                  icon: const Icon(Icons.skip_previous),
+                  onPressed: () => unawaited(_mixedPrevious()),
+                ),
+              if (_hasMixedSession)
+                IconButton(
+                  tooltip: 'Next item',
+                  icon: const Icon(Icons.skip_next),
+                  onPressed: () => unawaited(_mixedNext()),
+                ),
+              if (_hasMixedSession)
+                IconButton(
+                  tooltip: 'Queue',
+                  icon: const Icon(Icons.queue_music),
+                  onPressed: () => unawaited(_openMixedQueue()),
+                ),
               IconButton(
-                tooltip: 'Close player',
+                tooltip: _hasMixedSession ? 'Stop session' : 'Close player',
                 icon: const Icon(Icons.close),
-                onPressed: () => unawaited(_action(_stop)),
+                onPressed: () =>
+                    unawaited(_action(_hasMixedSession ? _mixedStop : _stop)),
               ),
             ],
           ),
@@ -1357,105 +1542,125 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final desktop = constraints.maxWidth >= 850;
-      return Scaffold(
-        key: scaffold,
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        drawer: desktop
-            ? null
-            : Drawer(
-                child: SafeArea(child: Builder(builder: (_) => _rail())),
-              ),
-        appBar: AppBar(
-          automaticallyImplyLeading: false,
-          toolbarHeight: 64,
-          titleSpacing: 12,
-          title: Row(
-            children: [
-              Builder(
-                builder: (context) => IconButton(
-                  tooltip: 'Navigation',
-                  icon: const Icon(Icons.menu),
-                  onPressed: () {
-                    if (desktop) {
-                      setState(() => sidebar = !sidebar);
-                    } else {
-                      Scaffold.of(context).openDrawer();
-                    }
-                  },
+      return PopScope(
+        canPop: !_hasMixedSession,
+        onPopInvokedWithResult: (didPop, __) {
+          if (!didPop && _hasMixedSession) {
+            _mixedSession?.stop();
+            _exitMixed(const PlaylistPlaybackExit.explicitBack());
+          }
+        },
+        child: Scaffold(
+          key: scaffold,
+          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+          drawer: desktop
+              ? null
+              : Drawer(
+                  child: SafeArea(child: Builder(builder: (_) => _rail())),
                 ),
-              ),
-              const Icon(Icons.smart_display, color: Color(0xFFFF3030)),
-              if (constraints.maxWidth >= 650) ...[
-                const SizedBox(width: 7),
-                const Text(
-                  'YouTube',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            toolbarHeight: 64,
+            titleSpacing: 12,
+            title: Row(
+              children: [
+                Builder(
+                  builder: (context) => IconButton(
+                    tooltip: 'Navigation',
+                    icon: const Icon(Icons.menu),
+                    onPressed: () {
+                      if (desktop) {
+                        setState(() => sidebar = !sidebar);
+                      } else {
+                        Scaffold.of(context).openDrawer();
+                      }
+                    },
+                  ),
                 ),
-                const SizedBox(width: 30),
-              ],
-              Expanded(
-                child: TextField(
-                  controller: search,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _select('Search'),
-                  decoration: InputDecoration(
-                    hintText: 'Search',
-                    isDense: true,
-                    filled: true,
-                    fillColor: context.millitopTheme.panelColor,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    suffixIcon: IconButton(
-                      tooltip: 'Search YouTube',
-                      icon: const Icon(Icons.search),
-                      onPressed: () => _select('Search'),
+                const Icon(Icons.smart_display, color: Color(0xFFFF3030)),
+                if (constraints.maxWidth >= 650) ...[
+                  const SizedBox(width: 7),
+                  const Text(
+                    'YouTube',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(width: 30),
+                ],
+                Expanded(
+                  child: TextField(
+                    controller: search,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: (_) => _select('Search'),
+                    decoration: InputDecoration(
+                      hintText: 'Search',
+                      isDense: true,
+                      filled: true,
+                      fillColor: context.millitopTheme.panelColor,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                      suffixIcon: IconButton(
+                        tooltip: 'Search YouTube',
+                        icon: const Icon(Icons.search),
+                        onPressed: () => _select('Search'),
+                      ),
                     ),
                   ),
                 ),
-              ),
-              IconButton(
-                tooltip: 'YouTube / PsTube settings',
-                onPressed: _settings,
-                icon: const Icon(Icons.settings_outlined),
-              ),
-              IconButton(
-                tooltip: 'Back to MILLITOPTV',
-                onPressed: () => unawaited(_goHomeWithMiniPlayer()),
-                icon: const Icon(Icons.close),
-              ),
+                IconButton(
+                  tooltip: 'YouTube / PsTube settings',
+                  onPressed: _settings,
+                  icon: const Icon(Icons.settings_outlined),
+                ),
+                IconButton(
+                  tooltip: _hasMixedSession
+                      ? 'Leave playlist playback'
+                      : 'Back to MILLITOPTV',
+                  onPressed: () => unawaited(
+                    _hasMixedSession
+                        ? () async {
+                            _mixedSession?.stop();
+                            _exitMixed(
+                              const PlaylistPlaybackExit.explicitBack(),
+                            );
+                          }()
+                        : _goHomeWithMiniPlayer(),
+                  ),
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+          body: Row(
+            children: [
+              if (desktop && sidebar)
+                SizedBox(width: 218, child: Builder(builder: (_) => _rail())),
+              Expanded(child: _content()),
             ],
           ),
+          floatingActionButton: section == 'Playlists'
+              ? FloatingActionButton.extended(
+                  onPressed: () => unawaited(
+                    _action(() async {
+                      final url = await _input(
+                        'Open public YouTube playlist',
+                        'Playlist URL or ID',
+                      );
+                      if (url == null) return;
+                      final id =
+                          Uri.tryParse(url)?.queryParameters['list'] ?? url;
+                      if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(id)) {
+                        throw const FormatException('Invalid playlist ID.');
+                      }
+                      _select('Public playlist:$id');
+                    }),
+                  ),
+                  icon: const Icon(Icons.playlist_play),
+                  label: const Text('Open public playlist'),
+                )
+              : null,
         ),
-        body: Row(
-          children: [
-            if (desktop && sidebar)
-              SizedBox(width: 218, child: Builder(builder: (_) => _rail())),
-            Expanded(child: _content()),
-          ],
-        ),
-        floatingActionButton: section == 'Playlists'
-            ? FloatingActionButton.extended(
-                onPressed: () => unawaited(
-                  _action(() async {
-                    final url = await _input(
-                      'Open public YouTube playlist',
-                      'Playlist URL or ID',
-                    );
-                    if (url == null) return;
-                    final id =
-                        Uri.tryParse(url)?.queryParameters['list'] ?? url;
-                    if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(id)) {
-                      throw const FormatException('Invalid playlist ID.');
-                    }
-                    _select('Public playlist:$id');
-                  }),
-                ),
-                icon: const Icon(Icons.playlist_play),
-                label: const Text('Open public playlist'),
-              )
-            : null,
       );
     },
   );
