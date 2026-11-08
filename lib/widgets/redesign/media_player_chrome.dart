@@ -9,6 +9,7 @@ class MediaPlayerChrome extends StatefulWidget {
     required this.video,
     required this.title,
     required this.metadata,
+    this.description,
     this.poster,
     required this.playing,
     required this.position,
@@ -28,9 +29,11 @@ class MediaPlayerChrome extends StatefulWidget {
     required this.onSettings,
     required this.onFullscreen,
     required this.onBack,
+    this.onPipHome,
     required this.panel,
     required this.onPanelChanged,
     required this.queuePanel,
+    required this.seekIntervalSeconds,
     this.episodesPanel,
     this.onPreviousEpisode,
     this.onNextEpisode,
@@ -40,6 +43,7 @@ class MediaPlayerChrome extends StatefulWidget {
   });
   final Widget video;
   final String title, metadata;
+  final String? description;
   final Widget? poster;
   final bool playing, muted, fullscreen, visible;
   final Duration position, duration;
@@ -51,6 +55,7 @@ class MediaPlayerChrome extends StatefulWidget {
       onSettings,
       onFullscreen,
       onBack;
+  final VoidCallback? onPipHome;
   final VoidCallback? onPreviousEpisode, onNextEpisode, onReveal;
   final ValueChanged<Duration> onSeek;
   final ValueChanged<double> onVolumeChanged;
@@ -58,6 +63,7 @@ class MediaPlayerChrome extends StatefulWidget {
   final ValueChanged<PlayerSidePanel> onPanelChanged;
   final Widget queuePanel;
   final Widget? episodesPanel;
+  final int seekIntervalSeconds;
   @override
   State<MediaPlayerChrome> createState() => _MediaPlayerChromeState();
 }
@@ -107,14 +113,26 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
               Icons.skip_previous,
               widget.onPreviousEpisode,
             ),
-          _button('Seek backward', Icons.replay_10, widget.onSeekBack),
+          _button(
+            'Seek backward ${widget.seekIntervalSeconds}s',
+            widget.seekIntervalSeconds >= 30
+                ? Icons.replay_30
+                : Icons.replay_10,
+            widget.onSeekBack,
+          ),
           IconButton.filled(
             tooltip: widget.playing ? 'Pause' : 'Play',
             iconSize: 32,
             onPressed: widget.onPlayPause,
             icon: Icon(widget.playing ? Icons.pause : Icons.play_arrow),
           ),
-          _button('Seek forward', Icons.forward_10, widget.onSeekForward),
+          _button(
+            'Seek forward ${widget.seekIntervalSeconds}s',
+            widget.seekIntervalSeconds >= 30
+                ? Icons.forward_30
+                : Icons.forward_10,
+            widget.onSeekForward,
+          ),
           if (widget.episodesPanel != null)
             _button('Next episode', Icons.skip_next, widget.onNextEpisode),
         ],
@@ -148,6 +166,11 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
           if (widget.episodesPanel != null)
             TextButton.icon(
               onPressed: () => _toggle(PlayerSidePanel.episodes),
+              style: TextButton.styleFrom(
+                foregroundColor: widget.panel == PlayerSidePanel.episodes
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
               icon: const Icon(Icons.video_library_outlined),
               label: const Text('Episodes'),
             ),
@@ -215,16 +238,25 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                 ],
               ),
               if (wide)
-                SizedBox(
-                  height: 60,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Align(alignment: Alignment.centerLeft, child: volume),
-                      playback,
-                      Align(alignment: Alignment.centerRight, child: options),
-                    ],
-                  ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: volume,
+                      ),
+                    ),
+                    Expanded(flex: 4, child: Center(child: playback)),
+                    Expanded(
+                      flex: 5,
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: options,
+                      ),
+                    ),
+                  ],
                 )
               else ...[
                 Center(child: playback),
@@ -264,6 +296,12 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           _button('Back', Icons.arrow_back, widget.onBack),
+                          if (widget.onPipHome != null)
+                            _button(
+                              'PiP and Home',
+                              Icons.picture_in_picture_alt_outlined,
+                              widget.onPipHome,
+                            ),
                           if (widget.poster != null)
                             Padding(
                               padding: const EdgeInsets.only(right: 12),
@@ -291,6 +329,16 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                 ),
+                                if (widget.description?.trim().isNotEmpty ==
+                                    true)
+                                  Text(
+                                    widget.description!.trim(),
+                                    maxLines: compact ? 2 : 3,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
                               ],
                             ),
                           ),

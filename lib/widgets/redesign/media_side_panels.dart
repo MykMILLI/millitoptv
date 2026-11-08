@@ -7,10 +7,16 @@ class MediaQueueRow {
     required this.subtitle,
     this.poster,
     this.nowPlaying = false,
+    this.canMoveUp = false,
+    this.canMoveDown = false,
+    this.canRemove = true,
   });
   final String id, title, subtitle;
   final Widget? poster;
   final bool nowPlaying;
+  final bool canMoveUp;
+  final bool canMoveDown;
+  final bool canRemove;
 }
 
 /// Parent supplies stable source-qualified IDs and owns the actual queue.
@@ -23,11 +29,14 @@ class MovieQueuePanel extends StatelessWidget {
     required this.onPlay,
     required this.onRemove,
     required this.onReorder,
+    required this.onMoveUp,
+    required this.onMoveDown,
   });
   final List<MediaQueueRow> items;
   final bool autoplay;
   final ValueChanged<bool> onAutoplayChanged;
   final ValueChanged<String> onPlay, onRemove;
+  final ValueChanged<String> onMoveUp, onMoveDown;
 
   /// Raw Flutter reorder indices: subtract 1 from newIndex when oldIndex < newIndex.
   final void Function(int oldIndex, int newIndex) onReorder;
@@ -62,13 +71,31 @@ class MovieQueuePanel extends StatelessWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text(item.nowPlaying ? 'Now playing' : item.subtitle),
+                subtitle: Text(
+                  item.nowPlaying ? 'Now playing' : item.subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 onTap: () => onPlay(item.id),
                 trailing: item.nowPlaying
                     ? const Icon(Icons.equalizer)
                     : Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          IconButton(
+                            tooltip: 'Move up',
+                            onPressed: item.canMoveUp
+                                ? () => onMoveUp(item.id)
+                                : null,
+                            icon: const Icon(Icons.arrow_upward),
+                          ),
+                          IconButton(
+                            tooltip: 'Move down',
+                            onPressed: item.canMoveDown
+                                ? () => onMoveDown(item.id)
+                                : null,
+                            icon: const Icon(Icons.arrow_downward),
+                          ),
                           ReorderableDragStartListener(
                             index: index,
                             child: const Tooltip(
@@ -81,7 +108,9 @@ class MovieQueuePanel extends StatelessWidget {
                           ),
                           IconButton(
                             tooltip: 'Remove from queue',
-                            onPressed: () => onRemove(item.id),
+                            onPressed: item.canRemove
+                                ? () => onRemove(item.id)
+                                : null,
                             icon: const Icon(Icons.close),
                           ),
                         ],
@@ -206,6 +235,8 @@ class SeriesEpisodesPanel extends StatelessWidget {
                     ),
                     subtitle: Text(
                       episode.nowPlaying ? 'Now playing' : episode.subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                     trailing: const Icon(Icons.play_arrow),
                     onTap: () => onPlay(episode.id),

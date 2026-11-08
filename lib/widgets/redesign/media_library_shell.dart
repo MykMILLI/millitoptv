@@ -89,29 +89,40 @@ class MediaLibraryShell extends StatelessWidget {
                 runSpacing: 10,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  SegmentedButton<LibrarySection>(
-                    segments: const [
-                      ButtonSegment(
-                        value: LibrarySection.home,
-                        label: Text('Home'),
-                      ),
-                      ButtonSegment(
-                        value: LibrarySection.movies,
-                        label: Text('Movies'),
-                      ),
-                      ButtonSegment(
-                        value: LibrarySection.series,
-                        label: Text('Series'),
-                      ),
-                    ],
-                    selected: {section},
-                    showSelectedIcon: false,
-                    onSelectionChanged: (v) => onSectionChanged(v.first),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: onChooseLibrary,
-                    icon: const Icon(Icons.video_library_outlined),
-                    label: Text('$libraryName ▾'),
+                  SizedBox(
+                    width: double.infinity,
+                    child: Wrap(
+                      spacing: 12,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        SegmentedButton<LibrarySection>(
+                          segments: const [
+                            ButtonSegment(
+                              value: LibrarySection.home,
+                              label: Text('Home'),
+                            ),
+                            ButtonSegment(
+                              value: LibrarySection.movies,
+                              label: Text('Movies'),
+                            ),
+                            ButtonSegment(
+                              value: LibrarySection.series,
+                              label: Text('Series'),
+                            ),
+                          ],
+                          selected: {section},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (v) => onSectionChanged(v.first),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: onChooseLibrary,
+                          icon: const Icon(Icons.video_library_outlined),
+                          label: Text('$libraryName ▾'),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -119,21 +130,28 @@ class MediaLibraryShell extends StatelessWidget {
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
+                alignment: WrapAlignment.spaceBetween,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Text(title, style: theme.textTheme.titleLarge),
-                  OutlinedButton(
-                    onPressed: onChooseGenre,
-                    child: Text(genreLabel),
-                  ),
-                  OutlinedButton(
-                    onPressed: onChooseSort,
-                    child: Text(sortLabel),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: onToggleFilters,
-                    icon: const Icon(Icons.tune),
-                    label: Text(filtersOpen ? 'Close filters' : 'Filters'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton(
+                        onPressed: onChooseGenre,
+                        child: Text(genreLabel),
+                      ),
+                      OutlinedButton(
+                        onPressed: onChooseSort,
+                        child: Text(sortLabel),
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: onToggleFilters,
+                        icon: const Icon(Icons.tune),
+                        label: Text(filtersOpen ? 'Close filters' : 'Filters'),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -284,31 +302,66 @@ class AlphabetRail extends StatelessWidget {
     'Z',
   ];
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    children: [
-      for (final letter in letters)
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 1, horizontal: 2),
-          child: TextButton(
-            style: TextButton.styleFrom(
-              minimumSize: const Size(44, 44),
-              padding: EdgeInsets.zero,
-              backgroundColor: selected == letter
-                  ? Theme.of(context).colorScheme.primary
-                  : null,
-              foregroundColor: selected == letter
-                  ? Theme.of(context).colorScheme.onPrimary
-                  : null,
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      if (constraints.maxHeight < 760) {
+        return Column(
+          children: [
+            const SizedBox(height: 8),
+            RotatedBox(
+              quarterTurns: 3,
+              child: DropdownButton<String>(
+                value: selected != null && available.contains(selected)
+                    ? selected
+                    : null,
+                hint: const Text('A-Z'),
+                items: [
+                  for (final letter in letters)
+                    DropdownMenuItem(
+                      value: letter,
+                      enabled: available.contains(letter),
+                      child: Text(letter),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    onJump(value);
+                  }
+                },
+              ),
             ),
-            onPressed: available.contains(letter) ? () => onJump(letter) : null,
-            child: Semantics(
-              label: 'Jump to titles starting with $letter',
-              child: Text(letter),
+          ],
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          for (final letter in letters)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 1, horizontal: 2),
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(44, 44),
+                  padding: EdgeInsets.zero,
+                  backgroundColor: selected == letter
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  foregroundColor: selected == letter
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                ),
+                onPressed: available.contains(letter)
+                    ? () => onJump(letter)
+                    : null,
+                child: Semantics(
+                  label: 'Jump to titles starting with $letter',
+                  child: Text(letter),
+                ),
+              ),
             ),
-          ),
-        ),
-    ],
+        ],
+      );
+    },
   );
 }
 

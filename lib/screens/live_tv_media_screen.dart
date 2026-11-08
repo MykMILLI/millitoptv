@@ -445,7 +445,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (context == null) {
       return false;
     }
-    return context.widget is EditableText;
+    return context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null;
   }
 
   @override
@@ -3095,6 +3096,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 .where((entry) => !entry.series)
                 .map(
                   (entry) => _MovieQueueEntry(
+                    id: '${mediaItemOrigins[entry]?.sourceId ?? 'source'}:${entry.id}',
                     title: entry.title,
                     subtitle: entry.group,
                     streamUrl: entry.streamUrl,
@@ -3124,6 +3126,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             jellyfinFor: _jellyfinReporter,
             streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
             posterUrl: item.posterUrl,
+            description: item.description,
             playbackPerformance: playbackPerformance,
             movieQueue: movieQueue,
             movieQueueIndex: normalizedQueueIndex,
@@ -3170,6 +3173,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               jellyfinFor: _jellyfinReporter,
               streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
               posterUrl: item.posterUrl,
+              description: item.description,
               playbackPerformance: playbackPerformance,
               seriesEpisodePlayback: true,
               seriesEpisodes: [
@@ -3362,6 +3366,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       episode.streamUrl,
                     ),
                     posterUrl: episode.posterUrl ?? seriesDetails.posterUrl,
+                    description: episode.description,
                     playbackPerformance: playbackPerformance,
                     seriesEpisodePlayback: true,
                     seriesEpisodes: () {
@@ -4086,18 +4091,65 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (!mounted) {
       return;
     }
+    final details = (entry.isEpisode && entry.seriesId != null)
+        ? await _jellyfinSeriesDetails(
+            LiveTvMediaItem(
+              id: 'jf:${entry.seriesId}',
+              title: entry.seriesName ?? entry.media.title,
+              streamUrl: entry.media.streamUrl,
+              posterUrl: entry.media.posterUrl,
+              description: entry.media.description,
+              backdropUrl: entry.media.backdropUrl,
+              series: true,
+              seriesId: entry.seriesId,
+            ),
+          )
+        : null;
+    final episodeEntries = details == null
+        ? const <_SeriesEpisodeEntry>[]
+        : [
+            for (final item
+                in [...details.episodes]..sort((a, b) {
+                  final bySeason = a.season.compareTo(b.season);
+                  if (bySeason != 0) {
+                    return bySeason;
+                  }
+                  return a.episode.compareTo(b.episode);
+                }))
+              _SeriesEpisodeEntry(
+                id: item.id,
+                title: item.title,
+                streamUrl: item.streamUrl,
+                season: item.season,
+                episode: item.episode,
+                posterUrl: item.posterUrl,
+                description: item.description,
+              ),
+          ];
+    final currentEpisodeIndex = episodeEntries.indexWhere(
+      (item) =>
+          item.streamUrl == entry.media.streamUrl ||
+          (entry.episode != null &&
+              entry.season != null &&
+              item.season == entry.season &&
+              item.episode == entry.episode),
+    );
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => _MediaPlayerScreen(
           profileKey: 'profile-${widget.profileId}',
-          title: entry.seriesName ?? entry.media.title,
+          title: details?.title ?? (entry.seriesName ?? entry.media.title),
           subtitle:
               'S${entry.season ?? 0}E${entry.episode ?? 0} · ${entry.media.title}',
           streamUrl: entry.media.streamUrl,
           posterUrl: entry.media.posterUrl,
+          description: entry.media.description,
           playbackPerformance: playbackPerformance,
           jellyfin: _jellyfinReporter(entry.media.streamUrl),
           jellyfinFor: _jellyfinReporter,
+          seriesEpisodePlayback: episodeEntries.isNotEmpty,
+          seriesEpisodes: episodeEntries,
+          seriesEpisodeIndex: currentEpisodeIndex < 0 ? 0 : currentEpisodeIndex,
         ),
       ),
     );
@@ -4576,9 +4628,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final letter = mediaLetter(mediaSortKey(items[i].title));
       _alphabetFirstIndex.putIfAbsent(letter, () => i);
     }
-    _selectedAlphabetLetter ??= _alphabetFirstIndex.keys.isEmpty
-        ? null
-        : _alphabetFirstIndex.keys.first;
+    if (_alphabetFirstIndex.isEmpty) {
+      _selectedAlphabetLetter = null;
+      return;
+    }
+    if (_selectedAlphabetLetter == null ||
+        !_alphabetFirstIndex.containsKey(_selectedAlphabetLetter)) {
+      _selectedAlphabetLetter = _alphabetFirstIndex.keys.first;
+    }
   }
 
   void _updateAlphabetSelectionFromScroll(List<LiveTvMediaItem> items) {
@@ -4717,7 +4774,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Future<void> _chooseLibraryScope() async {
-    final selected = await showModalBottomSheet<LiveTvSource?>(
+    final selected = await showModalBottomSheet<Object?>(
       context: context,
       builder: (ctx) => SafeArea(
         child: ListView(
@@ -4726,7 +4783,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             ListTile(
               title: const Text('All libraries'),
               selected: allSourcesSelected,
-              onTap: () => Navigator.pop(ctx, null),
+              onTap: () => Navigator.pop(ctx, 'all-libraries'),
             ),
             for (final item in _visibleSources)
               ListTile(
@@ -4742,14 +4799,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return;
     }
     if (selected == null) {
+      return;
+    }
+    if (selected == 'all-libraries') {
       if (!allSourcesSelected) {
         setState(() {
           allSourcesSelected = true;
-          filtersOpen = false;
           _selectedAlphabetLetter = null;
         });
         await _loadCatalog();
       }
+      return;
+    }
+    if (selected is! LiveTvSource) {
       return;
     }
     if (!allSourcesSelected && source?.id == selected.id) {
@@ -4758,7 +4820,6 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     setState(() {
       source = selected;
       allSourcesSelected = false;
-      filtersOpen = false;
       _selectedAlphabetLetter = null;
     });
     await _loadCatalog();
@@ -4775,25 +4836,23 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     final groupOptions = groups.toList()..sort();
     _refreshAlphabetMap(items);
     final collectionChips = <Widget>[
-      ..._tabChips(),
-      InkWell(
-        key: ValueKey('media-group-$groupFilter-${groupOptions.length}'),
-        borderRadius: BorderRadius.circular(20),
-        onTap: () => _showCategoryPicker(groupOptions),
-        child: Chip(
-          avatar: const Icon(Icons.filter_alt_outlined, size: 18),
-          label: Text('Category: $groupFilter'),
+      if (showAdult)
+        ChoiceChip(
+          key: const ValueKey('media-tab-adult'),
+          label: const Text('Adult'),
+          selected: !homeView && tab == _MediaTab.adult,
+          onSelected: (selected) {
+            if (!selected) {
+              return;
+            }
+            setState(() {
+              homeView = false;
+              tab = _MediaTab.adult;
+              groupFilter = 'All';
+            });
+            AppLog.event('media.tab', props: {'tab': 'adult'});
+          },
         ),
-      ),
-      ActionChip(
-        avatar: const Icon(Icons.shuffle, size: 18),
-        label: Text(
-          selectedGenres.isEmpty
-              ? 'Shuffle all movies'
-              : 'Shuffle selected genres',
-        ),
-        onPressed: () => unawaited(_shuffleWithinFilters()),
-      ),
       ...activeSeasonalCollections.map((collection) {
         return FilterChip(
           avatar: Icon(collection.icon, size: 16),
@@ -4823,6 +4882,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     ? groupFilter
                     : groupOptions.first,
               ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton.tonalIcon(
+            onPressed: () => unawaited(_shuffleWithinFilters()),
+            icon: const Icon(Icons.shuffle),
+            label: Text(
+              selectedGenres.isEmpty
+                  ? 'Shuffle all movies'
+                  : 'Shuffle selected genres',
             ),
           ),
           const SizedBox(height: 12),
@@ -4868,8 +4937,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               ? 3
               : 2;
           _alphabetCrossAxisCount = crossAxisCount;
-          final tileWidth = width / crossAxisCount;
-          _alphabetTileStride = tileWidth * (16 / 10);
+          const horizontalPadding = 16.0 * 2;
+          const crossSpacing = 12.0;
+          const mainSpacing = 12.0;
+          const cardAspectRatio = 10 / 16;
+          final gridWidth =
+              width - horizontalPadding - ((crossAxisCount - 1) * crossSpacing);
+          final tileWidth = max(1.0, gridWidth / crossAxisCount);
+          final tileHeight = tileWidth / cardAspectRatio;
+          _alphabetTileStride = tileHeight + mainSpacing;
           if (items.isEmpty) {
             return const Center(
               child: Text('No titles match the current filters.'),
@@ -5185,7 +5261,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                     ),
                                   )
                                 : null,
-                            content: buildCatalogGrid(),
+                            content: Column(
+                              children: [
+                                _continueWatchingCard(),
+                                Expanded(child: buildCatalogGrid()),
+                              ],
+                            ),
                           ),
                   ),
                   if (loading)
@@ -5338,6 +5419,7 @@ class DvrRecordingPlayerScreen extends StatelessWidget {
 }
 
 class _MovieQueueEntry {
+  final String id;
   final String title;
   final String? subtitle;
   final String streamUrl;
@@ -5350,6 +5432,7 @@ class _MovieQueueEntry {
   final DateTime? addedAt;
 
   const _MovieQueueEntry({
+    required this.id,
     required this.title,
     this.subtitle,
     required this.streamUrl,
@@ -5383,6 +5466,25 @@ class _SeriesEpisodeEntry {
   });
 }
 
+class _ActivePlaybackMedia {
+  final String id;
+  final String title;
+  final String? subtitle;
+  final String streamUrl;
+  final List<String> streamUrlCandidates;
+  final String? posterUrl;
+  final String? description;
+  const _ActivePlaybackMedia({
+    required this.id,
+    required this.title,
+    this.subtitle,
+    required this.streamUrl,
+    this.streamUrlCandidates = const <String>[],
+    this.posterUrl,
+    this.description,
+  });
+}
+
 class _MediaPlayerScreen extends StatefulWidget {
   final String profileKey;
   final String title;
@@ -5390,6 +5492,7 @@ class _MediaPlayerScreen extends StatefulWidget {
   final String streamUrl;
   final List<String> streamUrlCandidates;
   final String? posterUrl;
+  final String? description;
   final PlaybackPerformanceSettings playbackPerformance;
   final String? nextEpisodeStreamUrl;
   final String? nextEpisodeTitle;
@@ -5411,6 +5514,7 @@ class _MediaPlayerScreen extends StatefulWidget {
     required this.streamUrl,
     this.streamUrlCandidates = const <String>[],
     this.posterUrl,
+    this.description,
     required this.playbackPerformance,
     this.nextEpisodeStreamUrl,
     this.nextEpisodeTitle,
@@ -5510,9 +5614,12 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   late final List<_SeriesEpisodeEntry> _seriesEpisodes =
       List<_SeriesEpisodeEntry>.from(widget.seriesEpisodes);
   late int _seriesEpisodeIndex = widget.seriesEpisodeIndex;
+  int? _episodeBrowseSeason;
+  Future<void> _episodeTransitionChain = Future<void>.value();
+  late _ActivePlaybackMedia _activeMedia = _initialActiveMedia();
   bool showMovieQueuePanel = false;
   bool showSeriesEpisodesPanel = false;
-  bool get _hasMovieQueue => _movieQueue.length > 1;
+  bool get _hasMovieQueue => _movieQueue.isNotEmpty;
   bool get _hasPreviousMovieQueueItem => _hasMovieQueue && _movieQueueIndex > 0;
   bool get _hasNextMovieQueueItem =>
       _hasMovieQueue && _movieQueueIndex < _movieQueue.length - 1;
@@ -5535,6 +5642,51 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           creditsVisible) ||
       (_hasNextMovieQueueItem && playNextPromptVisible);
 
+  _ActivePlaybackMedia _initialActiveMedia() {
+    if (widget.seriesEpisodePlayback && _seriesEpisodes.isNotEmpty) {
+      final entry = _seriesEpisodes[_seriesEpisodeIndex];
+      return _ActivePlaybackMedia(
+        id: entry.id,
+        title: widget.title,
+        subtitle: 'S${entry.season}E${entry.episode} · ${entry.title}',
+        streamUrl: entry.streamUrl,
+        streamUrlCandidates: <String>[entry.streamUrl],
+        posterUrl: entry.posterUrl ?? widget.posterUrl,
+        description: entry.description ?? widget.description,
+      );
+    }
+    if (_movieQueue.isNotEmpty) {
+      final entry = _movieQueue[_movieQueueIndex];
+      return _ActivePlaybackMedia(
+        id: entry.id,
+        title: entry.title,
+        subtitle: entry.subtitle,
+        streamUrl: entry.streamUrl,
+        streamUrlCandidates: entry.streamUrlCandidates,
+        posterUrl: entry.posterUrl ?? widget.posterUrl,
+        description: entry.description ?? widget.description,
+      );
+    }
+    return _ActivePlaybackMedia(
+      id: widget.streamUrl,
+      title: widget.title,
+      subtitle: widget.subtitle,
+      streamUrl: widget.streamUrl,
+      streamUrlCandidates: widget.streamUrlCandidates,
+      posterUrl: widget.posterUrl,
+      description: widget.description,
+    );
+  }
+
+  void _syncActiveMediaFromState() {
+    _activeMedia = _initialActiveMedia();
+    jellyfin =
+        widget.jellyfinFor?.call(_activeMedia.streamUrl) ?? widget.jellyfin;
+    _episodeBrowseSeason ??= _hasSeriesEpisodes
+        ? _seriesEpisodes[_seriesEpisodeIndex].season
+        : null;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -5551,6 +5703,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     } else {
       _seriesEpisodeIndex = 0;
     }
+    _syncActiveMediaFromState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
   }
@@ -5561,7 +5714,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     AppLog.event(
       'media.play',
       props: {
-        'title': widget.title,
+        'title': _activeMedia.title,
         'seconds': _sessionWatch.elapsed.inSeconds,
         'jellyfin': jellyfin != null,
         'route': qualityRoute,
@@ -5590,8 +5743,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   bool get _isLikelyLiveTvStream {
-    final lowerTitle = widget.title.toLowerCase();
-    final lowerUrl = widget.streamUrl.toLowerCase();
+    final lowerTitle = _activeMedia.title.toLowerCase();
+    final lowerUrl = _activeMedia.streamUrl.toLowerCase();
     return lowerUrl.contains('/live/') ||
         lowerUrl.contains('.m3u8') ||
         lowerTitle.contains('live') ||
@@ -5607,7 +5760,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     AppLog.event(
       'live_tv.buffer.start',
       props: {
-        'title': widget.title,
+        'title': _activeMedia.title,
         'positionMs': position.inMilliseconds,
         'liveTv': _isLikelyLiveTvStream,
         'route': qualityRoute,
@@ -5634,7 +5787,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     AppLog.event(
       'live_tv.buffer.end',
       props: {
-        'title': widget.title,
+        'title': _activeMedia.title,
         'positionMs': position.inMilliseconds,
         'bufferedMs': bufferedMs,
         'aborted': aborted,
@@ -5650,7 +5803,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         LogCategory.playback,
         'Live TV buffering spike',
         details: {
-          'title': widget.title,
+          'title': _activeMedia.title,
           'bufferedMs': bufferedMs,
           'route': qualityRoute,
           'playbackRoute': playbackRoute,
@@ -5689,7 +5842,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }) async {
     final candidates = jellyfin != null
         ? <String>[jellyfin!.playUrl]
-        : <String>[...widget.streamUrlCandidates, widget.streamUrl];
+        : <String>[..._activeMedia.streamUrlCandidates, _activeMedia.streamUrl];
     Object? lastError;
     StackTrace? lastStack;
     final watch = Stopwatch()..start();
@@ -5701,7 +5854,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         lastError = null;
         AppLog.info(
           LogCategory.playback,
-          'Playback opened "${widget.title}"',
+          'Playback opened "${_activeMedia.title}"',
           details: {
             'attempt': attempt,
             'candidates': candidates.length,
@@ -5717,7 +5870,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         AppLog.warn(
           LogCategory.playback,
           'Stream candidate $attempt/${candidates.length} failed for '
-          '"${widget.title}"',
+          '"${_activeMedia.title}"',
           error: error,
           details: {'url': candidate},
         );
@@ -5726,7 +5879,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (lastError != null) {
       AppLog.error(
         LogCategory.playback,
-        'Could not open "${widget.title}"',
+        'Could not open "${_activeMedia.title}"',
         error: lastError,
         stackTrace: lastStack,
         details: {
@@ -5792,7 +5945,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Future<void> _initialize() async {
     try {
       await _loadPlayerPreferences();
-      final prior = await memory.loadProgress(widget.streamUrl);
+      final prior = await memory.loadProgress(_activeMedia.streamUrl);
       final priorPosition = int.tryParse(prior['positionMs']?.toString() ?? '');
       if (priorPosition != null && priorPosition > 0) {
         resumePositionMs = priorPosition;
@@ -5922,7 +6075,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         created.stream.error.listen((message) {
           AppLog.error(
             LogCategory.playback,
-            'Player error during "${widget.title}"',
+            'Player error during "${_activeMedia.title}"',
             error: message,
             details: {'route': qualityRoute},
           );
@@ -6022,7 +6175,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     return false;
   }
 
-  String get _effectiveStreamUrl => jellyfin?.playUrl ?? widget.streamUrl;
+  String get _effectiveStreamUrl => jellyfin?.playUrl ?? _activeMedia.streamUrl;
 
   String _streamHost() {
     final uri = Uri.tryParse(_effectiveStreamUrl);
@@ -6161,8 +6314,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (_movieQueue.isNotEmpty) {
       return _movieQueueMetadata(_movieQueue[_movieQueueIndex]);
     }
-    return widget.subtitle?.trim().isNotEmpty == true
-        ? widget.subtitle!.trim()
+    return _activeMedia.subtitle?.trim().isNotEmpty == true
+        ? _activeMedia.subtitle!.trim()
         : 'Now playing';
   }
 
@@ -6173,7 +6326,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (_movieQueue.isNotEmpty) {
       return _movieQueue[_movieQueueIndex].description;
     }
-    return null;
+    return _activeMedia.description;
   }
 
   String? _currentTopPosterUrl() {
@@ -6183,7 +6336,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (_movieQueue.isNotEmpty) {
       return _movieQueue[_movieQueueIndex].posterUrl;
     }
-    return widget.posterUrl;
+    return _activeMedia.posterUrl;
   }
 
   String _trackKindLabel(String title) {
@@ -6573,7 +6726,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (speed != null && speed >= 0.5 && speed <= 2.0) {
       playbackSpeed = speed;
     }
-    bookmarksMs = await memory.loadBookmarks(widget.streamUrl);
+    bookmarksMs = await memory.loadBookmarks(_activeMedia.streamUrl);
   }
 
   Future<void> _savePlayerPreferences() async {
@@ -6622,7 +6775,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       jellyfin?.progress(positionMs, paused: !playing);
     }
     await memory.saveProgress(
-      widget.streamUrl,
+      _activeMedia.streamUrl,
       positionMs: positionMs,
       durationMs: durationMs,
       complete: complete,
@@ -6631,7 +6784,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       widget.profileKey,
       type: 'progress',
       payload: {
-        'streamUrl': widget.streamUrl,
+        'streamUrl': _activeMedia.streamUrl,
         'positionMs': positionMs,
         'durationMs': durationMs,
         'buffering': buffering,
@@ -6647,10 +6800,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         widget.profileKey,
         type: 'final_progress',
         payload: {
-          'streamUrl': widget.streamUrl,
+          'streamUrl': _activeMedia.streamUrl,
           'positionMs': position.inMilliseconds,
           'durationMs': duration.inMilliseconds,
-          'title': widget.title,
+          'title': _activeMedia.title,
         },
       );
     } catch (_) {}
@@ -6842,6 +6995,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           streamUrl: entry.streamUrl,
           streamUrlCandidates: entry.streamUrlCandidates,
           posterUrl: entry.posterUrl,
+          description: entry.description,
           playbackPerformance: widget.playbackPerformance,
           seriesEpisodePlayback: false,
           movieQueue: _movieQueue,
@@ -6854,9 +7008,6 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Future<void> _openMovieQueue() async {
-    if (!_hasMovieQueue) {
-      return;
-    }
     Future<void> showDetails(_MovieQueueEntry entry, int index) async {
       await showModalBottomSheet<void>(
         context: context,
@@ -7021,43 +7172,60 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     String? status,
     bool autoplayed = false,
   }) async {
-    if (!_hasSeriesEpisodes ||
-        index < 0 ||
-        index >= _seriesEpisodes.length ||
-        player == null) {
-      return;
-    }
-    final entry = _seriesEpisodes[index];
-    await _saveFinalProgress();
-    if (mounted && status != null && status.trim().isNotEmpty) {
-      setState(() => statusMessage = status);
-    }
-    jellyfin = widget.jellyfinFor?.call(entry.streamUrl);
-    await player!.open(Media(jellyfin?.playUrl ?? entry.streamUrl), play: true);
-    resumePositionMs = 0;
-    if (mounted) {
-      setState(() {
-        _seriesEpisodeIndex = index;
-        if (autoplayed) {
-          showSeriesEpisodesPanel = false;
-        }
-        error = '';
-        creditsVisible = false;
-      });
-    } else {
-      _seriesEpisodeIndex = index;
-      if (autoplayed) {
-        showSeriesEpisodesPanel = false;
-      }
-      error = '';
-      creditsVisible = false;
-    }
-    await memory.saveProgress(
-      entry.streamUrl,
-      positionMs: 0,
-      durationMs: 0,
-      complete: false,
-    );
+    _episodeTransitionChain = _episodeTransitionChain
+        .then((_) async {
+          if (!_hasSeriesEpisodes ||
+              index < 0 ||
+              index >= _seriesEpisodes.length ||
+              player == null) {
+            return;
+          }
+          final entry = _seriesEpisodes[index];
+          await _saveFinalProgress();
+          if (mounted && status != null && status.trim().isNotEmpty) {
+            setState(() => statusMessage = status);
+          }
+          _seriesEpisodeIndex = index;
+          _episodeBrowseSeason = entry.season;
+          _syncActiveMediaFromState();
+          resumePositionMs = jellyfin?.resumeMs;
+          if (resumePositionMs == null || resumePositionMs! <= 0) {
+            final prior = await memory.loadProgress(_activeMedia.streamUrl);
+            resumePositionMs = int.tryParse(
+              prior['positionMs']?.toString() ?? '',
+            );
+          }
+          await _openWithPolicy(
+            player!,
+            compatibleMode: forceCompatiblePlayback,
+          );
+          if (resumePositionMs != null && resumePositionMs! > 0) {
+            await player!.seek(Duration(milliseconds: resumePositionMs!));
+          }
+          if (mounted) {
+            setState(() {
+              if (autoplayed) {
+                showSeriesEpisodesPanel = false;
+              }
+              error = '';
+              creditsVisible = false;
+            });
+          } else {
+            if (autoplayed) {
+              showSeriesEpisodesPanel = false;
+            }
+            error = '';
+            creditsVisible = false;
+          }
+        })
+        .catchError((_) {
+          if (mounted) {
+            setState(() {
+              error = 'Could not switch episode. Please try again.';
+            });
+          }
+        });
+    await _episodeTransitionChain;
   }
 
   void _toggleContextPanel() {
@@ -7070,23 +7238,28 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       });
       return;
     }
-    if (_hasMovieQueue) {
-      if (MediaQuery.sizeOf(context).width < 960) {
-        unawaited(_openMovieQueue());
-        return;
-      }
-      setState(() {
-        showMovieQueuePanel = !showMovieQueuePanel;
-        if (showMovieQueuePanel) {
-          showSeriesEpisodesPanel = false;
-        }
-      });
+    if (MediaQuery.sizeOf(context).width < 960) {
+      unawaited(_openMovieQueue());
+      return;
     }
+    setState(() {
+      showMovieQueuePanel = !showMovieQueuePanel;
+      if (showMovieQueuePanel) {
+        showSeriesEpisodesPanel = false;
+      }
+    });
   }
 
   Future<void> _showCurrentDescription() async {
     final description = _currentTopDescription();
     if (description == null || description.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Description is unavailable for this title.'),
+          ),
+        );
+      }
       return;
     }
     await showDialog<void>(
@@ -7108,11 +7281,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Widget _buildMovieQueueSidePanel() {
+    bool canMoveUp(int index) => index > _movieQueueIndex + 1;
+    bool canMoveDown(int index) =>
+        index > _movieQueueIndex && index < _movieQueue.length - 1;
+    bool canRemove(int index) => index > _movieQueueIndex;
     return MovieQueuePanel(
       items: [
         for (var i = 0; i < _movieQueue.length; i++)
           MediaQueueRow(
-            id: '$i',
+            id: _movieQueue[i].id,
             title: _movieQueue[i].title,
             subtitle: i == _movieQueueIndex
                 ? '${_movieQueueMetadata(_movieQueue[i])} • Now playing'
@@ -7120,6 +7297,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                       ? '${_movieQueueMetadata(_movieQueue[i])} • Up next'
                       : _movieQueueMetadata(_movieQueue[i])),
             nowPlaying: i == _movieQueueIndex,
+            canMoveUp: canMoveUp(i),
+            canMoveDown: canMoveDown(i),
+            canRemove: canRemove(i),
             poster: _movieQueue[i].posterUrl?.trim().isNotEmpty == true
                 ? ClipRRect(
                     borderRadius: BorderRadius.circular(6),
@@ -7138,10 +7318,30 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         setState(() => autoplayNext = value);
         unawaited(_savePlayerPreferences());
       },
-      onPlay: (id) => unawaited(_openMovieQueueItem(int.parse(id))),
+      onPlay: (id) {
+        final index = _movieQueue.indexWhere((entry) => entry.id == id);
+        if (index < 0) {
+          return;
+        }
+        unawaited(_openMovieQueueItem(index));
+      },
+      onMoveUp: (id) {
+        final index = _movieQueue.indexWhere((entry) => entry.id == id);
+        if (index < 0 || !canMoveUp(index)) {
+          return;
+        }
+        _moveQueueItem(index, index - 1);
+      },
+      onMoveDown: (id) {
+        final index = _movieQueue.indexWhere((entry) => entry.id == id);
+        if (index < 0 || !canMoveDown(index)) {
+          return;
+        }
+        _moveQueueItem(index, index + 1);
+      },
       onRemove: (id) {
-        final index = int.tryParse(id);
-        if (index == null || index < 0 || index >= _movieQueue.length) {
+        final index = _movieQueue.indexWhere((entry) => entry.id == id);
+        if (index < 0 || index >= _movieQueue.length || !canRemove(index)) {
           return;
         }
         final current = _movieQueueIndex;
@@ -7166,6 +7366,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         if (oldIndex < newIndex) {
           newIndex -= 1;
         }
+        if (oldIndex <= _movieQueueIndex || newIndex <= _movieQueueIndex) {
+          return;
+        }
         if (oldIndex == newIndex ||
             oldIndex < 0 ||
             newIndex < 0 ||
@@ -7173,40 +7376,44 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
             newIndex >= _movieQueue.length) {
           return;
         }
-        final moved = _movieQueue[oldIndex];
-        final reordered = List<_MovieQueueEntry>.from(_movieQueue)
-          ..removeAt(oldIndex)
-          ..insert(newIndex, moved);
-        final currentItem = _movieQueue[_movieQueueIndex];
-        final updatedCurrent = reordered.indexWhere(
-          (item) => identical(item, currentItem),
-        );
-        setState(() {
-          _movieQueue = reordered;
-          _movieQueueIndex = updatedCurrent < 0 ? 0 : updatedCurrent;
-        });
+        _moveQueueItem(oldIndex, newIndex);
       },
     );
+  }
+
+  void _moveQueueItem(int oldIndex, int newIndex) {
+    if (oldIndex == newIndex ||
+        oldIndex < 0 ||
+        newIndex < 0 ||
+        oldIndex >= _movieQueue.length ||
+        newIndex >= _movieQueue.length ||
+        oldIndex <= _movieQueueIndex ||
+        newIndex <= _movieQueueIndex) {
+      return;
+    }
+    final moved = _movieQueue[oldIndex];
+    final reordered = List<_MovieQueueEntry>.from(_movieQueue)
+      ..removeAt(oldIndex)
+      ..insert(newIndex, moved);
+    setState(() {
+      _movieQueue = reordered;
+      statusMessage = 'Queue order updated.';
+    });
   }
 
   Widget _buildSeriesEpisodesSidePanel() {
     final seasons =
         _seriesEpisodes.map((entry) => entry.season).toSet().toList()..sort();
-    final selectedSeason = _hasSeriesEpisodes
-        ? _seriesEpisodes[_seriesEpisodeIndex].season
-        : (seasons.isNotEmpty ? seasons.first : null);
+    final selectedSeason =
+        _episodeBrowseSeason ??
+        (_hasSeriesEpisodes
+            ? _seriesEpisodes[_seriesEpisodeIndex].season
+            : (seasons.isNotEmpty ? seasons.first : null));
     return SeriesEpisodesPanel(
       seasons: seasons,
       selectedSeason: selectedSeason,
       onSeasonChanged: (season) {
-        final index = _seriesEpisodes.indexWhere(
-          (entry) => entry.season == season,
-        );
-        if (index >= 0) {
-          unawaited(
-            _openSeriesEpisodeAt(index, status: 'Opening season $season...'),
-          );
-        }
+        setState(() => _episodeBrowseSeason = season);
       },
       episodes: [
         for (var i = 0; i < _seriesEpisodes.length; i++)
@@ -7270,6 +7477,44 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       playNextPromptVisible = false;
       playNextPromptDismissed = true;
     });
+  }
+
+  bool get _suppressGlobalPlayerShortcuts {
+    final focused = FocusManager.instance.primaryFocus;
+    final context = focused?.context;
+    if (context == null) {
+      return false;
+    }
+    if (context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null) {
+      return true;
+    }
+    if (context.widget is Slider ||
+        context.findAncestorWidgetOfExactType<Slider>() != null) {
+      return true;
+    }
+    if (context.widget is DropdownButton ||
+        context.findAncestorWidgetOfExactType<DropdownButton>() != null) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _handleBackIntent() async {
+    if (showMovieQueuePanel || showSeriesEpisodesPanel) {
+      setState(() {
+        showMovieQueuePanel = false;
+        showSeriesEpisodesPanel = false;
+      });
+      return;
+    }
+    if (fullscreen) {
+      await _setFullscreen(false);
+      return;
+    }
+    if (mounted) {
+      await Navigator.of(context).maybePop();
+    }
   }
 
   Future<void> _pickAudioTrack() async {
@@ -7447,7 +7692,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     );
     final next = [...bookmarksMs, value.toInt()].toSet().toList()..sort();
     bookmarksMs = next;
-    await memory.saveBookmarks(widget.streamUrl, bookmarksMs);
+    await memory.saveBookmarks(_activeMedia.streamUrl, bookmarksMs);
     if (mounted) {
       setState(
         () => statusMessage =
@@ -7530,8 +7775,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _createSessionHandoff() async {
     final code = await memory.createSessionHandoff(
-      title: widget.title,
-      streamUrl: widget.streamUrl,
+      title: _activeMedia.title,
+      streamUrl: _activeMedia.streamUrl,
       positionMs: position.inMilliseconds,
       durationMs: duration.inMilliseconds,
     );
@@ -7598,7 +7843,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Future<void> _openExternalPlayer() async {
-    await Clipboard.setData(ClipboardData(text: widget.streamUrl));
+    await Clipboard.setData(ClipboardData(text: _activeMedia.streamUrl));
     if (mounted) {
       setState(() => statusMessage = 'Stream URL copied for external player.');
     }
@@ -7774,7 +8019,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _showCapabilitiesReport() async {
     final sourceScheme =
-        Uri.tryParse(widget.streamUrl)?.scheme.toLowerCase() ?? 'unknown';
+        Uri.tryParse(_activeMedia.streamUrl)?.scheme.toLowerCase() ?? 'unknown';
     final canSelectAudio = tracks.audio.isNotEmpty;
     final canSelectSubtitle = tracks.subtitle.isNotEmpty;
     final canSelectQuality = tracks.video.isNotEmpty;
@@ -8148,7 +8393,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _subtitleSearchAuthorizedWorkflow() async {
     final prefs = await _loadSubtitleProviderPrefs();
-    final query = TextEditingController(text: widget.title);
+    final query = TextEditingController(text: _activeMedia.title);
     final openApiKey = TextEditingController(
       text: prefs['openSubtitlesApiKey']?.toString() ?? '',
     );
@@ -8307,7 +8552,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                   final path = await subtitleProviders
                                       .downloadSubtitleToTemp(
                                         item,
-                                        baseName: widget.title,
+                                        baseName: _activeMedia.title,
                                       );
                                   await platform.setProperty(
                                     'sub-files-append',
@@ -8576,9 +8821,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           Positioned.fill(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: widget.posterUrl?.trim().isNotEmpty == true
+              child: _currentTopPosterUrl()?.trim().isNotEmpty == true
                   ? Image.network(
-                      widget.posterUrl!,
+                      _currentTopPosterUrl()!,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) =>
                           ColoredBox(color: context.millitopTheme.panelColor),
@@ -8639,8 +8884,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       PipPlaybackSession(
         player: current,
         video: controller,
-        title: widget.title,
-        subtitle: widget.subtitle,
+        title: _activeMedia.title,
+        subtitle: _activeMedia.subtitle,
         seekable: true,
         onClose: () async {
           try {
@@ -8843,7 +9088,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               'C: Subtitle tracks\n'
               'A: Audio tracks\n'
               'Q: Quality tracks\n'
-              'P or Esc: Back to home with PiP\n'
+              'P: Back to home with PiP\n'
+              'Esc / Back: Close panel, then exit fullscreen, then go back\n'
               'H: Show this help\n\n'
               'When buffering/transcoding, open Playback stats and choose Try compatible playback.',
             ),
@@ -8946,9 +9192,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
             widget.seriesEpisodePlayback &&
             _hasSeriesEpisodes
         ? PlayerSidePanel.episodes
-        : (showMovieQueuePanel && _hasMovieQueue
-              ? PlayerSidePanel.queue
-              : PlayerSidePanel.none);
+        : (showMovieQueuePanel ? PlayerSidePanel.queue : PlayerSidePanel.none);
 
     Future<void> onPanelChanged(PlayerSidePanel panel) async {
       setState(() {
@@ -8960,54 +9204,98 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (_, __) {
-        unawaited(_minimizeToPipAndGoHome());
+        unawaited(_handleBackIntent());
       },
       child: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () {
-            if (fullscreen) {
-              unawaited(_setFullscreen(false));
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
+            unawaited(_handleBackIntent());
+          },
+          const SingleActivator(LogicalKeyboardKey.goBack): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
+            unawaited(_handleBackIntent());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyP): () {
+            if (_suppressGlobalPlayerShortcuts) {
               return;
             }
             unawaited(_minimizeToPipAndGoHome());
           },
-          const SingleActivator(LogicalKeyboardKey.keyP): () {
-            unawaited(_minimizeToPipAndGoHome());
-          },
           const SingleActivator(LogicalKeyboardKey.enter): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_togglePlayPause());
           },
           const SingleActivator(LogicalKeyboardKey.space): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_togglePlayPause());
           },
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_seekByConfigured(-1));
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_seekByConfigured(1));
           },
           const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
           },
           const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
           },
           const SingleActivator(LogicalKeyboardKey.keyM): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_toggleMute());
           },
           const SingleActivator(LogicalKeyboardKey.keyF): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_toggleFullscreen());
           },
           const SingleActivator(LogicalKeyboardKey.keyC): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_pickSubtitle());
           },
           const SingleActivator(LogicalKeyboardKey.keyA): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_pickAudioTrack());
           },
           const SingleActivator(LogicalKeyboardKey.keyQ): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_pickVideoTrackQuality());
           },
           const SingleActivator(LogicalKeyboardKey.keyH): () {
+            if (_suppressGlobalPlayerShortcuts) {
+              return;
+            }
             unawaited(_showRemoteControlHelp());
           },
         },
@@ -9034,13 +9322,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                             controller: activeVideo,
                             controls: NoVideoControls,
                           ),
-                          title: widget.title,
+                          title: _activeMedia.title,
                           metadata: _currentTopMetaLine(),
-                          poster: widget.posterUrl?.trim().isNotEmpty == true
+                          description: _currentTopDescription(),
+                          poster:
+                              _currentTopPosterUrl()?.trim().isNotEmpty == true
                               ? ClipRRect(
                                   borderRadius: BorderRadius.circular(6),
                                   child: Image.network(
-                                    widget.posterUrl!,
+                                    _currentTopPosterUrl()!,
                                     fit: BoxFit.cover,
                                     errorBuilder: (_, __, ___) =>
                                         const Icon(Icons.movie_outlined),
@@ -9059,6 +9349,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                           ),
                           onSeekBack: () => unawaited(_seekByConfigured(-1)),
                           onSeekForward: () => unawaited(_seekByConfigured(1)),
+                          seekIntervalSeconds: seekIncrementSeconds,
                           onToggleMute: () => unawaited(_toggleMute()),
                           onVolumeChanged: (value) =>
                               unawaited(_setVolume(value)),
@@ -9068,7 +9359,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                           onSpeed: () => unawaited(_openSpeedPicker()),
                           onSettings: () => unawaited(_openPlaybackSettings()),
                           onFullscreen: () => unawaited(_toggleFullscreen()),
-                          onBack: () => unawaited(_minimizeToPipAndGoHome()),
+                          onBack: () => unawaited(_handleBackIntent()),
+                          onPipHome: () => unawaited(_minimizeToPipAndGoHome()),
                           panel: playerPanel,
                           onPanelChanged: (panel) {
                             unawaited(onPanelChanged(panel));

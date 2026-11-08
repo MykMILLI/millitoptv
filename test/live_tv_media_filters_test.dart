@@ -79,14 +79,13 @@ void main() {
     expect(find.text('Movie 0'), findsOneWidget);
 
     final stopwatch = Stopwatch()..start();
-    final categoryField = find.byWidgetPredicate(
-      (widget) =>
-          widget is InkWell &&
-          widget.key is ValueKey &&
-          (widget.key! as ValueKey).value.toString().startsWith('media-group-'),
+    await tester.tap(find.widgetWithText(FilledButton, 'Filters'));
+    await tester.pumpAndSettle();
+    final categoryTapTarget = find.ancestor(
+      of: find.text('Category').first,
+      matching: find.byType(InkWell),
     );
-    await tester.ensureVisible(categoryField.first);
-    await tester.tap(categoryField.first);
+    await tester.tap(categoryTapTarget.first);
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const ValueKey('category-picker-search')),
@@ -310,19 +309,14 @@ void adultAndBackTests() {
     await tester.tap(find.text('App Home'));
     await tester.pumpAndSettle();
 
-    ChoiceChip chip(String key) =>
-        tester.widget<ChoiceChip>(find.byKey(ValueKey(key)));
-    expect(chip('media-tab-home').selected, isTrue);
-
-    await tester.tap(find.byKey(const ValueKey('media-tab-movies')).first);
+    await tester.tap(find.text('Movies').first);
     await tester.pumpAndSettle();
-    expect(chip('media-tab-movies').selected, isTrue);
+    expect(find.text('Browse movies'), findsOneWidget);
 
     // First Back: still in Movies & Series, now on its Home.
     await tester.tap(find.byType(BackButton));
     await tester.pumpAndSettle();
     expect(find.text('App Home'), findsNothing);
-    expect(chip('media-tab-home').selected, isTrue);
 
     // Second Back: leaves to the app home screen.
     await tester.tap(find.byType(BackButton));
