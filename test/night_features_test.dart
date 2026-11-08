@@ -1,8 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:millitop_tv/services/global_playlists.dart';
 import 'package:millitop_tv/services/home_preferences.dart';
 import 'package:millitop_tv/services/live_tv_playlist.dart';
 import 'package:millitop_tv/services/live_tv_source.dart';
+import 'package:millitop_tv/services/playlist_playback.dart';
 import 'package:millitop_tv/services/sleep_sounds_controller.dart';
 import 'package:millitop_tv/services/viewing_sessions.dart';
 import 'package:millitop_tv/services/sleep_mode.dart';
@@ -445,6 +447,130 @@ file://local-path
     await tester.pump(const Duration(seconds: 2));
     expect(closes, 1);
     await tester.pump(const Duration(seconds: 2));
+    await sleep.endOvernight();
+    sleep.dispose();
+  });
+
+  testWidgets('countdown warning prompt is single-fire per countdown window', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 10, 24, 21, 0, 0);
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+      closeOverride: () async {},
+      displayOverride: () async {},
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(seconds: 31));
+    await tester.pump(const Duration(seconds: 1));
+    expect(sleep.countdownPromptId, 1);
+    await tester.pump(const Duration(seconds: 3));
+    expect(sleep.countdownPromptId, 1);
+    sleep.extend(1);
+    now = now.add(const Duration(seconds: 60));
+    await tester.pump(const Duration(seconds: 1));
+    expect(sleep.countdownPromptId, 2);
+    sleep.cancelTimer();
+    now = now.add(const Duration(minutes: 2));
+    await tester.pump(const Duration(seconds: 2));
+    expect(sleep.countdownPromptId, 2);
+    await sleep.endOvernight();
+    sleep.dispose();
+  });
+
+  testWidgets('expiry stops mixed queue and remains stopped on later ticks', (
+    tester,
+  ) async {
+    final session = PlaylistPlaybackSession(
+      profileId: 1,
+      playlistId: 'mix',
+      playlistName: 'Mixed',
+      entries: const [
+        PlaylistPlaybackEntry(
+          entryId: 'entry-1',
+          item: HubItem(
+            type: HubMediaType.youtube,
+            sourceId: 'youtube',
+            id: 'v1',
+            title: 'Video one',
+            sourceName: 'YouTube',
+            payload: {'id': 'v1', 'title': 'Video one', 'author': 'Creator'},
+          ),
+        ),
+        PlaylistPlaybackEntry(
+          entryId: 'entry-2',
+          item: HubItem(
+            type: HubMediaType.movie,
+            sourceId: 'provider-a',
+            id: 'movie-b',
+            title: 'Movie B',
+            sourceName: 'Provider A',
+            payload: {
+              'sourceId': 'provider-a',
+              'sourceName': 'Provider A',
+              'mediaType': 'movie',
+              'mediaId': 'movie-b',
+              'title': 'Movie B',
+              'streamUrl': 'https://example.invalid/movie-b.mp4',
+            },
+          ),
+        ),
+      ],
+      startIndex: 0,
+      shuffled: false,
+    );
+    PlaylistPlaybackRegistry.instance.activate(session);
+    var now = DateTime(2026, 10, 24, 21, 0, 0);
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 3));
+    expect(session.state, PlaylistPlaybackSessionState.stopped);
+    expect(PlaylistPlaybackRegistry.instance.active, isNull);
+    now = now.add(const Duration(minutes: 3));
+    await tester.pump(const Duration(seconds: 3));
+    expect(PlaylistPlaybackRegistry.instance.active, isNull);
+    sleep.dispose();
+  });
+
+  testWidgets('timer expiry preserves running sleep sounds session', (
+    tester,
+  ) async {
+    final controller = SleepSoundsController.instance;
+    controller.setBackend(SleepSoundsBackend.browserFallback);
+    var launched = 0;
+    var stopped = 0;
+    await controller.play(
+      profileId: 8,
+      url: 'https://sleep.millitop.net',
+      launcher: (_, __) async {
+        launched++;
+      },
+      stopper: (_) async {
+        stopped++;
+      },
+    );
+    expect(launched, 1);
+    var now = DateTime(2026, 10, 24, 21, 0, 0);
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+      closeOverride: () async {},
+      displayOverride: () async {},
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 3));
+    expect(controller.running, isTrue);
+    expect(stopped, 0);
+    await controller.stop();
+    expect(stopped, 1);
     await sleep.endOvernight();
     sleep.dispose();
   });

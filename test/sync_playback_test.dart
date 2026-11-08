@@ -423,5 +423,161 @@ void main() {
         expect(opened, ['v1', 'movie-b', 'v2']);
       },
     );
+
+    testWidgets('manual next and previous commands cross provider boundaries', (
+      tester,
+    ) async {
+      final opened = <String>[];
+      late BuildContext context;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) {
+              context = ctx;
+              return const Scaffold();
+            },
+          ),
+        ),
+      );
+      final mixed = [
+        HubItem.youtube(_video),
+        HubItem(
+          type: HubMediaType.movie,
+          sourceId: 'provider-a',
+          id: 'movie-b',
+          title: 'Movie B',
+          sourceName: 'Provider A',
+          payload: const {
+            'sourceId': 'provider-a',
+            'sourceName': 'Provider A',
+            'mediaType': 'movie',
+            'mediaId': 'movie-b',
+            'title': 'Movie B',
+            'streamUrl': 'https://example.invalid/movie-b.mp4',
+          },
+        ),
+        HubItem.youtube(_video2),
+      ];
+      final player = PlaylistPlayback(
+        profileId: 1,
+        open: (_, session, segment) async {
+          opened.add(segment.first.item.id);
+          if (opened.length == 1) {
+            expect(session.next(), isTrue);
+            return PlaylistPlaybackExit.switched(session.current!.entryId);
+          }
+          if (opened.length == 2) {
+            expect(session.previous(), isTrue);
+            return PlaylistPlaybackExit.switched(session.current!.entryId);
+          }
+          return const PlaylistPlaybackExit.explicitStop();
+        },
+      );
+      await player.play(
+        context,
+        playlistId: 'mixed',
+        name: 'Mixed',
+        items: mixed,
+      );
+      expect(opened, ['v1', 'movie-b', 'v1']);
+    });
+
+    testWidgets(
+      'late completion from outgoing item does not skip selected target',
+      (tester) async {
+        final opened = <String>[];
+        late BuildContext context;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (ctx) {
+                context = ctx;
+                return const Scaffold();
+              },
+            ),
+          ),
+        );
+        final mixed = [
+          HubItem.youtube(_video),
+          HubItem(
+            type: HubMediaType.movie,
+            sourceId: 'provider-a',
+            id: 'movie-b',
+            title: 'Movie B',
+            sourceName: 'Provider A',
+            payload: const {
+              'sourceId': 'provider-a',
+              'sourceName': 'Provider A',
+              'mediaType': 'movie',
+              'mediaId': 'movie-b',
+              'title': 'Movie B',
+              'streamUrl': 'https://example.invalid/movie-b.mp4',
+            },
+          ),
+          HubItem.youtube(_video2),
+        ];
+        final player = PlaylistPlayback(
+          profileId: 1,
+          open: (_, session, segment) async {
+            opened.add(segment.first.item.id);
+            if (opened.length == 1) {
+              final target = session.entries.firstWhere(
+                (entry) => entry.item.id == 'movie-b',
+              );
+              session.playEntry(target.entryId);
+              return const PlaylistPlaybackExit.completed();
+            }
+            return const PlaylistPlaybackExit.explicitStop();
+          },
+        );
+        await player.play(
+          context,
+          playlistId: 'mixed',
+          name: 'Mixed',
+          items: mixed,
+        );
+        expect(opened, ['v1', 'movie-b']);
+      },
+    );
+
+    testWidgets('failed open offers explicit retry and skip flow', (
+      tester,
+    ) async {
+      final opened = <String>[];
+      late BuildContext context;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) {
+              context = ctx;
+              return const Scaffold();
+            },
+          ),
+        ),
+      );
+      final player = PlaylistPlayback(
+        profileId: 1,
+        open: (_, __, segment) async {
+          opened.add(segment.first.item.id);
+          if (opened.length == 1) {
+            return const PlaylistPlaybackExit.failed('boom');
+          }
+          return const PlaylistPlaybackExit.explicitStop();
+        },
+      );
+      final run = player.play(
+        context,
+        playlistId: 'mixed',
+        name: 'Mixed',
+        items: [HubItem.youtube(_video), HubItem.youtube(_video2)],
+      );
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.text('Playback failed'), findsOneWidget);
+      await tester.tap(find.text('Skip'));
+      await tester.pumpAndSettle();
+      await run;
+      expect(opened, ['v1', 'v2']);
+    });
   });
 }
