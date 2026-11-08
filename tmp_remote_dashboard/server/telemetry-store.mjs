@@ -82,4 +82,28 @@ export class PgTelemetryStore {
       recentErrors: recent.rows,
     };
   }
+
+  async recentEvents({
+    sinceId = null,
+    householdId = null,
+    category = null,
+    level = null,
+    limit = 100,
+  } = {}) {
+    const bounded = Math.min(500, Math.max(1, Number(limit) || 100));
+    const params = [sinceId, householdId, category, level, bounded];
+    const r = await this.pool.query(
+      `SELECT id, occurred_at, received_at, level, category, message, error, hint,
+              details, platform, app_version, device_id, session_id, profile_id
+         FROM ${T}.app_telemetry
+        WHERE ($1::bigint IS NULL OR id > $1::bigint)
+          AND ($2::uuid IS NULL OR household_id = $2::uuid)
+          AND ($3::text IS NULL OR category = $3::text)
+          AND ($4::text IS NULL OR level = $4::text)
+        ORDER BY id ASC
+        LIMIT $5`,
+      params
+    );
+    return r.rows;
+  }
 }

@@ -86,7 +86,7 @@ void main() {
   });
 
   test(
-    'factory and saved builtin Emby are excluded; console Emby remains',
+    'factory Emby remains visible even when stale local Emby data exists',
     () async {
       SharedPreferences.setMockInitialValues({
         'webapps.local.v1.1': jsonEncode([
@@ -103,8 +103,8 @@ void main() {
       final catalog = WebAppCatalog(source: _ManagedApps());
       await catalog.sync();
       final apps = await catalog.load(1, includeHidden: true);
-      expect(builtinWebApps.any((app) => app.id == 'emby'), isFalse);
-      expect(apps.any((app) => app.id == 'emby'), isFalse);
+      expect(builtinWebApps.any((app) => app.id == 'emby'), isTrue);
+      expect(apps.any((app) => app.id == 'emby'), isTrue);
       expect(
         apps.any((app) => app.managed && app.title == 'Console Emby'),
         isTrue,
@@ -114,7 +114,7 @@ void main() {
   );
 
   testWidgets(
-    'Apps panel omits VLC and local Emby even with stale saved ordering',
+    'Apps panel omits VLC and keeps Emby even with stale saved ordering',
     (tester) async {
       SharedPreferences.setMockInitialValues({
         'home.appOrder.v1.1': ['native:vlc', 'web:emby'],
@@ -134,7 +134,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('native:vlc')), findsNothing);
       expect(find.text('VLC player'), findsNothing);
-      expect(find.byKey(const ValueKey('web:emby')), findsNothing);
+      expect(find.byKey(const ValueKey('web:emby')), findsOneWidget);
+      expect(find.text('Emby'), findsOneWidget);
       expect(find.text('Console Emby'), findsOneWidget);
       expect(find.text('Live TV'), findsOneWidget);
       expect(tester.takeException(), isNull);

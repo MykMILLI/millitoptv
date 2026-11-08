@@ -188,19 +188,47 @@ class _MediaLibraryHomeState extends State<MediaLibraryHome> {
   }
 
   Future<void> _playRecording(Map<String, dynamic> item) async {
-    final uri = _playbackUri(item);
+    var current = item;
+    final id = item['id']?.toString() ?? '';
+    final connection = DeviceConnection.instance.connectionKey;
+    if (id.isNotEmpty && connection.isNotEmpty) {
+      try {
+        final refreshed = await liveTvControl.dvrRecordings(
+          expectedConnection: connection,
+          profileId: widget.profileId,
+        );
+        final rows = (refreshed['recordings'] as List? ?? const [])
+            .whereType<Map>()
+            .map((entry) => Map<String, dynamic>.from(entry))
+            .toList();
+        Map<String, dynamic>? latest;
+        for (final entry in rows) {
+          if ('${entry['id']}' == id) {
+            latest = entry;
+            break;
+          }
+        }
+        if (latest != null) {
+          current = latest;
+        }
+      } catch (_) {}
+    }
+    final uri = _playbackUri(current);
     if (uri == null) {
       setState(
         () => cloudDvrError = 'This recording is not available to play.',
       );
       return;
     }
+    if (!mounted) {
+      return;
+    }
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => DvrRecordingPlayerScreen(
           profileId: widget.profileId,
-          title: item['title']?.toString() ?? 'Recording',
-          subtitle: item['channelName']?.toString(),
+          title: current['title']?.toString() ?? 'Recording',
+          subtitle: current['channelName']?.toString(),
           streamUrl: uri.toString(),
         ),
       ),

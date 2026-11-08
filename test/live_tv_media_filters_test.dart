@@ -85,7 +85,8 @@ void main() {
           widget.key is ValueKey &&
           (widget.key! as ValueKey).value.toString().startsWith('media-group-'),
     );
-    await tester.tap(categoryField);
+    await tester.ensureVisible(categoryField.first);
+    await tester.tap(categoryField.first);
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const ValueKey('category-picker-search')),

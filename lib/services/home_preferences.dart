@@ -3,6 +3,7 @@ import '../profiles/household_store.dart';
 import 'live_tv_source.dart';
 import 'music_service.dart';
 import 'playback_performance.dart';
+import 'jellyfin_client.dart';
 import 'shared_family_album_service.dart';
 import 'podcast_service.dart';
 import 'podcast_downloads.dart';
@@ -11,6 +12,8 @@ import 'global_playlists.dart';
 import 'tube_downloads.dart';
 import 'dart:convert';
 import 'dart:io';
+
+const int _maxSyncedAvatarBytes = 32 * 1024 * 1024;
 
 class LiveTvRecentChannel {
   final String sourceId;
@@ -502,6 +505,48 @@ class HomePreferences {
     }
   }
 
+  Future<Map<String, dynamic>> liveTvPlayerDefaults(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.liveTvPlayerDefaults.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const {};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('Live TV player defaults are invalid.');
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<void> saveLiveTvPlayerDefaults(
+    int profile,
+    Map<String, dynamic> settings,
+  ) async {
+    final sanitized = <String, dynamic>{};
+    for (final entry in settings.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty) {
+        continue;
+      }
+      final value = entry.value;
+      if (value == null) {
+        continue;
+      }
+      if (value is String) {
+        sanitized[key] = value.trim();
+      } else if (value is num || value is bool) {
+        sanitized[key] = value;
+      }
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.liveTvPlayerDefaults.v1.$profile',
+      jsonEncode(sanitized),
+    )) {
+      throw StateError('Could not save Live TV player defaults.');
+    }
+  }
+
   Future<List<LiveTvSource>> liveTvSources(int profile) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('home.liveTvSources.v1.$profile');
@@ -845,6 +890,7 @@ class HomePreferences {
 
   Future<Map<String, dynamic>> liveTvProfileSyncState(int profile) async {
     Map<String, dynamic>? profileIdentity;
+    Map<String, dynamic>? jellyfinAccount;
     try {
       await HouseholdStore.instance.initialize();
       final profileRecord = await HouseholdStore.instance.profileById(profile);
@@ -856,7 +902,7 @@ class HomePreferences {
           final avatarFile = File(avatarPath);
           if (await avatarFile.exists()) {
             final bytes = await avatarFile.readAsBytes();
-            if (bytes.length <= 262144) {
+            if (bytes.length <= _maxSyncedAvatarBytes) {
               avatarBase64 = base64Encode(bytes);
               final dot = avatarPath.lastIndexOf('.');
               if (dot >= 0 && dot < avatarPath.length - 1) {
@@ -870,6 +916,15 @@ class HomePreferences {
           'name': profileRecord.name,
           if (avatarBase64 != null) 'avatarBase64': avatarBase64,
           if (avatarExtension != null) 'avatarExtension': avatarExtension,
+        };
+      }
+    } catch (_) {}
+    try {
+      final account = await JellyfinAccountStore.instance().load(profile);
+      if (account != null) {
+        jellyfinAccount = {
+          ...account.toConfigJson(),
+          'accessToken': account.accessToken,
         };
       }
     } catch (_) {}
@@ -893,6 +948,7 @@ class HomePreferences {
       'showAdultContent': await showAdultContent(profile),
       'playbackPerformance': (await playbackPerformance(profile)).toJson(),
       'subtitleProviders': await subtitleProviderSettings(profile),
+      'playerDefaults': await liveTvPlayerDefaults(profile),
       'sharedFamilyAlbum': (await sharedFamilyAlbumSettings(profile)).toJson(),
       'music': await music.profileSyncState(profile),
       'podcasts': (await PodcastStore().load(profile)).toJson(),
@@ -901,6 +957,7 @@ class HomePreferences {
       if (libraryFolders.isNotEmpty) 'libraryFolders': libraryFolders,
       'libraryPlayback': await libraryPlaybackState(profile),
       if (profileIdentity != null) 'profileIdentity': profileIdentity,
+      if (jellyfinAccount != null) 'jellyfinAccount': jellyfinAccount,
       'syncedAtUtc': DateTime.now().toUtc().toIso8601String(),
     };
   }
@@ -909,6 +966,7 @@ class HomePreferences {
   Future<Map<String, dynamic>> collectionSyncState(int profile) async => {
     'youtube': (await TubeStore().load(profile)).toJson(),
     'globalPlaylists': (await GlobalPlaylistStore().load(profile)).toJson(),
+    'podcasts': (await PodcastStore().load(profile)).toJson(),
   };
 
   /// Merges only the timestamped collections from [state]; settings that are
@@ -929,6 +987,13 @@ class HomePreferences {
       await TubeStore().applySync(
         profile,
         Map<String, dynamic>.from(youtubeRaw),
+      );
+    }
+    final podcastsRaw = state['podcasts'];
+    if (podcastsRaw is Map) {
+      await PodcastStore().applySync(
+        profile,
+        Map<String, dynamic>.from(podcastsRaw),
       );
     }
   }
@@ -1052,6 +1117,14 @@ class HomePreferences {
       );
     }
 
+    final playerDefaultsRaw = state['playerDefaults'];
+    if (playerDefaultsRaw is Map) {
+      await saveLiveTvPlayerDefaults(
+        profile,
+        Map<String, dynamic>.from(playerDefaultsRaw),
+      );
+    }
+
     final familyAlbumRaw = state['sharedFamilyAlbum'];
     if (familyAlbumRaw is Map) {
       await saveSharedFamilyAlbumSettings(
@@ -1121,7 +1194,7 @@ class HomePreferences {
               identityRaw['avatarBase64']?.toString().trim() ?? '';
           if (avatarBase64.isNotEmpty) {
             final bytes = base64Decode(avatarBase64);
-            if (bytes.length <= 262144) {
+            if (bytes.length <= _maxSyncedAvatarBytes) {
               final ext = identityRaw['avatarExtension']?.toString().trim();
               await HouseholdStore.instance.setAvatarBytes(
                 profile,
@@ -1129,6 +1202,25 @@ class HomePreferences {
                 extension: ext == null || ext.isEmpty ? '.png' : ext,
               );
             }
+          }
+
+          final jellyfinRaw = state['jellyfinAccount'];
+          if (jellyfinRaw is Map) {
+            try {
+              final payload = Map<String, dynamic>.from(jellyfinRaw);
+              final accessToken = payload['accessToken']?.toString() ?? '';
+              if (payload['signedOut'] == true) {
+                await JellyfinAccountStore.instance().clear(profile);
+              } else if (accessToken.isNotEmpty) {
+                final account = JellyfinAccount.fromConfigJson(
+                  payload,
+                  accessToken,
+                );
+                if (account != null) {
+                  await JellyfinAccountStore.instance().save(profile, account);
+                }
+              }
+            } catch (_) {}
           }
         }
       } catch (_) {}
@@ -1348,6 +1440,7 @@ class HomePreferences {
       'home.liveTvFavorites.v1.$profile',
       'home.liveTvPlaylists.v1.$profile',
       'home.liveTvUiState.v1.$profile',
+      'home.liveTvPlayerDefaults.v1.$profile',
       'weather.auto.v1.$profile.enabled',
       'weather.auto.v1.$profile.forecast',
       'library.folders.v1.$profile',

@@ -10,9 +10,7 @@ class DeviceSetupScreen extends StatefulWidget {
 }
 
 class _DeviceSetupScreenState extends State<DeviceSetupScreen> {
-  final address = TextEditingController(
-    text: 'http://192.168.1.36:8185',
-  );
+  final address = TextEditingController(text: 'https://tvadmin.millitop.net');
   final code = TextEditingController();
 
   bool busy = false;
@@ -205,8 +203,8 @@ class _DeviceSetupScreenState extends State<DeviceSetupScreen> {
                       ],
                       const SizedBox(height: 30),
                       const Text(
-                        'The HTTP LAN address is for local testing only. '
-                        'Use HTTPS for remote deployment.',
+                        'Use your secure dashboard origin, for example '
+                        'https://tvadmin.millitop.net.',
                         style: TextStyle(color: Colors.white60),
                       ),
                     ],

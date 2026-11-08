@@ -199,6 +199,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       const SharedFamilyAlbumSettings();
   MillitopThemeId visualTheme = MillitopThemeId.auroraGlass;
   Map<String, dynamic> subtitleProviderSettings = const {};
+  Map<String, dynamic> liveTvPlayerDefaults = const {};
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
   @override
@@ -261,6 +262,9 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       );
       final subtitleProviders = await HomePreferences()
           .subtitleProviderSettings(widget.profileId);
+      final playerDefaults = await HomePreferences().liveTvPlayerDefaults(
+        widget.profileId,
+      );
       final performance = await HomePreferences().playbackPerformance(
         widget.profileId,
       );
@@ -273,6 +277,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           sharedFamilyAlbumSettings = sharedFamilyAlbum;
           visualTheme = themeId;
           subtitleProviderSettings = subtitleProviders;
+          liveTvPlayerDefaults = playerDefaults;
           playbackPerformance = performance;
         });
       }
@@ -1133,6 +1138,312 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     );
   }
 
+  Future<void> _editLiveTvPlayerDefaults() async {
+    final defaults = Map<String, dynamic>.from(liveTvPlayerDefaults);
+    double subtitleFontSize =
+        double.tryParse(defaults['subtitleFontSize']?.toString() ?? '') ?? 46;
+    double subtitleOpacity =
+        double.tryParse(defaults['subtitleOpacity']?.toString() ?? '') ?? 1.0;
+    double subtitlePosition =
+        double.tryParse(defaults['subtitlePosition']?.toString() ?? '') ?? 92;
+    double subtitleDelaySeconds =
+        double.tryParse(defaults['subtitleDelaySeconds']?.toString() ?? '') ??
+        0.0;
+    String subtitleFontFamily =
+        defaults['subtitleFontFamily']?.toString().trim().isNotEmpty == true
+        ? defaults['subtitleFontFamily'].toString().trim()
+        : 'Default';
+    int maxBandwidthKbpsRemote =
+        int.tryParse(defaults['maxBandwidthKbpsRemote']?.toString() ?? '') ??
+        4500;
+    int maxBandwidthKbpsLocal =
+        int.tryParse(defaults['maxBandwidthKbpsLocal']?.toString() ?? '') ??
+        18000;
+    Color subtitleForeground = Color(
+      int.tryParse(defaults['subtitleForeground']?.toString() ?? '') ??
+          Colors.white.toARGB32(),
+    );
+    Color subtitleBackground = Color(
+      int.tryParse(defaults['subtitleBackground']?.toString() ?? '') ??
+          Colors.black87.toARGB32(),
+    );
+    Color subtitleOutline = Color(
+      int.tryParse(defaults['subtitleOutline']?.toString() ?? '') ??
+          Colors.black.toARGB32(),
+    );
+    String localError = '';
+    final colorOptions = <MapEntry<String, Color>>[
+      const MapEntry('White', Colors.white),
+      const MapEntry('Black', Colors.black),
+      const MapEntry('Amber', Colors.amber),
+      const MapEntry('Cyan', Colors.cyanAccent),
+      const MapEntry('Green', Colors.lightGreenAccent),
+      const MapEntry('Pink', Colors.pinkAccent),
+    ];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Live TV subtitle & quality defaults'),
+          content: SizedBox(
+            width: 700,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'These defaults apply to Movies & Series playback. They can still be adjusted during playback.',
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Remote max quality: $maxBandwidthKbpsRemote kbps',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  Slider(
+                    value: maxBandwidthKbpsRemote.clamp(1200, 20000).toDouble(),
+                    min: 1200,
+                    max: 20000,
+                    divisions: 188,
+                    onChanged: (value) =>
+                        setLocal(() => maxBandwidthKbpsRemote = value.round()),
+                  ),
+                  Text(
+                    'Local max quality: $maxBandwidthKbpsLocal kbps',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  Slider(
+                    value: maxBandwidthKbpsLocal
+                        .clamp(maxBandwidthKbpsRemote, 50000)
+                        .toDouble(),
+                    min: maxBandwidthKbpsRemote.toDouble(),
+                    max: 50000,
+                    divisions: 244,
+                    onChanged: (value) =>
+                        setLocal(() => maxBandwidthKbpsLocal = value.round()),
+                  ),
+                  const Divider(height: 24),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Subtitle font family'),
+                    subtitle: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final family in const [
+                          'Default',
+                          'Arial',
+                          'Roboto',
+                          'Noto Sans',
+                          'Open Sans',
+                          'Verdana',
+                        ])
+                          ChoiceChip(
+                            label: Text(family),
+                            selected: subtitleFontFamily == family,
+                            onSelected: (_) =>
+                                setLocal(() => subtitleFontFamily = family),
+                          ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      'Subtitle font size: ${subtitleFontSize.toStringAsFixed(0)}',
+                    ),
+                    subtitle: Slider(
+                      value: subtitleFontSize.clamp(26, 82),
+                      min: 26,
+                      max: 82,
+                      onChanged: (value) =>
+                          setLocal(() => subtitleFontSize = value),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      'Subtitle opacity: ${(subtitleOpacity * 100).round()}%',
+                    ),
+                    subtitle: Slider(
+                      value: subtitleOpacity.clamp(0.2, 1.0),
+                      min: 0.2,
+                      max: 1.0,
+                      onChanged: (value) =>
+                          setLocal(() => subtitleOpacity = value),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      'Subtitle position: ${subtitlePosition.toStringAsFixed(0)}',
+                    ),
+                    subtitle: Slider(
+                      value: subtitlePosition.clamp(10, 100),
+                      min: 10,
+                      max: 100,
+                      onChanged: (value) =>
+                          setLocal(() => subtitlePosition = value),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      'Subtitle timing offset: ${subtitleDelaySeconds.toStringAsFixed(2)}s',
+                    ),
+                    subtitle: Slider(
+                      value: subtitleDelaySeconds.clamp(-10, 10),
+                      min: -10,
+                      max: 10,
+                      onChanged: (value) =>
+                          setLocal(() => subtitleDelaySeconds = value),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Subtitle foreground color'),
+                    subtitle: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in colorOptions)
+                          ChoiceChip(
+                            label: Text(option.key),
+                            selected:
+                                subtitleForeground.toARGB32() ==
+                                option.value.toARGB32(),
+                            onSelected: (_) => setLocal(
+                              () => subtitleForeground = option.value,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Subtitle background color'),
+                    subtitle: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in colorOptions)
+                          ChoiceChip(
+                            label: Text(option.key),
+                            selected:
+                                subtitleBackground.toARGB32() ==
+                                option.value.toARGB32(),
+                            onSelected: (_) => setLocal(
+                              () => subtitleBackground = option.value,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Subtitle outline/shadow color'),
+                    subtitle: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in colorOptions)
+                          ChoiceChip(
+                            label: Text(option.key),
+                            selected:
+                                subtitleOutline.toARGB32() ==
+                                option.value.toARGB32(),
+                            onSelected: (_) =>
+                                setLocal(() => subtitleOutline = option.value),
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (localError.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        localError,
+                        style: const TextStyle(color: Colors.orangeAccent),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await HomePreferences().saveLiveTvPlayerDefaults(
+                  widget.profileId,
+                  const {},
+                );
+                await _syncLiveTvConfig();
+                if (!mounted) {
+                  return;
+                }
+                setState(() => liveTvPlayerDefaults = const {});
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                }
+              },
+              child: const Text('Reset defaults'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  if (maxBandwidthKbpsRemote < 1200 ||
+                      maxBandwidthKbpsLocal < maxBandwidthKbpsRemote) {
+                    throw const FormatException(
+                      'Bandwidth limits must be at least 1200 kbps and local must be >= remote.',
+                    );
+                  }
+                  final next = <String, dynamic>{
+                    'maxBandwidthKbpsRemote': maxBandwidthKbpsRemote,
+                    'maxBandwidthKbpsLocal': maxBandwidthKbpsLocal,
+                    'subtitleFontFamily': subtitleFontFamily,
+                    'subtitleFontSize': subtitleFontSize,
+                    'subtitleOpacity': subtitleOpacity,
+                    'subtitlePosition': subtitlePosition,
+                    'subtitleDelaySeconds': subtitleDelaySeconds,
+                    'subtitleForeground': subtitleForeground.toARGB32(),
+                    'subtitleBackground': subtitleBackground.toARGB32(),
+                    'subtitleOutline': subtitleOutline.toARGB32(),
+                  };
+                  await HomePreferences().saveLiveTvPlayerDefaults(
+                    widget.profileId,
+                    next,
+                  );
+                  await _syncLiveTvConfig();
+                  if (!mounted) {
+                    return;
+                  }
+                  setState(() => liveTvPlayerDefaults = next);
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                } catch (e) {
+                  if (ctx.mounted) {
+                    setLocal(
+                      () => localError = e.toString().replaceFirst(
+                        'FormatException: ',
+                        '',
+                      ),
+                    );
+                  }
+                }
+              },
+              child: const Text('Save defaults'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _syncLiveTvConfig() async {
     final connection = DeviceConnection.instance.connectionKey;
     if (connection.isEmpty || !DeviceConnection.instance.isConnected) {
@@ -1495,6 +1806,17 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           ),
           trailing: const Icon(Icons.chevron_right),
           onTap: _editSubtitleProviders,
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Subtitle display & quality defaults'),
+          subtitle: Text(
+            liveTvPlayerDefaults.isEmpty
+                ? 'Using built-in defaults.'
+                : 'Configured (${liveTvPlayerDefaults.keys.length} values).',
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _editLiveTvPlayerDefaults,
         ),
         // Shared Family Album temporarily disabled.
         if (_sharedFamilyAlbumEnabled)

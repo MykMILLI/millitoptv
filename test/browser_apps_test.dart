@@ -80,24 +80,27 @@ void main() {
     () async {
       final source = FakeManaged()..allowed = false;
       final catalog = WebAppCatalog(source: source);
+      const localId = 'local:22222222-2222-4222-8222-222222222222';
       await catalog.save(
         1,
-        id: 'jellyfin',
+        id: localId,
         title: 'Our Cinema',
         url: 'http://192.168.1.10:8096',
-        icon: 'jellyfin',
+        icon: 'emby',
       );
       final local = await catalog.load(1);
-      expect(local.firstWhere((a) => a.id == 'jellyfin').title, 'Our Cinema');
+      expect(local.firstWhere((a) => a.id == localId).title, 'Our Cinema');
       expect(
-        (await catalog.load(2)).firstWhere((a) => a.id == 'jellyfin').title,
-        'Jellyfin',
+        (await catalog.load(2)).any((a) => a.id == localId),
+        isFalse,
       );
-      await catalog.removeOrReset(1, local.firstWhere((a) => a.id == 'jellyfin'));
+      expect(local.firstWhere((a) => a.id == 'emby').title, 'Emby');
+      await catalog.removeOrReset(1, local.firstWhere((a) => a.id == localId));
       expect(
-        (await catalog.load(1)).firstWhere((a) => a.id == 'jellyfin').title,
-        'Jellyfin',
+        (await catalog.load(1)).firstWhere((a) => a.id == 'emby').title,
+        'Emby',
       );
+      expect((await catalog.load(1)).any((a) => a.id == localId), isFalse);
       catalog.dispose();
     },
   );
@@ -206,7 +209,7 @@ void main() {
         'Live TV',
         'Podcasts',
         'YouTube',
-        'Jellyfin',
+        'Emby',
         'Add URL app',
       ]) {
         expect(find.text(title), findsOneWidget);

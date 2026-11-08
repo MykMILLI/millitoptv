@@ -261,10 +261,10 @@ export default function DevicesPanel({ request, households, token }) {
     }
   }
 
-  async function revoke(device) {
+  async function deleteDevice(device) {
     if (
       !window.confirm(
-        `Revoke ${device.name}? It will need a new pairing code to reconnect.`,
+        `Delete ${device.name} from this console? It will need a new pairing code to reconnect.`,
       )
     ) {
       return;
@@ -272,7 +272,7 @@ export default function DevicesPanel({ request, households, token }) {
     setBusy(true);
     setError('');
     try {
-      await request(`/api/admin/devices/${device.id}/revoke`, {
+      await request(`/api/admin/devices/${device.id}/delete`, {
         method: 'POST',
         body: '{}'
       });
@@ -676,27 +676,26 @@ export default function DevicesPanel({ request, households, token }) {
                 <dd>{device.app_version || 'Not reported'}</dd>
               </dl>
 
-              {!device.revoked_at && (
-                <>
-                  <div className="device-actions">
-                    <button
-                      className="secondary"
-                      disabled={busy}
-                      onClick={() =>
-                        setExpandedLiveTv(current => ({
-                          ...current,
-                          [device.id]: !current[device.id]
-                        }))
-                      }
-                    >
-                      {expandedLiveTv[device.id] ? 'Hide Live TV controls' : 'Live TV controls'}
-                    </button>
-                    <button className="secondary" disabled={busy} onClick={() => revoke(device)}>
-                      Revoke device
-                    </button>
-                  </div>
+              <>
+                <div className="device-actions">
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      setExpandedLiveTv(current => ({
+                        ...current,
+                        [device.id]: !current[device.id]
+                      }))
+                    }
+                  >
+                    {expandedLiveTv[device.id] ? 'Hide Live TV controls' : 'Live TV controls'}
+                  </button>
+                  <button className="secondary" disabled={busy} onClick={() => deleteDevice(device)}>
+                    Delete device
+                  </button>
+                </div>
 
-                  {expandedLiveTv[device.id] && (
+                {expandedLiveTv[device.id] && (
                     <section className="device-live-tv">
                       <h4>Live TV remote controls</h4>
                       <small>
@@ -968,8 +967,7 @@ export default function DevicesPanel({ request, households, token }) {
                       </div>
                     </section>
                   )}
-                </>
-              )}
+              </>
             </article>
           );
         })

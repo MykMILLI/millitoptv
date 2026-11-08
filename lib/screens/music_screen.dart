@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -24,6 +25,7 @@ import '../services/music_widget_service.dart';
 import '../services/music_mini_player.dart';
 import '../services/playback_destinations_service.dart';
 import '../services/speaker_discovery_service.dart';
+import '../services/app_log.dart';
 import '../theme/millitop_visual_theme.dart';
 
 enum _MusicSection { home, songs, albums, artists, playlists, favorites, radio }
@@ -616,6 +618,7 @@ class _MusicScreenState extends State<MusicScreen>
   bool playing = false;
   bool syncingDownloads = false;
   bool trackLoading = false;
+  bool playbackBuffering = false;
   bool shuffleEnabled = false;
   String error = '';
   String playbackError = '';
@@ -678,6 +681,10 @@ class _MusicScreenState extends State<MusicScreen>
   /// Where a restored session left off; used the first time Play is pressed.
   Duration resumePosition = Duration.zero;
   int _sessionSaveTick = 0;
+  bool _pausedByInterruption = false;
+  Duration _lastObservedPosition = Duration.zero;
+  DateTime? _positionLastChangedAtUtc;
+  DateTime? _lastAudioHealthLogAtUtc;
 
   MusicTrack? get activeTrack {
     if (activeQueue.isEmpty ||
@@ -690,6 +697,71 @@ class _MusicScreenState extends State<MusicScreen>
 
   String get _currentUserId => 'profile-${widget.profileId}';
 
+  void _logPlaybackAnalytics(
+    String name, {
+    Map<String, Object?> details = const {},
+  }) {
+    final track = activeTrack;
+    AppLog.event(
+      name,
+      props: {
+        'profileId': widget.profileId,
+        if (track != null) 'trackId': track.id,
+        if (track != null) 'title': track.title,
+        'playing': playing,
+        'positionMs': position.inMilliseconds,
+        'durationMs': duration.inMilliseconds,
+        'queueLength': activeQueue.length,
+        'queueIndex': activeQueueIndex,
+        ...details,
+      },
+    );
+  }
+
+  void _logPlaybackHealthIfNeeded() {
+    if (!playing || playbackBuffering || trackLoading) {
+      _lastObservedPosition = position;
+      _positionLastChangedAtUtc = DateTime.now().toUtc();
+      return;
+    }
+    if (position > _lastObservedPosition) {
+      _lastObservedPosition = position;
+      _positionLastChangedAtUtc = DateTime.now().toUtc();
+      return;
+    }
+    final unchangedSince = _positionLastChangedAtUtc;
+    if (unchangedSince == null) {
+      _positionLastChangedAtUtc = DateTime.now().toUtc();
+      return;
+    }
+    final now = DateTime.now().toUtc();
+    final stalledFor = now.difference(unchangedSince);
+    if (stalledFor < const Duration(seconds: 4)) {
+      return;
+    }
+    final last = _lastAudioHealthLogAtUtc;
+    if (last != null && now.difference(last) < const Duration(seconds: 20)) {
+      return;
+    }
+    _lastAudioHealthLogAtUtc = now;
+    AppLog.warn(
+      LogCategory.playback,
+      'Music playback position appears stalled while playing.',
+      details: {
+        'profileId': widget.profileId,
+        'positionMs': position.inMilliseconds,
+        'durationMs': duration.inMilliseconds,
+        'stallMs': stalledFor.inMilliseconds,
+        'trackLoading': trackLoading,
+        'buffering': playbackBuffering,
+      },
+    );
+    _logPlaybackAnalytics(
+      'music.playback.stall',
+      details: {'stallMs': stalledFor.inMilliseconds},
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -700,6 +772,8 @@ class _MusicScreenState extends State<MusicScreen>
     AudioBackgroundService.instance.onSkipNextRequested = _playNextTrackInQueue;
     AudioBackgroundService.instance.onSkipPreviousRequested =
         _playPreviousTrackInQueue;
+    AudioBackgroundService.instance.onPlayMediaIdRequested =
+        _playFromAndroidAutoMediaId;
     AudioBackgroundService.instance.onSeekRequested = (target) async {
       final activePlayer = player;
       if (activePlayer == null) {
@@ -717,6 +791,7 @@ class _MusicScreenState extends State<MusicScreen>
     unawaited(_load());
     miniSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _syncMiniPlayerFromState();
+      _logPlaybackHealthIfNeeded();
       // Keep the saved position fresh so "Continue Listening" resumes close
       // to where playback actually stopped.
       if (playing && ++_sessionSaveTick % 10 == 0) {
@@ -732,6 +807,7 @@ class _MusicScreenState extends State<MusicScreen>
     AudioBackgroundService.instance.onStopRequested = null;
     AudioBackgroundService.instance.onSkipNextRequested = null;
     AudioBackgroundService.instance.onSkipPreviousRequested = null;
+    AudioBackgroundService.instance.onPlayMediaIdRequested = null;
     AudioBackgroundService.instance.onSeekRequested = null;
     WidgetsBinding.instance.removeObserver(this);
     query.removeListener(_onSearchChanged);
@@ -750,6 +826,7 @@ class _MusicScreenState extends State<MusicScreen>
     }
     sleepTimer?.cancel();
     miniSyncTimer?.cancel();
+    DeviceConnection.instance.setMediaActive('music', false);
     unawaited(_savePlaybackSession());
     unawaited(_persistUiState());
     _syncMiniPlayerFromState(showMini: activeQueue.isNotEmpty);
@@ -758,13 +835,25 @@ class _MusicScreenState extends State<MusicScreen>
   }
 
   void _syncMiniPlayerFromState({bool showMini = false}) {
+    final queueTracks = activeQueue.map((item) => item.track).toList();
+    final queueItems = queueTracks.map(_mediaItemForTrack).toList();
+    final libraryItems = librarySongs
+        .take(250)
+        .map(_mediaItemForTrack)
+        .toList();
+    AudioBackgroundService.instance.updateBrowseCatalog(
+      queueItems: queueItems,
+      libraryItems: libraryItems,
+      queueIndex: activeQueueIndex,
+    );
+
     final activePlayer = player;
     if (activePlayer == null) {
       return;
     }
     MusicMiniPlayerService.instance.syncFromMusicScreen(
       player: activePlayer,
-      queue: activeQueue.map((item) => item.track).toList(),
+      queue: queueTracks,
       queueIndex: activeQueueIndex,
       librarySongs: librarySongs,
       playing: playing,
@@ -777,6 +866,42 @@ class _MusicScreenState extends State<MusicScreen>
       MusicMiniPlayerService.instance.showMini();
     } else {
       MusicMiniPlayerService.instance.hideMini();
+    }
+  }
+
+  MediaItem _mediaItemForTrack(MusicTrack track) {
+    return MediaItem(
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      duration: track.durationSeconds > 0
+          ? Duration(seconds: track.durationSeconds)
+          : null,
+      artUri: _coverArtUrl(track) == null
+          ? null
+          : Uri.tryParse(_coverArtUrl(track)!),
+      playable: true,
+    );
+  }
+
+  Future<void> _playFromAndroidAutoMediaId(String mediaId) async {
+    _logPlaybackAnalytics(
+      'music.android_auto.play_media_id',
+      details: {'mediaId': mediaId},
+    );
+    final queueTracks = activeQueue.map((item) => item.track).toList();
+    final queueIndex = queueTracks.indexWhere((track) => track.id == mediaId);
+    if (queueIndex >= 0) {
+      await _playFromList(queueTracks, queueIndex);
+      return;
+    }
+    final libraryIndex = librarySongs.indexWhere(
+      (track) => track.id == mediaId,
+    );
+    if (libraryIndex >= 0) {
+      await _playFromList(librarySongs, libraryIndex);
+      return;
     }
   }
 
@@ -793,14 +918,35 @@ class _MusicScreenState extends State<MusicScreen>
       await session.configure(const AudioSessionConfiguration.music());
       sessionSubs.add(
         session.interruptionEventStream.listen((event) {
+          _logPlaybackAnalytics(
+            'music.audio_session.interruption',
+            details: {'begin': event.begin, 'type': event.type.name},
+          );
           if (event.begin && event.type == AudioInterruptionType.pause) {
-            unawaited(_pausePlayback());
+            _pausedByInterruption = true;
+            AppLog.warn(
+              LogCategory.playback,
+              'Music playback paused due to audio interruption.',
+              details: {'profileId': widget.profileId, 'type': event.type.name},
+            );
+            unawaited(_pausePlayback(reason: 'audio_interruption'));
+          } else if (!event.begin &&
+              _pausedByInterruption &&
+              activeTrack != null) {
+            _pausedByInterruption = false;
+            unawaited(_resumeAfterInterruption());
           }
         }),
       );
       sessionSubs.add(
         session.becomingNoisyEventStream.listen((_) {
-          unawaited(_pausePlayback());
+          AppLog.warn(
+            LogCategory.playback,
+            'Music playback paused due to becoming-noisy event.',
+            details: {'profileId': widget.profileId},
+          );
+          _logPlaybackAnalytics('music.audio_session.becoming_noisy');
+          unawaited(_pausePlayback(reason: 'becoming_noisy'));
         }),
       );
     } catch (_) {}
@@ -831,7 +977,7 @@ class _MusicScreenState extends State<MusicScreen>
               playing: playing,
               position: position,
               duration: duration,
-              buffering: trackLoading,
+              buffering: trackLoading || playbackBuffering,
             );
           }
         }),
@@ -844,7 +990,7 @@ class _MusicScreenState extends State<MusicScreen>
               playing: playing,
               position: position,
               duration: duration,
-              buffering: trackLoading,
+              buffering: trackLoading || playbackBuffering,
             );
           }
         }),
@@ -853,18 +999,87 @@ class _MusicScreenState extends State<MusicScreen>
         created.stream.playing.listen((value) {
           if (mounted) {
             setState(() => playing = value);
+            DeviceConnection.instance.setMediaActive('music', value);
             if (value) {
               vinylController?.repeat();
             } else {
               vinylController?.stop();
             }
+            _logPlaybackAnalytics(
+              'music.playback.playing_changed',
+              details: {'playing': value},
+            );
             AudioBackgroundService.instance.updatePlayback(
               playing: playing,
               position: position,
               duration: duration,
-              buffering: trackLoading,
+              buffering: trackLoading || playbackBuffering,
             );
           }
+        }),
+      );
+      subs.add(
+        created.stream.buffering.listen((value) {
+          if (!mounted) {
+            return;
+          }
+          setState(() => playbackBuffering = value);
+          _logPlaybackAnalytics(
+            value
+                ? 'music.playback.buffering_start'
+                : 'music.playback.buffering_end',
+          );
+          if (value) {
+            AppLog.warn(
+              LogCategory.playback,
+              'Music playback entered buffering state.',
+              details: {
+                'profileId': widget.profileId,
+                'positionMs': position.inMilliseconds,
+                'durationMs': duration.inMilliseconds,
+              },
+            );
+          }
+          AudioBackgroundService.instance.updatePlayback(
+            playing: playing,
+            position: position,
+            duration: duration,
+            buffering: trackLoading || playbackBuffering,
+          );
+        }),
+      );
+      subs.add(
+        created.stream.error.listen((message) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            playbackError = 'Music playback failed: $message';
+            playing = false;
+            playbackBuffering = false;
+            trackLoading = false;
+          });
+          DeviceConnection.instance.setMediaActive('music', false);
+          AppLog.error(
+            LogCategory.playback,
+            'Music playback stream error',
+            error: message,
+            details: {
+              'profileId': widget.profileId,
+              'positionMs': position.inMilliseconds,
+              'durationMs': duration.inMilliseconds,
+            },
+          );
+          _logPlaybackAnalytics(
+            'music.playback.error',
+            details: {'error': message.toString()},
+          );
+          AudioBackgroundService.instance.updatePlayback(
+            playing: false,
+            position: position,
+            duration: duration,
+            buffering: false,
+          );
         }),
       );
       subs.add(
@@ -877,6 +1092,7 @@ class _MusicScreenState extends State<MusicScreen>
       subs.add(
         created.stream.completed.listen((done) {
           if (done) {
+            _logPlaybackAnalytics('music.playback.completed');
             unawaited(_handleTrackCompleted());
           }
         }),
@@ -1576,10 +1792,15 @@ class _MusicScreenState extends State<MusicScreen>
     if (mounted) {
       setState(() {
         trackLoading = true;
+        playbackBuffering = false;
         playbackError = '';
       });
     }
     final activePlayer = await _ensurePlayer();
+    _logPlaybackAnalytics(
+      'music.playback.start_requested',
+      details: {'trackId': track.id},
+    );
     try {
       final resumeAt = startAt != null && startAt > const Duration(seconds: 1)
           ? startAt
@@ -1592,10 +1813,24 @@ class _MusicScreenState extends State<MusicScreen>
       if (mounted) {
         setState(() {
           trackLoading = false;
+          playbackBuffering = false;
           playbackError =
               'Playback failed for this track. It may be unavailable or unsupported.';
         });
       }
+      AppLog.warn(
+        LogCategory.playback,
+        'Music track failed to start.',
+        details: {
+          'profileId': widget.profileId,
+          'trackId': track.id,
+          'title': track.title,
+        },
+      );
+      _logPlaybackAnalytics(
+        'music.playback.start_failed',
+        details: {'trackId': track.id},
+      );
       return;
     }
     await music.upsertRecentlyPlayed(widget.profileId, track);
@@ -1625,10 +1860,16 @@ class _MusicScreenState extends State<MusicScreen>
         stableShuffleOrder = [];
       }
       trackLoading = false;
+      playbackBuffering = false;
       playing = true;
       nowPlayingPane = _NowPlayingPane.vinyl;
       status = 'Now playing ${track.title}';
     });
+    DeviceConnection.instance.setMediaActive('music', true);
+    _logPlaybackAnalytics(
+      'music.playback.started',
+      details: {'trackId': track.id},
+    );
     _syncMiniPlayerFromState();
     AudioBackgroundService.instance.updateNowPlaying(
       id: track.id,
@@ -1644,7 +1885,7 @@ class _MusicScreenState extends State<MusicScreen>
       playing: true,
       position: position,
       duration: duration,
-      buffering: false,
+      buffering: trackLoading || playbackBuffering,
     );
     unawaited(
       widgetService.update(
@@ -2076,6 +2317,8 @@ class _MusicScreenState extends State<MusicScreen>
         await activePlayer.seek(Duration.zero);
       } catch (_) {}
     }
+    DeviceConnection.instance.setMediaActive('music', false);
+    _logPlaybackAnalytics('music.playback.stopped');
     if (!mounted) {
       return;
     }
@@ -2086,6 +2329,7 @@ class _MusicScreenState extends State<MusicScreen>
       activeQueueIndex = 0;
       activeSharedQueueId = '';
       playing = false;
+      playbackBuffering = false;
       status = 'Playback stopped.';
     });
     _syncMiniPlayerFromState();
@@ -4016,12 +4260,14 @@ class _MusicScreenState extends State<MusicScreen>
     }
     if (playing) {
       await activePlayer.pause();
+      DeviceConnection.instance.setMediaActive('music', false);
+      _logPlaybackAnalytics('music.playback.paused');
       unawaited(_savePlaybackSession());
       AudioBackgroundService.instance.updatePlayback(
         playing: false,
         position: position,
         duration: duration,
-        buffering: false,
+        buffering: trackLoading || playbackBuffering,
       );
       unawaited(_announceAction('Playback paused.'));
       final track = activeTrack;
@@ -4036,11 +4282,13 @@ class _MusicScreenState extends State<MusicScreen>
       }
     } else {
       await activePlayer.play();
+      DeviceConnection.instance.setMediaActive('music', true);
+      _logPlaybackAnalytics('music.playback.resumed');
       AudioBackgroundService.instance.updatePlayback(
         playing: true,
         position: position,
         duration: duration,
-        buffering: false,
+        buffering: trackLoading || playbackBuffering,
       );
       unawaited(_announceAction('Playback resumed.'));
       final track = activeTrack;
@@ -4057,20 +4305,54 @@ class _MusicScreenState extends State<MusicScreen>
     unawaited(_savePlaybackSession());
   }
 
-  Future<void> _pausePlayback() async {
+  Future<void> _pausePlayback({String reason = 'manual'}) async {
     final activePlayer = player;
     if (activePlayer == null) {
       return;
     }
     try {
       await activePlayer.pause();
+      DeviceConnection.instance.setMediaActive('music', false);
+      _logPlaybackAnalytics(
+        'music.playback.paused',
+        details: {'reason': reason},
+      );
       AudioBackgroundService.instance.updatePlayback(
         playing: false,
         position: position,
         duration: duration,
-        buffering: false,
+        buffering: trackLoading || playbackBuffering,
       );
     } catch (_) {}
+  }
+
+  Future<void> _resumeAfterInterruption() async {
+    final activePlayer = player;
+    if (activePlayer == null || activeTrack == null || playing) {
+      return;
+    }
+    try {
+      await activePlayer.play();
+      DeviceConnection.instance.setMediaActive('music', true);
+      _logPlaybackAnalytics(
+        'music.playback.resumed',
+        details: {'reason': 'audio_interruption_end'},
+      );
+      AudioBackgroundService.instance.updatePlayback(
+        playing: true,
+        position: position,
+        duration: duration,
+        buffering: trackLoading || playbackBuffering,
+      );
+    } catch (error, stack) {
+      AppLog.warn(
+        LogCategory.playback,
+        'Music playback did not resume after interruption.',
+        error: error,
+        stackTrace: stack,
+        details: {'profileId': widget.profileId},
+      );
+    }
   }
 
   Future<void> _setVolume(double value) async {

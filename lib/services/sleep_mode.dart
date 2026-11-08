@@ -11,14 +11,12 @@ class SleepMode extends ChangeNotifier {
   static final instance = SleepMode();
   final Future<void> Function()? prepareOverride,
       closeOverride,
-      displayOverride,
-      lockOverride;
+      displayOverride;
   final DateTime Function()? clock;
   SleepMode({
     this.prepareOverride,
     this.closeOverride,
     this.displayOverride,
-    this.lockOverride,
     this.clock,
   });
   DateTime _now() => clock?.call() ?? DateTime.now();
@@ -268,7 +266,6 @@ class SleepMode extends ChangeNotifier {
     notifyListeners();
     Object? closeFailure;
     Object? displayFailure;
-    var lockFallback = false;
     try {
       try {
         await (closeOverride?.call() ?? ViewingSessions.instance.closeAll());
@@ -283,27 +280,16 @@ class SleepMode extends ChangeNotifier {
       try {
         await (displayOverride?.call() ?? _run('DisplaysOff'));
       } catch (error) {
-        try {
-          await (lockOverride?.call() ?? _run('LockScreen'));
-          lockFallback = true;
-        } catch (_) {
-          displayFailure = error;
-        }
+        displayFailure = error;
       }
       if (closeFailure == null && displayFailure == null) {
-        lastTimerAction = lockFallback
-            ? 'Locked fallback'
-            : 'DisplayOff success';
-        message = lockFallback
-            ? 'Viewing finished. App-owned playback windows were closed. Windows display-off was unavailable, so the screen was locked as fallback. Sleep Sounds was left running.'
-            : 'Viewing finished. App-owned playback windows were closed and displays-off was requested. Sleep Sounds was left running.';
+        lastTimerAction = 'DisplayOff success';
+        message =
+            'Viewing finished. App-owned playback windows were closed and displays-off was requested. Sleep Sounds was left running.';
       } else if (closeFailure != null && displayFailure == null) {
-        lastTimerAction = lockFallback
-            ? 'Locked fallback + close partial'
-            : 'DisplayOff success + close partial';
-        message = lockFallback
-            ? 'Viewing timer ended and the screen was locked as fallback, but one or more app-owned playback windows did not close. Close the media window and try again.'
-            : 'Viewing timer ended and displays-off was requested, but one or more app-owned playback windows did not close. Close the media window and try again.';
+        lastTimerAction = 'DisplayOff success + close partial';
+        message =
+            'Viewing timer ended and displays-off was requested, but one or more app-owned playback windows did not close. Close the media window and try again.';
       } else if (closeFailure == null && displayFailure != null) {
         lastTimerAction = 'DisplayOff failed';
         message =

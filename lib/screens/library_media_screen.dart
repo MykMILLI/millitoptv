@@ -13,6 +13,7 @@ import '../library/library_models.dart';
 import '../library/library_file_service.dart';
 import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
+import '../services/profile_sync.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
 
@@ -160,6 +161,7 @@ class _LibraryMediaScreenState extends State<LibraryMediaScreen>
       durationMs: durationMs,
       complete: complete,
     );
+    ProfileSync.schedulePush(widget.profileId);
   }
 
   Future<void> _initialize() async {

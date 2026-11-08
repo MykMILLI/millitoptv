@@ -11,6 +11,7 @@ import '../services/app_log.dart';
 import '../services/device_connection.dart';
 import '../services/global_playlists.dart';
 import '../services/home_preferences.dart';
+import '../services/pip_playback.dart';
 import '../services/profile_sync.dart';
 import '../services/tube_downloads.dart';
 import '../services/tube_library.dart';
@@ -72,6 +73,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
   final subscriptions = <StreamSubscription<dynamic>>[];
   String? downloading;
   final downloadedIds = <String>{};
+  bool handedOffToMiniPlayer = false;
 
   @override
   void initState() {
@@ -504,6 +506,48 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
     }
   }
 
+  Future<void> _goHomeWithMiniPlayer() async {
+    final currentPlayer = player;
+    final currentController = controller;
+    final currentVideo = active;
+    if (currentPlayer == null ||
+        currentController == null ||
+        currentVideo == null) {
+      if (mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+      return;
+    }
+    handedOffToMiniPlayer = true;
+    progressTimer?.cancel();
+    progressTimer = null;
+    _saveProgress(sync: true);
+    for (final sub in subscriptions) {
+      unawaited(sub.cancel());
+    }
+    subscriptions.clear();
+    player = null;
+    controller = null;
+    await PipPlaybackController.instance.minimize(
+      PipPlaybackSession(
+        player: currentPlayer,
+        video: currentController,
+        title: currentVideo.title,
+        subtitle: currentVideo.author,
+        seekable: true,
+        onClose: () async {
+          try {
+            await currentPlayer.dispose();
+          } catch (_) {}
+          DeviceConnection.instance.setMediaActive('youtube', false);
+        },
+      ),
+    );
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+  }
+
   Future<void> _download(TubeVideo video) async {
     if (downloading != null) {
       throw StateError('Wait for the current video download to finish.');
@@ -729,13 +773,15 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
     for (final sub in subscriptions) {
       unawaited(sub.cancel());
     }
-    unawaited(
-      departing?.dispose().catchError((Object e) {
-            debugPrint('Could not dispose YouTube player: $e');
-          }) ??
-          Future.value(),
-    );
-    DeviceConnection.instance.setMediaActive('youtube', false);
+    if (!handedOffToMiniPlayer) {
+      unawaited(
+        departing?.dispose().catchError((Object e) {
+              debugPrint('Could not dispose YouTube player: $e');
+            }) ??
+            Future.value(),
+      );
+      DeviceConnection.instance.setMediaActive('youtube', false);
+    }
     engine.close();
     search.dispose();
     super.dispose();
@@ -1376,7 +1422,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
               ),
               IconButton(
                 tooltip: 'Back to MILLITOPTV',
-                onPressed: () => Navigator.maybePop(context),
+                onPressed: () => unawaited(_goHomeWithMiniPlayer()),
                 icon: const Icon(Icons.close),
               ),
             ],

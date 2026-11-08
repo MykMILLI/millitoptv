@@ -7,6 +7,7 @@ import '../services/podcast_playback.dart';
 import '../services/global_playlists.dart';
 import '../services/podcast_service.dart';
 import '../services/podcast_downloads.dart';
+import '../services/pip_playback.dart';
 import '../theme/millitop_visual_theme.dart';
 import '../widgets/podcast_player_bar.dart';
 
@@ -61,7 +62,9 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
       setState(() {
         downloads = saved;
         favoriteEpisodeKeys = favorites.favorites.values
-            .where((v) => !v.deleted).map((v) => v.item.key).toSet();
+            .where((v) => !v.deleted)
+            .map((v) => v.item.key)
+            .toSet();
       });
       final initial = widget.initialEpisode;
       if (initial != null) {
@@ -284,23 +287,29 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
       final actions = [
         IconButton(
           tooltip: favoriteEpisodeKeys.contains(HubItem.podcast(episode).key)
-              ? 'Remove podcast favorite' : 'Favorite episode',
-          icon: Icon(favoriteEpisodeKeys.contains(HubItem.podcast(episode).key)
-              ? Icons.favorite : Icons.favorite_border),
-          onPressed: () => unawaited(_run(() async {
-            final key = HubItem.podcast(episode).key;
-            final value = !favoriteEpisodeKeys.contains(key);
-            await playback.setFavorite(episode, value);
-            if (mounted) {
-              setState(() {
-                if (value) {
-                  favoriteEpisodeKeys.add(key);
-                } else {
-                  favoriteEpisodeKeys.remove(key);
-                }
-              });
-            }
-          })),
+              ? 'Remove podcast favorite'
+              : 'Favorite episode',
+          icon: Icon(
+            favoriteEpisodeKeys.contains(HubItem.podcast(episode).key)
+                ? Icons.favorite
+                : Icons.favorite_border,
+          ),
+          onPressed: () => unawaited(
+            _run(() async {
+              final key = HubItem.podcast(episode).key;
+              final value = !favoriteEpisodeKeys.contains(key);
+              await playback.setFavorite(episode, value);
+              if (mounted) {
+                setState(() {
+                  if (value) {
+                    favoriteEpisodeKeys.add(key);
+                  } else {
+                    favoriteEpisodeKeys.remove(key);
+                  }
+                });
+              }
+            }),
+          ),
         ),
         IconButton(
           tooltip: 'Add episode to queue',
@@ -471,6 +480,33 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
     ),
   );
 
+  Future<void> _goHomeWithMiniPlayer() async {
+    final current = playback.active;
+    final currentPlayer = playback.player;
+    final currentController = playback.videoController;
+    if (current == null) {
+      if (mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+      return;
+    }
+    if (current.video && currentPlayer != null && currentController != null) {
+      await PipPlaybackController.instance.minimize(
+        PipPlaybackSession(
+          player: currentPlayer,
+          video: currentController,
+          title: current.title,
+          subtitle: current.show.title,
+          seekable: true,
+          onClose: () => playback.stop(),
+        ),
+      );
+    }
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: playback,
@@ -505,6 +541,11 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
               tooltip: 'Refresh podcasts',
               icon: const Icon(Icons.refresh),
               onPressed: _discover,
+            ),
+            IconButton(
+              tooltip: 'Back to MILLITOPTV',
+              icon: const Icon(Icons.close),
+              onPressed: () => unawaited(_goHomeWithMiniPlayer()),
             ),
           ],
         ),

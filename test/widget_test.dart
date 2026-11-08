@@ -22,8 +22,8 @@ void main() {
     expect(find.text('Podcasts'), findsOneWidget);
     expect(find.text('YouTube'), findsOneWidget);
     expect(find.text('VLC player'), findsNothing);
-    expect(find.text('Emby'), findsNothing);
-    expect(find.text('Jellyfin'), findsOneWidget);
+    expect(find.text('Emby'), findsOneWidget);
+    expect(find.text('Jellyfin'), findsNothing);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

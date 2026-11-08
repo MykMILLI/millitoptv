@@ -128,6 +128,11 @@ class HouseholdBillingController extends ChangeNotifier {
         historyLoaded = false;
         historyComplete = false;
       }
+    } else if (failure is FormatException || failure is TypeError) {
+      error =
+          'Account response format is unsupported. Update the dashboard server and retry.';
+      snapshot = null;
+      payments.clear();
     } else {
       error =
           'Account response could not be verified. No partial balance is shown.';

@@ -133,8 +133,9 @@ class TubeStore {
           continue;
         }
         final date = stamp(merged[entry.key]);
-        if (date == null || incoming.isAfter(date))
+        if (date == null || incoming.isAfter(date)) {
           merged[entry.key] = entry.value;
+        }
       }
       return merged;
     }

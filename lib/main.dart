@@ -1018,6 +1018,19 @@ class _LauncherState extends State<Launcher>
     } catch (_) {}
   }
 
+  Future<void> _refreshHomeFromPullDown() async {
+    final connection = DeviceConnection.instance;
+    await connection.checkNow();
+    await AppUpdates.instance.check();
+    await _refreshServiceAccess();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      now = DateTime.now();
+    });
+  }
+
   String get time {
     final hour = now.hour % 12 == 0 ? 12 : now.hour % 12;
     final minute = now.minute.toString().padLeft(2, '0');
@@ -2343,6 +2356,67 @@ class _LauncherState extends State<Launcher>
     }
   }
 
+  Widget _pagedScrollBody({required bool alwaysScrollable}) {
+    return SingleChildScrollView(
+      key: ValueKey(page),
+      physics: alwaysScrollable ? const AlwaysScrollableScrollPhysics() : null,
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Stack(
+        children: [
+          IgnorePointer(
+            ignoring: serviceLocked && page != 3,
+            child: switch (page) {
+              1 => const SizedBox(height: 400),
+              2 => dvr(),
+              3 => account(),
+              4 => updates(),
+              _ => home(),
+            },
+          ),
+          if (serviceLocked && page != 3)
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: const BoxDecoration(color: Color(0xAA000000)),
+                child: Center(
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.lock_outline, size: 40),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'Service locked',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            serviceLockReason.isEmpty
+                                ? 'Open Account to restore access.'
+                                : serviceLockReason,
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 10),
+                          FilledButton(
+                            onPressed: () => setState(() => page = 3),
+                            child: const Text('Open Account'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 1000;
@@ -2391,83 +2465,14 @@ class _LauncherState extends State<Launcher>
                                   profileId: widget.profileId,
                                   embedded: true,
                                 )
-                              : SingleChildScrollView(
-                                  key: ValueKey(page),
-                                  padding: const EdgeInsets.only(bottom: 20),
-                                  child: Stack(
-                                    children: [
-                                      IgnorePointer(
-                                        ignoring: serviceLocked && page != 3,
-                                        child: switch (page) {
-                                          1 => const SizedBox(height: 400),
-                                          2 => dvr(),
-                                          3 => account(),
-                                          4 => updates(),
-                                          _ => home(),
-                                        },
-                                      ),
-                                      if (serviceLocked && page != 3)
-                                        Positioned.fill(
-                                          child: DecoratedBox(
-                                            decoration: const BoxDecoration(
-                                              color: Color(0xAA000000),
-                                            ),
-                                            child: Center(
-                                              child: Card(
-                                                child: Padding(
-                                                  padding: const EdgeInsets.all(
-                                                    18,
-                                                  ),
-                                                  child: Column(
-                                                    mainAxisSize:
-                                                        MainAxisSize.min,
-                                                    children: [
-                                                      const Icon(
-                                                        Icons.lock_outline,
-                                                        size: 40,
-                                                      ),
-                                                      const SizedBox(
-                                                        height: 10,
-                                                      ),
-                                                      const Text(
-                                                        'Service locked',
-                                                        style: TextStyle(
-                                                          fontSize: 24,
-                                                          fontWeight:
-                                                              FontWeight.w700,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 8),
-                                                      Text(
-                                                        serviceLockReason
-                                                                .isEmpty
-                                                            ? 'Open Account to restore access.'
-                                                            : serviceLockReason,
-                                                        textAlign:
-                                                            TextAlign.center,
-                                                      ),
-                                                      const SizedBox(
-                                                        height: 10,
-                                                      ),
-                                                      FilledButton(
-                                                        onPressed: () =>
-                                                            setState(
-                                                              () => page = 3,
-                                                            ),
-                                                        child: const Text(
-                                                          'Open Account',
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                    ],
+                              : page == 0
+                              ? RefreshIndicator(
+                                  onRefresh: _refreshHomeFromPullDown,
+                                  child: _pagedScrollBody(
+                                    alwaysScrollable: true,
                                   ),
-                                ),
+                                )
+                              : _pagedScrollBody(alwaysScrollable: false),
                         ),
                       ),
                       AnimatedBuilder(

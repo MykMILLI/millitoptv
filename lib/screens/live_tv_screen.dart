@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import '../services/app_log.dart';
 import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
 import '../services/global_playlists.dart';
@@ -102,10 +103,13 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   DateTime? lastProgressAt;
   DateTime? lastReconnectAt;
   DateTime? becameNotPlayingAt;
+  DateTime? bufferingStartedAtUtc;
   Duration lastPosition = Duration.zero;
   Duration lastDuration = Duration.zero;
   bool isPlaying = false;
   int reconnectAttempts = 0;
+  int bufferingEpisodes = 0;
+  int bufferingSessionMs = 0;
   Set<String> favorites = {};
   List<String> history = [];
   LiveTvEpg? epg;
@@ -495,6 +499,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
 
   @override
   void dispose() {
+    _finishBufferingTelemetry(aborted: true);
     dvrStatusTimer?.cancel();
     watchdog?.cancel();
     reconnectMessageClear?.cancel();
@@ -522,6 +527,15 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     if (mounted) {
       setState(update);
     }
+  }
+
+  bool get _isTextInputFocused {
+    final focused = FocusManager.instance.primaryFocus;
+    final context = focused?.context;
+    if (context == null) {
+      return false;
+    }
+    return context.widget is EditableText;
   }
 
   Future<Player> _createConfiguredPlayer() async {
@@ -1265,6 +1279,15 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
       }),
     );
     subscriptions.add(
+      created.stream.buffering.listen((value) {
+        if (value) {
+          unawaited(_emitBufferingStartTelemetry());
+        } else {
+          _finishBufferingTelemetry();
+        }
+      }),
+    );
+    subscriptions.add(
       created.stream.error.listen((_) {
         _setState(() {
           status = 'Stream interrupted. Recovering...';
@@ -1287,7 +1310,68 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     });
   }
 
+  Future<void> _emitBufferingStartTelemetry() async {
+    if (bufferingStartedAtUtc != null) {
+      return;
+    }
+    final channel = selected;
+    bufferingStartedAtUtc = DateTime.now().toUtc();
+    bufferingEpisodes += 1;
+    AppLog.event(
+      'live_tv.buffer.start',
+      props: {
+        'title': channel?.title ?? 'Unknown channel',
+        'sourceId': source?.id ?? '',
+        'channelId': channel == null ? '' : _channelKey(channel),
+        'positionMs': lastPosition.inMilliseconds,
+        'reconnectAttempts': reconnectAttempts,
+      },
+    );
+  }
+
+  void _finishBufferingTelemetry({bool aborted = false}) {
+    final started = bufferingStartedAtUtc;
+    if (started == null) {
+      return;
+    }
+    bufferingStartedAtUtc = null;
+    final channel = selected;
+    final bufferedMs = DateTime.now()
+        .toUtc()
+        .difference(started)
+        .inMilliseconds;
+    if (bufferedMs > 0) {
+      bufferingSessionMs += bufferedMs;
+    }
+    AppLog.event(
+      'live_tv.buffer.end',
+      props: {
+        'title': channel?.title ?? 'Unknown channel',
+        'sourceId': source?.id ?? '',
+        'channelId': channel == null ? '' : _channelKey(channel),
+        'positionMs': lastPosition.inMilliseconds,
+        'bufferedMs': bufferedMs,
+        'aborted': aborted,
+        'reconnectAttempts': reconnectAttempts,
+      },
+    );
+    if (bufferedMs >= 4000) {
+      AppLog.warn(
+        LogCategory.playback,
+        'Live TV buffering spike',
+        details: {
+          'title': channel?.title ?? 'Unknown channel',
+          'bufferedMs': bufferedMs,
+          'sourceId': source?.id ?? '',
+          'channelId': channel == null ? '' : _channelKey(channel),
+          'positionMs': lastPosition.inMilliseconds,
+        },
+      );
+    }
+  }
+
   Future<void> _disposePlayer() async {
+    _finishBufferingTelemetry(aborted: true);
     watchdog?.cancel();
     watchdog = null;
     reconnectMessageClear?.cancel();
@@ -1997,6 +2081,20 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         becameNotPlayingAt != null &&
         now.difference(becameNotPlayingAt!) > const Duration(seconds: 12);
     if (stalled || notPlaying) {
+      final channelId = _channelKey(channel);
+      AppLog.event(
+        'live_tv.buffer.stall',
+        props: {
+          'title': channel.title,
+          'sourceId': source?.id ?? '',
+          'channelId': channelId,
+          'progressAgeMs': progressAge.inMilliseconds,
+          'isPlaying': isPlaying,
+          'durationMs': lastDuration.inMilliseconds,
+          'positionMs': lastPosition.inMilliseconds,
+          'reconnectAttempts': reconnectAttempts,
+        },
+      );
       await _reconnect(
         stalled
             ? 'Playback stalled for ${progressAge.inSeconds}s.'
@@ -2755,12 +2853,21 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             unawaited(_handleBackIntent());
           },
           const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_togglePlayPause());
           },
           const SingleActivator(LogicalKeyboardKey.space): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_togglePlayPause());
           },
           const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             if (fullScreenVideo) {
               unawaited(_zapChannel(-1, secondary: splitScreen));
             } else {
@@ -2768,6 +2875,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             }
           },
           const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             if (fullScreenVideo) {
               unawaited(_zapChannel(1, secondary: splitScreen));
             } else {
@@ -2775,12 +2885,21 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             }
           },
           const SingleActivator(LogicalKeyboardKey.pageUp): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             _focusChannelByPage(-1);
           },
           const SingleActivator(LogicalKeyboardKey.pageDown): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             _focusChannelByPage(1);
           },
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(
               _seekRelative(
                 const Duration(seconds: -30),
@@ -2789,6 +2908,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             );
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(
               _seekRelative(
                 const Duration(seconds: 30),
@@ -2797,42 +2919,78 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
             );
           },
           const SingleActivator(LogicalKeyboardKey.enter): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             final channel = _focusedChannel;
             if (channel != null) {
               unawaited(_openFocusedPane(channel));
             }
           },
           const SingleActivator(LogicalKeyboardKey.select): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             final channel = _focusedChannel;
             if (channel != null) {
               unawaited(_openFocusedPane(channel));
             }
           },
           const SingleActivator(LogicalKeyboardKey.keyF): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             final channel = _focusedChannel;
             if (channel != null) {
               unawaited(_toggleFavorite(channel));
             }
           },
-          const SingleActivator(LogicalKeyboardKey.keyG): _showEpgGuide,
+          const SingleActivator(LogicalKeyboardKey.keyG): () {
+            if (_isTextInputFocused) {
+              return;
+            }
+            _showEpgGuide();
+          },
           const SingleActivator(LogicalKeyboardKey.keyM): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_openFocusedChannelMenu());
           },
           const SingleActivator(LogicalKeyboardKey.slash): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_openSearchKeyboard());
           },
           const SingleActivator(LogicalKeyboardKey.keyV): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_openVoiceSearch());
           },
           const SingleActivator(LogicalKeyboardKey.keyR): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_scheduleDvrFromGuide());
           },
           const SingleActivator(LogicalKeyboardKey.keyS): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             unawaited(_toggleSplitScreen());
           },
-          const SingleActivator(LogicalKeyboardKey.keyL):
-              _toggleFullScreenVideo,
+          const SingleActivator(LogicalKeyboardKey.keyL): () {
+            if (_isTextInputFocused) {
+              return;
+            }
+            _toggleFullScreenVideo();
+          },
           const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+            if (_isTextInputFocused) {
+              return;
+            }
             screenFocusNode.requestFocus();
             unawaited(_openSearchKeyboard());
           },

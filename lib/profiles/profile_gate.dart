@@ -21,12 +21,16 @@ class ProfileGate extends StatefulWidget {
   State<ProfileGate> createState() => _ProfileGateState();
 }
 
-class _ProfileGateState extends State<ProfileGate> {
+class _ProfileGateState extends State<ProfileGate> with WidgetsBindingObserver {
+  static const int _maxPulledAvatarBytes = 32 * 1024 * 1024;
+  static const Duration _householdRefreshInterval = Duration(seconds: 20);
   final liveTvControl = LiveTvControlService();
-  final address = TextEditingController(text: 'http://192.168.1.36:8185');
+  final address = TextEditingController(text: 'https://tvadmin.millitop.net');
   final code = TextEditingController();
 
   late Future<void> initialization;
+  Timer? _householdSyncTimer;
+  bool _householdSyncRunning = false;
   HouseholdProfile? selected;
   List<HouseholdProfile> profiles = [];
   String? error;
@@ -39,14 +43,24 @@ class _ProfileGateState extends State<ProfileGate> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     initialization = load();
   }
 
   @override
   void dispose() {
+    _householdSyncTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     address.dispose();
     code.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshHouseholdProfiles());
+    }
   }
 
   Future<void> load() async {
@@ -64,8 +78,11 @@ class _ProfileGateState extends State<ProfileGate> {
       if (connection.isEnrolled && !connection.isSuspended) {
         await connection.checkNow();
       }
-      await _pullHouseholdProfiles();
+      final remoteAvatarState = await _pullHouseholdProfiles();
       final values = await HouseholdStore.instance.profiles();
+      if (connection.isConnected) {
+        await _backfillMissingRemoteAvatars(values, remoteAvatarState);
+      }
 
       if (mounted) {
         setState(() {
@@ -86,14 +103,40 @@ class _ProfileGateState extends State<ProfileGate> {
           setState(() => profiles = refreshed);
         }
       }
+      _restartHouseholdSyncLoop();
     } catch (exception) {
       if (mounted) setState(() => error = exception.toString());
     }
   }
 
-  Future<void> _pullHouseholdProfiles() async {
-    if (!connection.isConnected || connection.connectionKey.isEmpty) {
+  void _restartHouseholdSyncLoop() {
+    _householdSyncTimer?.cancel();
+    _householdSyncTimer = Timer.periodic(_householdRefreshInterval, (_) {
+      unawaited(_refreshHouseholdProfiles());
+    });
+  }
+
+  Future<void> _refreshHouseholdProfiles() async {
+    if (_householdSyncRunning || !connection.isConnected || !mounted) {
       return;
+    }
+    _householdSyncRunning = true;
+    try {
+      final remoteAvatarState = await _pullHouseholdProfiles();
+      final refreshed = await HouseholdStore.instance.profiles();
+      await _backfillMissingRemoteAvatars(refreshed, remoteAvatarState);
+      if (mounted) {
+        setState(() => profiles = refreshed);
+      }
+    } finally {
+      _householdSyncRunning = false;
+    }
+  }
+
+  Future<Map<int, bool>> _pullHouseholdProfiles() async {
+    final remoteAvatarState = <int, bool>{};
+    if (!connection.isConnected || connection.connectionKey.isEmpty) {
+      return remoteAvatarState;
     }
     try {
       final payload = await liveTvControl.pullHouseholdProfiles(
@@ -101,7 +144,7 @@ class _ProfileGateState extends State<ProfileGate> {
       );
       final rawProfiles = payload['profiles'];
       if (rawProfiles is! List) {
-        return;
+        return remoteAvatarState;
       }
 
       for (final entry in rawProfiles) {
@@ -115,6 +158,7 @@ class _ProfileGateState extends State<ProfileGate> {
           continue;
         }
         final deleted = value['deleted'] == true;
+        remoteAvatarState[profileId] = false;
         if (deleted) {
           final existing = await HouseholdStore.instance.profileById(profileId);
           if (existing != null) {
@@ -131,7 +175,8 @@ class _ProfileGateState extends State<ProfileGate> {
         final avatarBase64 = value['avatarBase64']?.toString().trim() ?? '';
         if (avatarBase64.isNotEmpty) {
           final bytes = base64Decode(avatarBase64);
-          if (bytes.length <= 262144) {
+          if (bytes.length <= _maxPulledAvatarBytes) {
+            remoteAvatarState[profileId] = true;
             final avatarExtension =
                 value['avatarExtension']?.toString().trim() ?? '.png';
             await HouseholdStore.instance.setAvatarBytes(
@@ -145,9 +190,36 @@ class _ProfileGateState extends State<ProfileGate> {
       if (mounted) {
         setState(() => syncError = null);
       }
+      return remoteAvatarState;
     } catch (exception) {
       if (mounted) {
         setState(() => syncError = 'Household sync failed: $exception');
+      }
+      return remoteAvatarState;
+    }
+  }
+
+  Future<void> _backfillMissingRemoteAvatars(
+    List<HouseholdProfile> localProfiles,
+    Map<int, bool> remoteAvatarState,
+  ) async {
+    if (!connection.isConnected || connection.connectionKey.isEmpty) {
+      return;
+    }
+    for (final profile in localProfiles) {
+      final avatarPath = profile.avatarPath?.trim() ?? '';
+      if (avatarPath.isEmpty || remoteAvatarState[profile.id] == true) {
+        continue;
+      }
+      try {
+        await _syncRemoteProfile(profile.id);
+      } catch (exception) {
+        if (mounted) {
+          setState(
+            () => syncError =
+                'Household sync failed while backfilling avatar: $exception',
+          );
+        }
       }
     }
   }
@@ -355,6 +427,8 @@ class _ProfileGateState extends State<ProfileGate> {
   }
 
   Future<void> disconnect() async {
+    _householdSyncTimer?.cancel();
+    _householdSyncTimer = null;
     await connection.disconnect();
     if (mounted) {
       setState(() {

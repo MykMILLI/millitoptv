@@ -313,7 +313,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('media-home')), findsOneWidget);
-    expect(find.text('Continue Watching'), findsOneWidget);
+    expect(find.text('Continue Watching Movies'), findsOneWidget);
     expect(find.text('Next Up'), findsOneWidget);
     expect(find.text('Severance'), findsOneWidget);
     await tester.scrollUntilVisible(

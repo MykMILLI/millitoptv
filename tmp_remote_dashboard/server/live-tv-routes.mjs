@@ -7,6 +7,7 @@ const configPrefix = 'live_tv_config:';
 const playbackPrefix = 'live_tv_playback:';
 const householdProfilesKey = 'live_tv_profiles:household';
 const commandPrefix = '[LIVE_TV_COMMAND]';
+const maxAvatarBytes = 32 * 1024 * 1024;
 
 function digest(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -322,7 +323,7 @@ function parseHouseholdProfileUpdate(value) {
     } catch (_) {
       throw new Error('Profile picture format is invalid.');
     }
-    if (!bytes.length || bytes.length > 262144) {
+    if (!bytes.length || bytes.length > maxAvatarBytes) {
       throw new Error('Profile picture is too large.');
     }
     avatarExtension = avatarExtensionRaw || 'png';
@@ -843,13 +844,22 @@ export function registerLiveTvRoutes(app, pool, deviceLimit) {
       }
       if (action === 'upsert') {
         const update = parseHouseholdProfileUpdate(req.body ?? {});
+        const existingProfile = current.find(entry => entry.id === update.profileId) ?? null;
+        const avatarProvided = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'avatarBase64');
+        const avatarExtensionProvided = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'avatarExtension');
+        const avatarBase64 = avatarProvided
+          ? update.avatarBase64
+          : (existingProfile?.avatarBase64 ?? null);
+        const avatarExtension = avatarBase64
+          ? (avatarExtensionProvided ? update.avatarExtension : (existingProfile?.avatarExtension ?? null))
+          : null;
         const values = current.filter(entry => entry.id !== update.profileId);
         values.push({
           id: update.profileId,
           name: update.name,
           deleted: false,
-          avatarBase64: update.avatarBase64,
-          avatarExtension: update.avatarExtension,
+          avatarBase64,
+          avatarExtension,
           updatedAtUtc: new Date().toISOString()
         });
         values.sort((a, b) => a.id - b.id);

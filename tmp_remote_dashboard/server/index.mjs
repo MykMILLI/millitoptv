@@ -90,6 +90,7 @@ app.use(helmet({
 app.use('/api/admin/content/articles', express.json({ limit: '256kb' }));
 app.use('/api/device/profile-sync/push', express.json({ limit: '1mb' }));
 app.use('/api/device/live-tv/config', express.json({ limit: '1mb' }));
+app.use('/api/device/household/profiles', express.json({ limit: '64mb' }));
 app.use('/api/device/telemetry', express.json({ limit: '1mb' }));
 app.use(express.json({ limit: '32kb' }));
 

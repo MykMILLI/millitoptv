@@ -23,9 +23,9 @@ export default function StandaloneDownloadsPanel({releases=[]}){
   <p>Download first, install on the intended device, then pair it to your household. Downloads do not register, enable or assign an update.</p>
   <h4>Latest registered Windows installer</h4>
   {latest?<article className="device-card"><h4>{latest.title}</h4><DownloadActions item={latest}/></article>:<p>No registered Windows installer is available.</p>}
-  <h4>Android sideload builds, previews and corresponding source</h4>
-  <p>Android APKs use the development signing key and are intended for sideload testing, not store distribution. Source archives include the GPLv3 license and build instructions. These downloads are not assigned as automatic updates.</p>
-  {previews.downloads.map(item=><article className="device-card" key={item.id}><h4>{item.title}</h4><p>{item.category==='source'?'Corresponding source':'Development/sideload build'} · {item.version}</p><DownloadActions item={item}/></article>)}
-  <p>Windows ZIP: extract the entire folder before running millitop_tv.exe; keep its DLLs and data folder together. This is not an installer, and a new PC may need runtime prerequisites. Android APK: ARM64 development package, not a production-signed release. Updating an existing preview requires a matching signing key; do not uninstall it to bypass an update error.</p>
+  <h4>Android packages and corresponding source</h4>
+  <p>Source archives include the GPLv3 license and build instructions. Downloads do not register, enable or assign updates.</p>
+  {previews.downloads.map(item=><article className="device-card" key={item.id}><h4>{item.title}</h4><p>{item.category==='source'?'Corresponding source':'Android package'} · {item.version}</p><DownloadActions item={item}/></article>)}
+  <p>Windows ZIP: extract the entire folder before running millitop_tv.exe; keep its DLLs and data folder together. This is not an installer, and a new PC may need runtime prerequisites. Android packages must be signed with the same key across releases to preserve upgrade compatibility.</p>
  </section>;
 }

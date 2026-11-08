@@ -173,8 +173,9 @@ class _HomeAppTilesState extends State<HomeAppTiles>
       final library = await PodcastStore().load(profile);
       if (!mounted ||
           request != podcastGeneration ||
-          widget.profileId != profile)
+          widget.profileId != profile) {
         return;
+      }
       _applyPodcastLibrary(library);
     } catch (e) {
       debugPrint('Podcast continue listening could not load: $e');

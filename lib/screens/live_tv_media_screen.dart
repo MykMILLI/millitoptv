@@ -425,6 +425,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
 
+  bool get _isTextInputFocused {
+    final focused = FocusManager.instance.primaryFocus;
+    final context = focused?.context;
+    if (context == null) {
+      return false;
+    }
+    return context.widget is EditableText;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2115,6 +2124,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (candidates.isEmpty) {
       return;
     }
+    final movieCandidates = candidates.where((item) => !item.series).toList();
+    if (movieCandidates.length > 1) {
+      final shuffled = [...movieCandidates]..shuffle();
+      final pick = shuffled.first;
+      setState(() => focusedMediaId = pick.id);
+      await _openMovie(pick, queue: shuffled, queueIndex: 0);
+      return;
+    }
     final pick = candidates[Random().nextInt(candidates.length)];
     setState(() => focusedMediaId = pick.id);
     if (pick.series) {
@@ -3131,7 +3148,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
   }
 
-  Future<void> _openMovie(LiveTvMediaItem item) async {
+  Future<void> _openMovie(
+    LiveTvMediaItem item, {
+    List<LiveTvMediaItem>? queue,
+    int queueIndex = 0,
+  }) async {
     await _saveHistory(item, subtitle: item.group);
     final libraryItem = _libraryItemFromMedia(item);
     if (libraryItem != null) {
@@ -3141,6 +3162,30 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return;
     }
     try {
+      final movieQueue = queue == null
+          ? const <_MovieQueueEntry>[]
+          : queue
+                .where((entry) => !entry.series)
+                .map(
+                  (entry) => _MovieQueueEntry(
+                    title: entry.title,
+                    subtitle: entry.group,
+                    streamUrl: entry.streamUrl,
+                    streamUrlCandidates: _playbackUrlCandidates(
+                      entry.streamUrl,
+                    ),
+                    posterUrl: entry.posterUrl,
+                    description: entry.description,
+                    year: entry.year,
+                    genres: entry.genres,
+                    releaseDate: entry.releaseDate,
+                    addedAt: entry.addedAt,
+                  ),
+                )
+                .toList();
+      final normalizedQueueIndex = movieQueue.isEmpty
+          ? 0
+          : queueIndex.clamp(0, movieQueue.length - 1).toInt();
       await Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
           builder: (_) => _MediaPlayerScreen(
@@ -3153,6 +3198,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
+            movieQueue: movieQueue,
+            movieQueueIndex: normalizedQueueIndex,
           ),
         ),
       );
@@ -3197,6 +3244,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               streamUrlCandidates: _playbackUrlCandidates(item.streamUrl),
               posterUrl: item.posterUrl,
               playbackPerformance: playbackPerformance,
+              seriesEpisodePlayback: true,
+              seriesEpisodes: [
+                _SeriesEpisodeEntry(
+                  id: item.id,
+                  title: item.title,
+                  streamUrl: item.streamUrl,
+                  season: 1,
+                  episode: 1,
+                  posterUrl: item.posterUrl,
+                  description: item.description,
+                ),
+              ],
+              seriesEpisodeIndex: 0,
             ),
           ),
         );
@@ -3376,6 +3436,46 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     ),
                     posterUrl: episode.posterUrl ?? seriesDetails.posterUrl,
                     playbackPerformance: playbackPerformance,
+                    seriesEpisodePlayback: true,
+                    seriesEpisodes: () {
+                      final episodes = [...seriesDetails.episodes]
+                        ..sort((a, b) {
+                          final bySeason = a.season.compareTo(b.season);
+                          if (bySeason != 0) {
+                            return bySeason;
+                          }
+                          return a.episode.compareTo(b.episode);
+                        });
+                      return [
+                        for (final item in episodes)
+                          _SeriesEpisodeEntry(
+                            id: item.id,
+                            title: item.title,
+                            streamUrl: item.streamUrl,
+                            season: item.season,
+                            episode: item.episode,
+                            posterUrl: item.posterUrl,
+                            description: item.description,
+                          ),
+                      ];
+                    }(),
+                    seriesEpisodeIndex: () {
+                      final episodes = [...seriesDetails.episodes]
+                        ..sort((a, b) {
+                          final bySeason = a.season.compareTo(b.season);
+                          if (bySeason != 0) {
+                            return bySeason;
+                          }
+                          return a.episode.compareTo(b.episode);
+                        });
+                      final index = episodes.indexWhere(
+                        (item) =>
+                            item.streamUrl == episode.streamUrl &&
+                            item.season == episode.season &&
+                            item.episode == episode.episode,
+                      );
+                      return index < 0 ? 0 : index;
+                    }(),
                     nextEpisodeStreamUrl: () {
                       final episodes = [...seriesDetails.episodes]
                         ..sort((a, b) {
@@ -3495,8 +3595,93 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     } catch (_) {}
   }
 
+  bool _isSeriesRecent(LiveTvRecentMedia item) =>
+      item.mediaType == 'series' || item.mediaType == 'episode';
+
+  bool _isCurrentRecentContext(LiveTvRecentMedia item) {
+    if (homeView) {
+      return !_isAdultRef(
+        id: item.mediaId,
+        title: item.title,
+        sourceName: item.sourceName,
+      );
+    }
+    final matchesAdultScope =
+        _isAdultRef(
+          id: item.mediaId,
+          title: item.title,
+          sourceName: item.sourceName,
+        ) ==
+        (tab == _MediaTab.adult);
+    if (!matchesAdultScope) {
+      return false;
+    }
+    return switch (tab) {
+      _MediaTab.adult => showAdult,
+      _MediaTab.movies => item.mediaType == 'movie',
+      _MediaTab.series => _isSeriesRecent(item),
+    };
+  }
+
+  String get _searchHintText {
+    if (homeView) {
+      return 'Search movies or series';
+    }
+    return switch (tab) {
+      _MediaTab.movies => 'Search movies',
+      _MediaTab.series => 'Search series',
+      _MediaTab.adult => 'Search adult titles',
+    };
+  }
+
+  String get _continueWatchingTitle {
+    if (homeView) {
+      return 'Continue watching';
+    }
+    return switch (tab) {
+      _MediaTab.movies => 'Continue watching movies',
+      _MediaTab.series => 'Continue watching series',
+      _MediaTab.adult => 'Continue watching',
+    };
+  }
+
+  String get _browseContextTitle => switch (tab) {
+    _MediaTab.movies => 'Movies library',
+    _MediaTab.series => 'Series library',
+    _MediaTab.adult => 'Adult library',
+  };
+
+  String get _browseContextSubtitle {
+    final sourceLabel = allSourcesSelected
+        ? 'All libraries'
+        : (source?.name ?? 'Selected library');
+    final total = visibleItems.length;
+    final titleLabel = total == 1 ? 'title' : 'titles';
+    return '$sourceLabel · $total $titleLabel';
+  }
+
+  Widget _sectionLabel(String label, {required IconData icon}) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: _LiveTvMediaPaint.onSurface60),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            label,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: _LiveTvMediaPaint.onSurface70,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _historyPanel() {
-    final values = history.take(6).toList();
+    final values = history.where(_isCurrentRecentContext).take(6).toList();
     if (values.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -3591,24 +3776,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   Widget _continueWatchingCard() {
-    final values = history
-        .where(
-          (item) =>
-              _isAdultRef(
-                id: item.mediaId,
-                title: item.title,
-                sourceName: item.sourceName,
-              ) ==
-              (tab == _MediaTab.adult),
-        )
-        .where(
-          (item) => switch (tab) {
-            _MediaTab.adult => showAdult,
-            _MediaTab.movies => item.mediaType == 'movie',
-            _MediaTab.series => item.mediaType == 'series',
-          },
-        )
-        .toList();
+    final values = history.where(_isCurrentRecentContext).toList();
     if (values.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -3652,7 +3820,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     children: [
                       Expanded(
                         child: Text(
-                          'Continue watching',
+                          _continueWatchingTitle,
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                       ),
@@ -3713,9 +3881,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           controller: controller,
           autofocus: true,
           textInputAction: TextInputAction.search,
-          decoration: const InputDecoration(
-            labelText: 'Search movies or series',
-          ),
+          decoration: InputDecoration(labelText: _searchHintText),
           onSubmitted: (text) => Navigator.pop(ctx, text),
         ),
         actions: [
@@ -4025,8 +4191,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             child: TextField(
               controller: search,
               focusNode: searchFocus,
-              decoration: const InputDecoration(
-                hintText: 'Search movies or series',
+              decoration: InputDecoration(
+                hintText: _searchHintText,
                 isDense: true,
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.search),
@@ -4078,9 +4244,20 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               visibleSourceIds.contains(entry.sourceId),
         )
         .toList();
-    final localRecent = localHistory
-        .where((entry) => !adultRecent(entry))
+    final localRecent = localHistory.where((entry) => !adultRecent(entry));
+    final localMovieRecent = localRecent
+        .where((entry) => entry.mediaType == 'movie')
         .take(20)
+        .toList();
+    final localSeriesRecent = localRecent
+        .where(_isSeriesRecent)
+        .take(20)
+        .toList();
+    final jellyfinMovieResume = resume
+        .where((entry) => !entry.isEpisode && !entry.isSeries)
+        .toList();
+    final jellyfinSeriesResume = resume
+        .where((entry) => entry.isEpisode || entry.isSeries)
         .toList();
     MediaHomeCard recentCard(LiveTvRecentMedia entry) => MediaHomeCard(
       id: 'recent-${entry.sourceId}-${entry.mediaId}',
@@ -4089,20 +4266,37 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       imageUrl: entry.posterUrl,
       badge: _sourceBadge(entry.sourceId).label,
       badgeColor: _sourceBadge(entry.sourceId).color,
-      icon: entry.mediaType == 'series' ? Icons.tv : Icons.movie_outlined,
+      icon: _isSeriesRecent(entry) ? Icons.tv : Icons.movie_outlined,
       onTap: () => unawaited(_resumeRecentMedia(entry)),
     );
-    rows.add(
-      MediaHomeRow(
-        title: 'Continue Watching',
-        shape: MediaHomeCardShape.landscape,
-        cards: [
-          for (final entry in resume)
-            _cardForJellyfin(entry, landscape: true, play: true),
-          for (final entry in localRecent) recentCard(entry),
-        ],
-      ),
-    );
+    final continueMovieCards = <MediaHomeCard>[
+      for (final entry in jellyfinMovieResume)
+        _cardForJellyfin(entry, landscape: true, play: true),
+      for (final entry in localMovieRecent) recentCard(entry),
+    ];
+    if (continueMovieCards.isNotEmpty) {
+      rows.add(
+        MediaHomeRow(
+          title: 'Continue Watching Movies',
+          shape: MediaHomeCardShape.landscape,
+          cards: continueMovieCards,
+        ),
+      );
+    }
+    final continueSeriesCards = <MediaHomeCard>[
+      for (final entry in jellyfinSeriesResume)
+        _cardForJellyfin(entry, landscape: true, play: true),
+      for (final entry in localSeriesRecent) recentCard(entry),
+    ];
+    if (continueSeriesCards.isNotEmpty) {
+      rows.add(
+        MediaHomeRow(
+          title: 'Continue Watching Series',
+          shape: MediaHomeCardShape.landscape,
+          cards: continueSeriesCards,
+        ),
+      );
+    }
     rows.add(
       MediaHomeRow(
         title: 'Next Up',
@@ -4411,9 +4605,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           unawaited(_requestExitToHome());
         },
         const SingleActivator(LogicalKeyboardKey.f5): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           unawaited(_loadCatalog(forceRefresh: true));
         },
         const SingleActivator(LogicalKeyboardKey.enter): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           final focused = focusedMediaId;
           if (focused == null) {
             return;
@@ -4424,6 +4624,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           }
         },
         const SingleActivator(LogicalKeyboardKey.select): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           final focused = focusedMediaId;
           if (focused == null) {
             return;
@@ -4434,12 +4637,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           }
         },
         const SingleActivator(LogicalKeyboardKey.slash): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           unawaited(_openSearchKeyboard());
         },
         const SingleActivator(LogicalKeyboardKey.keyV): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           unawaited(_openVoiceSearch());
         },
         const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+          if (_isTextInputFocused) {
+            return;
+          }
           searchFocus.requestFocus();
         },
       },
@@ -4588,6 +4800,26 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                   Padding(
                                     padding: const EdgeInsets.fromLTRB(
                                       12,
+                                      4,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Card(
+                                      child: ListTile(
+                                        dense: true,
+                                        leading: Icon(
+                                          tab == _MediaTab.series
+                                              ? Icons.tv
+                                              : Icons.movie_outlined,
+                                        ),
+                                        title: Text(_browseContextTitle),
+                                        subtitle: Text(_browseContextSubtitle),
+                                      ),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
                                       8,
                                       12,
                                       4,
@@ -4604,9 +4836,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                           child: TextField(
                                             controller: search,
                                             focusNode: searchFocus,
-                                            decoration: const InputDecoration(
-                                              labelText:
-                                                  'Search movies or series',
+                                            decoration: InputDecoration(
+                                              labelText: _searchHintText,
                                               border: OutlineInputBorder(),
                                               prefixIcon: Icon(Icons.search),
                                             ),
@@ -4632,51 +4863,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                   Padding(
                                     padding: const EdgeInsets.fromLTRB(
                                       12,
-                                      4,
+                                      8,
                                       12,
                                       4,
                                     ),
                                     child: Align(
                                       alignment: Alignment.centerLeft,
-                                      child: Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: [
-                                          ChoiceChip(
-                                            label: const Text('All Sources'),
-                                            selected: allSourcesSelected,
-                                            onSelected: loading
-                                                ? null
-                                                : (_) async {
-                                                    setState(
-                                                      () => allSourcesSelected =
-                                                          true,
-                                                    );
-                                                    await _loadCatalog();
-                                                  },
-                                          ),
-                                          ..._visibleSources.map(
-                                            (item) => ChoiceChip(
-                                              label: Text(
-                                                item.name,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              selected:
-                                                  !allSourcesSelected &&
-                                                  source?.id == item.id,
-                                              onSelected: loading
-                                                  ? null
-                                                  : (_) async {
-                                                      setState(() {
-                                                        source = item;
-                                                        allSourcesSelected =
-                                                            false;
-                                                      });
-                                                      await _loadCatalog();
-                                                    },
-                                            ),
-                                          ),
-                                        ],
+                                      child: _sectionLabel(
+                                        'Browse and filters',
+                                        icon: Icons.tune,
                                       ),
                                     ),
                                   ),
@@ -4687,80 +4882,316 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                       12,
                                       4,
                                     ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: [..._tabChips()],
-                                      ),
-                                    ),
-                                  ),
-                                  if (activeSeasonalCollections.isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.fromLTRB(
-                                        12,
-                                        4,
-                                        12,
-                                        4,
-                                      ),
-                                      child: Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Wrap(
-                                          spacing: 8,
-                                          runSpacing: 8,
-                                          children: activeSeasonalCollections
-                                              .map((collection) {
-                                                return FilterChip(
-                                                  avatar: Icon(
-                                                    collection.icon,
-                                                    size: 18,
+                                    child: Card(
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(10),
+                                        child: Column(
+                                          children: [
+                                            Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: Wrap(
+                                                spacing: 8,
+                                                runSpacing: 8,
+                                                children: [
+                                                  ChoiceChip(
+                                                    label: const Text(
+                                                      'All Sources',
+                                                    ),
+                                                    selected:
+                                                        allSourcesSelected,
+                                                    onSelected: loading
+                                                        ? null
+                                                        : (_) async {
+                                                            setState(
+                                                              () =>
+                                                                  allSourcesSelected =
+                                                                      true,
+                                                            );
+                                                            await _loadCatalog();
+                                                          },
                                                   ),
-                                                  label: Text(collection.label),
-                                                  selected:
-                                                      activeCollectionId ==
-                                                      collection.id,
-                                                  onSelected: (_) =>
-                                                      _toggleCollection(
-                                                        collection.id,
+                                                  ..._visibleSources.map(
+                                                    (item) => ChoiceChip(
+                                                      label: Text(
+                                                        item.name,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
                                                       ),
-                                                );
-                                              })
-                                              .toList(),
-                                        ),
-                                      ),
-                                    ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      4,
-                                    ),
-                                    child: InkWell(
-                                      key: ValueKey(
-                                        'media-group-$groupFilter-${groups.length}',
-                                      ),
-                                      borderRadius: BorderRadius.circular(4),
-                                      onTap: () => _showCategoryPicker(groups),
-                                      child: InputDecorator(
-                                        decoration: const InputDecoration(
-                                          labelText: 'Category',
-                                          border: OutlineInputBorder(),
-                                          isDense: true,
-                                          prefixIcon: Icon(
-                                            Icons.filter_alt_outlined,
-                                          ),
-                                          suffixIcon: Icon(
-                                            Icons.arrow_drop_down,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          groups.contains(groupFilter)
-                                              ? groupFilter
-                                              : groups.first,
-                                          overflow: TextOverflow.ellipsis,
-                                          maxLines: 1,
+                                                      selected:
+                                                          !allSourcesSelected &&
+                                                          source?.id == item.id,
+                                                      onSelected: loading
+                                                          ? null
+                                                          : (_) async {
+                                                              setState(() {
+                                                                source = item;
+                                                                allSourcesSelected =
+                                                                    false;
+                                                              });
+                                                              await _loadCatalog();
+                                                            },
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 10),
+                                            Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: Wrap(
+                                                spacing: 8,
+                                                runSpacing: 8,
+                                                children: [..._tabChips()],
+                                              ),
+                                            ),
+                                            if (activeSeasonalCollections
+                                                .isNotEmpty) ...[
+                                              const SizedBox(height: 10),
+                                              Align(
+                                                alignment: Alignment.centerLeft,
+                                                child: Wrap(
+                                                  spacing: 8,
+                                                  runSpacing: 8,
+                                                  children: activeSeasonalCollections
+                                                      .map((collection) {
+                                                        return FilterChip(
+                                                          avatar: Icon(
+                                                            collection.icon,
+                                                            size: 18,
+                                                          ),
+                                                          label: Text(
+                                                            collection.label,
+                                                          ),
+                                                          selected:
+                                                              activeCollectionId ==
+                                                              collection.id,
+                                                          onSelected: (_) =>
+                                                              _toggleCollection(
+                                                                collection.id,
+                                                              ),
+                                                        );
+                                                      })
+                                                      .toList(),
+                                                ),
+                                              ),
+                                            ],
+                                            const SizedBox(height: 10),
+                                            InkWell(
+                                              key: ValueKey(
+                                                'media-group-$groupFilter-${groups.length}',
+                                              ),
+                                              borderRadius:
+                                                  BorderRadius.circular(4),
+                                              onTap: () =>
+                                                  _showCategoryPicker(groups),
+                                              child: InputDecorator(
+                                                decoration:
+                                                    const InputDecoration(
+                                                      labelText: 'Category',
+                                                      border:
+                                                          OutlineInputBorder(),
+                                                      isDense: true,
+                                                      prefixIcon: Icon(
+                                                        Icons
+                                                            .filter_alt_outlined,
+                                                      ),
+                                                      suffixIcon: Icon(
+                                                        Icons.arrow_drop_down,
+                                                      ),
+                                                    ),
+                                                child: Text(
+                                                  groups.contains(groupFilter)
+                                                      ? groupFilter
+                                                      : groups.first,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  maxLines: 1,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 10),
+                                            if (compact)
+                                              Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  DropdownButtonFormField<
+                                                    _MediaSortMode
+                                                  >(
+                                                    isExpanded: true,
+                                                    initialValue: sortMode,
+                                                    decoration:
+                                                        const InputDecoration(
+                                                          labelText: 'Sort',
+                                                          border:
+                                                              OutlineInputBorder(),
+                                                        ),
+                                                    items: const [
+                                                      DropdownMenuItem(
+                                                        value: _MediaSortMode
+                                                            .relevance,
+                                                        child: Text(
+                                                          'Relevance',
+                                                        ),
+                                                      ),
+                                                      DropdownMenuItem(
+                                                        value: _MediaSortMode
+                                                            .title,
+                                                        child: Text('Title'),
+                                                      ),
+                                                      DropdownMenuItem(
+                                                        value: _MediaSortMode
+                                                            .source,
+                                                        child: Text('Source'),
+                                                      ),
+                                                      DropdownMenuItem(
+                                                        value: _MediaSortMode
+                                                            .inTheaters,
+                                                        child: Text(
+                                                          'In Theaters',
+                                                        ),
+                                                      ),
+                                                      DropdownMenuItem(
+                                                        value: _MediaSortMode
+                                                            .recentlyAdded,
+                                                        child: Text(
+                                                          'Recently Added',
+                                                        ),
+                                                      ),
+                                                    ],
+                                                    onChanged: (value) {
+                                                      if (value == null) {
+                                                        return;
+                                                      }
+                                                      setState(
+                                                        () => sortMode = value,
+                                                      );
+                                                    },
+                                                  ),
+                                                  const SizedBox(height: 8),
+                                                  FilterChip(
+                                                    selected: versionAwareOnly,
+                                                    onSelected: (selected) {
+                                                      setState(
+                                                        () => versionAwareOnly =
+                                                            selected,
+                                                      );
+                                                    },
+                                                    avatar: const Icon(
+                                                      Icons
+                                                          .collections_bookmark_outlined,
+                                                    ),
+                                                    label: Text(
+                                                      _multiVersionCount == 0
+                                                          ? 'Multiple versions only'
+                                                          : 'Multiple versions only ($_multiVersionCount titles)',
+                                                    ),
+                                                  ),
+                                                ],
+                                              )
+                                            else
+                                              Row(
+                                                children: [
+                                                  Expanded(
+                                                    flex: 2,
+                                                    child:
+                                                        DropdownButtonFormField<
+                                                          _MediaSortMode
+                                                        >(
+                                                          isExpanded: true,
+                                                          initialValue:
+                                                              sortMode,
+                                                          decoration:
+                                                              const InputDecoration(
+                                                                labelText:
+                                                                    'Sort',
+                                                                border:
+                                                                    OutlineInputBorder(),
+                                                              ),
+                                                          items: const [
+                                                            DropdownMenuItem(
+                                                              value:
+                                                                  _MediaSortMode
+                                                                      .relevance,
+                                                              child: Text(
+                                                                'Relevance',
+                                                              ),
+                                                            ),
+                                                            DropdownMenuItem(
+                                                              value:
+                                                                  _MediaSortMode
+                                                                      .title,
+                                                              child: Text(
+                                                                'Title',
+                                                              ),
+                                                            ),
+                                                            DropdownMenuItem(
+                                                              value:
+                                                                  _MediaSortMode
+                                                                      .source,
+                                                              child: Text(
+                                                                'Source',
+                                                              ),
+                                                            ),
+                                                            DropdownMenuItem(
+                                                              value:
+                                                                  _MediaSortMode
+                                                                      .inTheaters,
+                                                              child: Text(
+                                                                'In Theaters',
+                                                              ),
+                                                            ),
+                                                            DropdownMenuItem(
+                                                              value: _MediaSortMode
+                                                                  .recentlyAdded,
+                                                              child: Text(
+                                                                'Recently Added',
+                                                              ),
+                                                            ),
+                                                          ],
+                                                          onChanged: (value) {
+                                                            if (value == null) {
+                                                              return;
+                                                            }
+                                                            setState(
+                                                              () => sortMode =
+                                                                  value,
+                                                            );
+                                                          },
+                                                        ),
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  Expanded(
+                                                    flex: 3,
+                                                    child: Align(
+                                                      alignment:
+                                                          Alignment.centerLeft,
+                                                      child: FilterChip(
+                                                        selected:
+                                                            versionAwareOnly,
+                                                        onSelected: (selected) {
+                                                          setState(
+                                                            () =>
+                                                                versionAwareOnly =
+                                                                    selected,
+                                                          );
+                                                        },
+                                                        avatar: const Icon(
+                                                          Icons
+                                                              .collections_bookmark_outlined,
+                                                        ),
+                                                        label: Text(
+                                                          _multiVersionCount ==
+                                                                  0
+                                                              ? 'Multiple versions only'
+                                                              : 'Multiple versions only ($_multiVersionCount titles)',
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                          ],
                                         ),
                                       ),
                                     ),
@@ -4773,31 +5204,57 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                         12,
                                         4,
                                       ),
-                                      child: Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Wrap(
-                                          spacing: 8,
-                                          runSpacing: 8,
-                                          crossAxisAlignment:
-                                              WrapCrossAlignment.center,
-                                          children: [
-                                            ...availableGenres.map(
-                                              (genre) => FilterChip(
-                                                label: Text(genre),
-                                                selected: selectedGenres
-                                                    .contains(genre),
-                                                onSelected: (_) =>
-                                                    _toggleGenre(genre),
+                                      child: Card(
+                                        child: ExpansionTile(
+                                          title: const Text(
+                                            'Genres and shuffle',
+                                          ),
+                                          initiallyExpanded: true,
+                                          subtitle: Text(
+                                            selectedGenres.isEmpty
+                                                ? 'No genres selected'
+                                                : '${selectedGenres.length} selected',
+                                          ),
+                                          childrenPadding:
+                                              const EdgeInsets.fromLTRB(
+                                                12,
+                                                0,
+                                                12,
+                                                12,
                                               ),
-                                            ),
-                                            IconButton(
-                                              tooltip: 'Shuffle from selection',
-                                              onPressed: visibleItems.isEmpty
-                                                  ? null
-                                                  : () => unawaited(
-                                                      _shuffleWithinFilters(),
+                                          children: [
+                                            Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: Wrap(
+                                                spacing: 8,
+                                                runSpacing: 8,
+                                                crossAxisAlignment:
+                                                    WrapCrossAlignment.center,
+                                                children: [
+                                                  ...availableGenres.map(
+                                                    (genre) => FilterChip(
+                                                      label: Text(genre),
+                                                      selected: selectedGenres
+                                                          .contains(genre),
+                                                      onSelected: (_) =>
+                                                          _toggleGenre(genre),
                                                     ),
-                                              icon: const Icon(Icons.shuffle),
+                                                  ),
+                                                  IconButton(
+                                                    tooltip:
+                                                        'Shuffle from selection',
+                                                    onPressed:
+                                                        visibleItems.isEmpty
+                                                        ? null
+                                                        : () => unawaited(
+                                                            _shuffleWithinFilters(),
+                                                          ),
+                                                    icon: const Icon(
+                                                      Icons.shuffle,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
                                           ],
                                         ),
@@ -4805,92 +5262,20 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                     ),
                                   const SizedBox(height: 8),
                                   Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      0,
+                                      12,
+                                      4,
                                     ),
-                                    child: Row(
-                                      children: [
-                                        Expanded(
-                                          flex: 2,
-                                          child:
-                                              DropdownButtonFormField<
-                                                _MediaSortMode
-                                              >(
-                                                isExpanded: true,
-                                                initialValue: sortMode,
-                                                decoration:
-                                                    const InputDecoration(
-                                                      labelText: 'Sort',
-                                                      border:
-                                                          OutlineInputBorder(),
-                                                    ),
-                                                items: const [
-                                                  DropdownMenuItem(
-                                                    value: _MediaSortMode
-                                                        .relevance,
-                                                    child: Text('Relevance'),
-                                                  ),
-                                                  DropdownMenuItem(
-                                                    value: _MediaSortMode.title,
-                                                    child: Text('Title'),
-                                                  ),
-                                                  DropdownMenuItem(
-                                                    value:
-                                                        _MediaSortMode.source,
-                                                    child: Text('Source'),
-                                                  ),
-                                                  DropdownMenuItem(
-                                                    value: _MediaSortMode
-                                                        .inTheaters,
-                                                    child: Text('In Theaters'),
-                                                  ),
-                                                  DropdownMenuItem(
-                                                    value: _MediaSortMode
-                                                        .recentlyAdded,
-                                                    child: Text(
-                                                      'Recently Added',
-                                                    ),
-                                                  ),
-                                                ],
-                                                onChanged: (value) {
-                                                  if (value == null) {
-                                                    return;
-                                                  }
-                                                  setState(
-                                                    () => sortMode = value,
-                                                  );
-                                                },
-                                              ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          flex: 3,
-                                          child: Align(
-                                            alignment: Alignment.centerLeft,
-                                            child: FilterChip(
-                                              selected: versionAwareOnly,
-                                              onSelected: (selected) {
-                                                setState(
-                                                  () => versionAwareOnly =
-                                                      selected,
-                                                );
-                                              },
-                                              avatar: const Icon(
-                                                Icons
-                                                    .collections_bookmark_outlined,
-                                              ),
-                                              label: Text(
-                                                _multiVersionCount == 0
-                                                    ? 'Multiple versions only'
-                                                    : 'Multiple versions only ($_multiVersionCount titles)',
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ],
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: _sectionLabel(
+                                        _continueWatchingTitle,
+                                        icon: Icons.play_circle_outline,
+                                      ),
                                     ),
                                   ),
-                                  const SizedBox(height: 8),
                                   Padding(
                                     padding: const EdgeInsets.fromLTRB(
                                       12,
@@ -4899,6 +5284,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                       8,
                                     ),
                                     child: _continueWatchingCard(),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      12,
+                                      0,
+                                      12,
+                                      4,
+                                    ),
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: _sectionLabel(
+                                        'Recent and favorites',
+                                        icon: Icons.history,
+                                      ),
+                                    ),
                                   ),
                                   Padding(
                                     padding: const EdgeInsets.fromLTRB(
@@ -5323,6 +5723,52 @@ class DvrRecordingPlayerScreen extends StatelessWidget {
   }
 }
 
+class _MovieQueueEntry {
+  final String title;
+  final String? subtitle;
+  final String streamUrl;
+  final List<String> streamUrlCandidates;
+  final String? posterUrl;
+  final String? description;
+  final int? year;
+  final List<String> genres;
+  final DateTime? releaseDate;
+  final DateTime? addedAt;
+
+  const _MovieQueueEntry({
+    required this.title,
+    this.subtitle,
+    required this.streamUrl,
+    this.streamUrlCandidates = const <String>[],
+    this.posterUrl,
+    this.description,
+    this.year,
+    this.genres = const [],
+    this.releaseDate,
+    this.addedAt,
+  });
+}
+
+class _SeriesEpisodeEntry {
+  final String id;
+  final String title;
+  final String streamUrl;
+  final int season;
+  final int episode;
+  final String? posterUrl;
+  final String? description;
+
+  const _SeriesEpisodeEntry({
+    required this.id,
+    required this.title,
+    required this.streamUrl,
+    required this.season,
+    required this.episode,
+    this.posterUrl,
+    this.description,
+  });
+}
+
 class _MediaPlayerScreen extends StatefulWidget {
   final String profileKey;
   final String title;
@@ -5333,6 +5779,11 @@ class _MediaPlayerScreen extends StatefulWidget {
   final PlaybackPerformanceSettings playbackPerformance;
   final String? nextEpisodeStreamUrl;
   final String? nextEpisodeTitle;
+  final bool seriesEpisodePlayback;
+  final List<_MovieQueueEntry> movieQueue;
+  final int movieQueueIndex;
+  final List<_SeriesEpisodeEntry> seriesEpisodes;
+  final int seriesEpisodeIndex;
 
   /// Set for Jellyfin titles: supplies the real stream URL and reports
   /// progress back to the server. [jellyfinFor] builds one for the next
@@ -5349,6 +5800,11 @@ class _MediaPlayerScreen extends StatefulWidget {
     required this.playbackPerformance,
     this.nextEpisodeStreamUrl,
     this.nextEpisodeTitle,
+    this.seriesEpisodePlayback = false,
+    this.movieQueue = const <_MovieQueueEntry>[],
+    this.movieQueueIndex = 0,
+    this.seriesEpisodes = const <_SeriesEpisodeEntry>[],
+    this.seriesEpisodeIndex = 0,
     this.jellyfin,
     this.jellyfinFor,
   });
@@ -5384,6 +5840,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   double volume = 100;
   double preMuteVolume = 100;
   double playbackSpeed = 1.0;
+  String subtitleFontFamily = 'Default';
   int seekIncrementSeconds = 10;
   String aspectMode = 'contain';
   String audioOutputProfile = 'auto';
@@ -5394,6 +5851,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   int? resumePositionMs;
   bool showingResumePrompt = false;
   bool creditsVisible = false;
+  bool playNextPromptVisible = false;
+  bool playNextPromptDismissed = false;
+  int nextMoviePromptRemainingMs = const Duration(minutes: 5).inMilliseconds;
   bool nextEpisodePrompted = false;
   double? scrubPreviewMs;
   int recoveryAttempts = 0;
@@ -5426,16 +5886,64 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   bool spoilerSafeEpisodes = false;
   bool screenReaderHints = true;
   DateTime lastProgressWrite = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime? bufferingStartedAtUtc;
+  int bufferingEpisodes = 0;
+  int bufferingSessionMs = 0;
+  late List<_MovieQueueEntry> _movieQueue = List<_MovieQueueEntry>.from(
+    widget.movieQueue,
+  );
+  late int _movieQueueIndex = widget.movieQueueIndex;
+  late final List<_SeriesEpisodeEntry> _seriesEpisodes =
+      List<_SeriesEpisodeEntry>.from(widget.seriesEpisodes);
+  late int _seriesEpisodeIndex = widget.seriesEpisodeIndex;
+  bool showMovieQueuePanel = false;
+  bool showSeriesEpisodesPanel = false;
+  bool get _hasMovieQueue => _movieQueue.length > 1;
+  bool get _hasPreviousMovieQueueItem => _hasMovieQueue && _movieQueueIndex > 0;
+  bool get _hasNextMovieQueueItem =>
+      _hasMovieQueue && _movieQueueIndex < _movieQueue.length - 1;
+  bool get _hasSeriesEpisodes => _seriesEpisodes.isNotEmpty;
+  bool get _hasPreviousSeriesEpisode =>
+      _hasSeriesEpisodes && _seriesEpisodeIndex > 0;
+  bool get _hasNextSeriesEpisode =>
+      _hasSeriesEpisodes && _seriesEpisodeIndex < _seriesEpisodes.length - 1;
+  bool get _seriesSkipControlsEnabled => widget.seriesEpisodePlayback;
+  String? get _nextMovieTitle =>
+      _hasNextMovieQueueItem ? _movieQueue[_movieQueueIndex + 1].title : null;
+  String? get _nextSeriesEpisodeLabel => _hasNextSeriesEpisode
+      ? 'S${_seriesEpisodes[_seriesEpisodeIndex + 1].season}'
+            'E${_seriesEpisodes[_seriesEpisodeIndex + 1].episode}'
+            ' · ${_seriesEpisodes[_seriesEpisodeIndex + 1].title}'
+      : null;
+  bool get _showPlayNextOverlay =>
+      (((widget.nextEpisodeStreamUrl?.trim().isNotEmpty == true) ||
+              (widget.seriesEpisodePlayback && _hasNextSeriesEpisode)) &&
+          creditsVisible) ||
+      (_hasNextMovieQueueItem && playNextPromptVisible);
 
   @override
   void initState() {
     super.initState();
+    if (_movieQueue.isNotEmpty) {
+      _movieQueueIndex = _movieQueueIndex.clamp(0, _movieQueue.length - 1);
+    } else {
+      _movieQueueIndex = 0;
+    }
+    if (_seriesEpisodes.isNotEmpty) {
+      _seriesEpisodeIndex = _seriesEpisodeIndex.clamp(
+        0,
+        _seriesEpisodes.length - 1,
+      );
+    } else {
+      _seriesEpisodeIndex = 0;
+    }
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
   }
 
   @override
   void dispose() {
+    _finishBufferingTelemetry(aborted: true);
     AppLog.event(
       'media.play',
       props: {
@@ -5444,6 +5952,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         'jellyfin': jellyfin != null,
         'route': qualityRoute,
         'hadError': error.isNotEmpty,
+        'bufferEpisodes': bufferingEpisodes,
+        'bufferMs': bufferingSessionMs,
       },
     );
     WidgetsBinding.instance.removeObserver(this);
@@ -5463,6 +5973,78 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     unawaited(WakelockPlus.disable());
     unawaited(current?.dispose() ?? Future<void>.value());
     super.dispose();
+  }
+
+  bool get _isLikelyLiveTvStream {
+    final lowerTitle = widget.title.toLowerCase();
+    final lowerUrl = widget.streamUrl.toLowerCase();
+    return lowerUrl.contains('/live/') ||
+        lowerUrl.contains('.m3u8') ||
+        lowerTitle.contains('live') ||
+        lowerTitle.contains('channel');
+  }
+
+  Future<void> _emitBufferingStartTelemetry() async {
+    if (bufferingStartedAtUtc != null) {
+      return;
+    }
+    bufferingStartedAtUtc = DateTime.now().toUtc();
+    bufferingEpisodes += 1;
+    AppLog.event(
+      'live_tv.buffer.start',
+      props: {
+        'title': widget.title,
+        'positionMs': position.inMilliseconds,
+        'liveTv': _isLikelyLiveTvStream,
+        'route': qualityRoute,
+        'playbackRoute': playbackRoute,
+        'attempts': recoveryAttempts,
+        'output': outputEnvironment,
+      },
+    );
+  }
+
+  void _finishBufferingTelemetry({bool aborted = false}) {
+    final started = bufferingStartedAtUtc;
+    if (started == null) {
+      return;
+    }
+    bufferingStartedAtUtc = null;
+    final bufferedMs = DateTime.now()
+        .toUtc()
+        .difference(started)
+        .inMilliseconds;
+    if (bufferedMs > 0) {
+      bufferingSessionMs += bufferedMs;
+    }
+    AppLog.event(
+      'live_tv.buffer.end',
+      props: {
+        'title': widget.title,
+        'positionMs': position.inMilliseconds,
+        'bufferedMs': bufferedMs,
+        'aborted': aborted,
+        'liveTv': _isLikelyLiveTvStream,
+        'route': qualityRoute,
+        'playbackRoute': playbackRoute,
+        'attempts': recoveryAttempts,
+        'output': outputEnvironment,
+      },
+    );
+    if (_isLikelyLiveTvStream && bufferedMs >= 4000) {
+      AppLog.warn(
+        LogCategory.playback,
+        'Live TV buffering spike',
+        details: {
+          'title': widget.title,
+          'bufferedMs': bufferedMs,
+          'route': qualityRoute,
+          'playbackRoute': playbackRoute,
+          'output': outputEnvironment,
+          'positionMs': position.inMilliseconds,
+        },
+      );
+    }
   }
 
   @override
@@ -5646,13 +6228,26 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               position = value;
               final totalMs = duration.inMilliseconds;
               if (totalMs > 0) {
-                final creditsThreshold = max(
-                  0,
-                  totalMs - const Duration(seconds: 45).inMilliseconds,
-                );
-                creditsVisible = value.inMilliseconds >= creditsThreshold;
+                if (_hasNextMovieQueueItem) {
+                  final remainingMs = max(0, totalMs - value.inMilliseconds);
+                  if (playNextPromptDismissed) {
+                    playNextPromptVisible = false;
+                  } else {
+                    playNextPromptVisible =
+                        remainingMs <= nextMoviePromptRemainingMs;
+                  }
+                  creditsVisible = false;
+                } else {
+                  final creditsThreshold = max(
+                    0,
+                    totalMs - const Duration(seconds: 45).inMilliseconds,
+                  );
+                  creditsVisible = value.inMilliseconds >= creditsThreshold;
+                  playNextPromptVisible = false;
+                }
               } else {
                 creditsVisible = false;
+                playNextPromptVisible = false;
               }
             });
           }
@@ -5673,6 +6268,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       );
       subscriptions.add(
         created.stream.buffering.listen((value) {
+          if (value) {
+            unawaited(_emitBufferingStartTelemetry());
+          } else {
+            _finishBufferingTelemetry();
+          }
           if (mounted) {
             setState(() => buffering = value);
             _scheduleControlsAutoHide();
@@ -5883,6 +6483,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (code.isEmpty || code == 'und' || code == 'unknown') {
       return 'Unknown';
     }
+
     switch (code) {
       case 'en':
       case 'eng':
@@ -5900,6 +6501,75 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       default:
         return code.toUpperCase();
     }
+  }
+
+  String _subtitleTrackTitle(SubtitleTrack track, int index) {
+    final title = (track.title ?? '').trim();
+    final lower = title.toLowerCase();
+    if (title.isNotEmpty &&
+        !lower.contains('unnamed subtitle') &&
+        lower != 'subtitle' &&
+        lower != 'track') {
+      return title;
+    }
+    final language = _langLabel(track.language);
+    final kind = _trackKindLabel(title);
+    if (kind == 'Standard') {
+      return '$language subtitle ${index + 1}';
+    }
+    return '$language $kind ${index + 1}';
+  }
+
+  String _movieQueueMetadata(_MovieQueueEntry entry) {
+    final parts = <String>[];
+    if (entry.year != null) {
+      parts.add('${entry.year}');
+    } else if (entry.releaseDate != null) {
+      parts.add('${entry.releaseDate!.year}');
+    }
+    if (entry.genres.isNotEmpty) {
+      parts.add(entry.genres.take(2).join(' · '));
+    }
+    if (entry.subtitle != null && entry.subtitle!.trim().isNotEmpty) {
+      parts.add(entry.subtitle!.trim());
+    }
+    if (parts.isEmpty) {
+      return 'Metadata not available';
+    }
+    return parts.join(' • ');
+  }
+
+  String _currentTopMetaLine() {
+    if (widget.seriesEpisodePlayback && _hasSeriesEpisodes) {
+      final entry = _seriesEpisodes[_seriesEpisodeIndex];
+      return 'S${entry.season}E${entry.episode} · ${entry.title}';
+    }
+    if (_movieQueue.isNotEmpty) {
+      return _movieQueueMetadata(_movieQueue[_movieQueueIndex]);
+    }
+    return widget.subtitle?.trim().isNotEmpty == true
+        ? widget.subtitle!.trim()
+        : 'Now playing';
+  }
+
+  String? _currentTopDescription() {
+    if (widget.seriesEpisodePlayback && _hasSeriesEpisodes) {
+      return _seriesEpisodes[_seriesEpisodeIndex].description;
+    }
+    if (_movieQueue.isNotEmpty) {
+      return _movieQueue[_movieQueueIndex].description;
+    }
+    return null;
+  }
+
+  String? _currentTopPosterUrl() {
+    if (widget.seriesEpisodePlayback && _hasSeriesEpisodes) {
+      return _seriesEpisodes[_seriesEpisodeIndex].posterUrl;
+    }
+    if (_movieQueue.isNotEmpty) {
+      return _movieQueue[_movieQueueIndex].posterUrl;
+    }
+    return widget.posterUrl;
   }
 
   String _trackKindLabel(String title) {
@@ -5947,6 +6617,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       await platform.setProperty(
         'sub-font-size',
         subtitleFontSize.toStringAsFixed(0),
+      );
+      await platform.setProperty(
+        'sub-font',
+        subtitleFontFamily == 'Default' ? '' : subtitleFontFamily,
       );
       await platform.setProperty(
         'sub-color',
@@ -6141,6 +6815,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _loadPlayerPreferences() async {
     final prefs = await memory.loadPrefs(widget.profileKey);
+    final profileId = int.tryParse(
+      widget.profileKey.replaceFirst('profile-', ''),
+    );
+    Map<String, dynamic> defaults = const {};
+    if (profileId != null) {
+      try {
+        defaults = await HomePreferences().liveTvPlayerDefaults(profileId);
+      } catch (_) {}
+    }
     seekIncrementSeconds =
         int.tryParse(prefs['seekIncrementSeconds']?.toString() ?? '') ?? 10;
     if (seekIncrementSeconds < 5) {
@@ -6174,6 +6857,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         double.tryParse(prefs['subtitlePosition']?.toString() ?? '') ?? 92;
     subtitleDelaySeconds =
         double.tryParse(prefs['subtitleDelaySeconds']?.toString() ?? '') ?? 0.0;
+    subtitleFontFamily =
+        prefs['subtitleFontFamily']?.toString().trim().isNotEmpty == true
+        ? prefs['subtitleFontFamily'].toString().trim()
+        : 'Default';
     playerTextScale =
         double.tryParse(prefs['playerTextScale']?.toString() ?? '') ?? 1.0;
     subtitleForeground = Color(
@@ -6192,6 +6879,70 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         int.tryParse(prefs['maxBandwidthKbpsRemote']?.toString() ?? '') ?? 4500;
     maxBandwidthKbpsLocal =
         int.tryParse(prefs['maxBandwidthKbpsLocal']?.toString() ?? '') ?? 18000;
+    final defaultRemote = int.tryParse(
+      defaults['maxBandwidthKbpsRemote']?.toString() ?? '',
+    );
+    final defaultLocal = int.tryParse(
+      defaults['maxBandwidthKbpsLocal']?.toString() ?? '',
+    );
+    if (defaultRemote != null && defaultRemote >= 1200) {
+      maxBandwidthKbpsRemote = defaultRemote;
+    }
+    if (defaultLocal != null && defaultLocal >= maxBandwidthKbpsRemote) {
+      maxBandwidthKbpsLocal = defaultLocal;
+    }
+    final defaultFont = defaults['subtitleFontFamily']?.toString().trim() ?? '';
+    if (defaultFont.isNotEmpty) {
+      subtitleFontFamily = defaultFont;
+    }
+    final defaultFontSize = double.tryParse(
+      defaults['subtitleFontSize']?.toString() ?? '',
+    );
+    if (defaultFontSize != null &&
+        defaultFontSize >= 26 &&
+        defaultFontSize <= 82) {
+      subtitleFontSize = defaultFontSize;
+    }
+    final defaultOffset = double.tryParse(
+      defaults['subtitleDelaySeconds']?.toString() ?? '',
+    );
+    if (defaultOffset != null && defaultOffset >= -10 && defaultOffset <= 10) {
+      subtitleDelaySeconds = defaultOffset;
+    }
+    final defaultOpacity = double.tryParse(
+      defaults['subtitleOpacity']?.toString() ?? '',
+    );
+    if (defaultOpacity != null &&
+        defaultOpacity >= 0.2 &&
+        defaultOpacity <= 1.0) {
+      subtitleOpacity = defaultOpacity;
+    }
+    final defaultPosition = double.tryParse(
+      defaults['subtitlePosition']?.toString() ?? '',
+    );
+    if (defaultPosition != null &&
+        defaultPosition >= 10 &&
+        defaultPosition <= 100) {
+      subtitlePosition = defaultPosition;
+    }
+    final defaultForeground = int.tryParse(
+      defaults['subtitleForeground']?.toString() ?? '',
+    );
+    if (defaultForeground != null) {
+      subtitleForeground = Color(defaultForeground);
+    }
+    final defaultBackground = int.tryParse(
+      defaults['subtitleBackground']?.toString() ?? '',
+    );
+    if (defaultBackground != null) {
+      subtitleBackground = Color(defaultBackground);
+    }
+    final defaultOutline = int.tryParse(
+      defaults['subtitleOutline']?.toString() ?? '',
+    );
+    if (defaultOutline != null) {
+      subtitleOutline = Color(defaultOutline);
+    }
     if (maxBandwidthKbpsRemote < 1200) {
       maxBandwidthKbpsRemote = 1200;
     }
@@ -6233,6 +6984,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       'subtitleOpacity': subtitleOpacity,
       'subtitlePosition': subtitlePosition,
       'subtitleDelaySeconds': subtitleDelaySeconds,
+      'subtitleFontFamily': subtitleFontFamily,
       'playerTextScale': playerTextScale,
       'subtitleForeground': subtitleForeground.value,
       'subtitleBackground': subtitleBackground.value,
@@ -6394,13 +7146,31 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
   }
 
-  Future<void> _handlePlaybackCompleted() async {
+  Future<void> _handlePlaybackCompleted({bool force = false}) async {
     await _saveFinalProgress();
-    if (!autoplayNext) {
+    if (!autoplayNext && !force) {
+      return;
+    }
+    if (widget.seriesEpisodePlayback && _hasNextSeriesEpisode) {
+      await _openSeriesEpisodeAt(
+        _seriesEpisodeIndex + 1,
+        status: _nextSeriesEpisodeLabel == null
+            ? 'Starting next episode...'
+            : 'Starting $_nextSeriesEpisodeLabel...',
+        autoplayed: true,
+      );
       return;
     }
     final nextStream = widget.nextEpisodeStreamUrl?.trim();
     if (nextStream == null || nextStream.isEmpty) {
+      if (_hasNextMovieQueueItem) {
+        await _openMovieQueueItem(
+          _movieQueueIndex + 1,
+          status: _nextMovieTitle == null
+              ? 'Starting next movie...'
+              : 'Starting $_nextMovieTitle...',
+        );
+      }
       return;
     }
     if (nextEpisodePrompted) {
@@ -6416,6 +7186,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     }
     final current = player;
     if (current == null) {
+      nextEpisodePrompted = false;
       return;
     }
     jellyfin = widget.jellyfinFor?.call(nextStream);
@@ -6434,6 +7205,475 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       durationMs: 0,
       complete: false,
     );
+  }
+
+  Future<void> _openMovieQueueItem(int index, {String? status}) async {
+    if (!_hasMovieQueue || index < 0 || index >= _movieQueue.length) {
+      return;
+    }
+    final entry = _movieQueue[index];
+    await _saveFinalProgress();
+    if (!mounted) {
+      return;
+    }
+    if (status != null && status.trim().isNotEmpty) {
+      setState(() => statusMessage = status);
+    }
+    await Navigator.of(context).pushReplacement<void, void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _MediaPlayerScreen(
+          profileKey: widget.profileKey,
+          title: entry.title,
+          subtitle: entry.subtitle,
+          streamUrl: entry.streamUrl,
+          streamUrlCandidates: entry.streamUrlCandidates,
+          posterUrl: entry.posterUrl,
+          playbackPerformance: widget.playbackPerformance,
+          seriesEpisodePlayback: false,
+          movieQueue: _movieQueue,
+          movieQueueIndex: index,
+          jellyfin: widget.jellyfinFor?.call(entry.streamUrl),
+          jellyfinFor: widget.jellyfinFor,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openMovieQueue() async {
+    if (!_hasMovieQueue) {
+      return;
+    }
+    Future<void> showDetails(_MovieQueueEntry entry, int index) async {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (detailsCtx) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    entry.title,
+                    style: Theme.of(detailsCtx).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _movieQueueMetadata(entry),
+                    style: Theme.of(detailsCtx).textTheme.bodySmall,
+                  ),
+                  if (entry.releaseDate != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Released ${entry.releaseDate!.toLocal().toString().split(' ').first}',
+                      style: Theme.of(detailsCtx).textTheme.bodySmall,
+                    ),
+                  ],
+                  if (entry.addedAt != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Added ${entry.addedAt!.toLocal().toString().split(' ').first}',
+                      style: Theme.of(detailsCtx).textTheme.bodySmall,
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  if (entry.description?.trim().isNotEmpty == true)
+                    Text(entry.description!.trim())
+                  else
+                    const Text('No description available for this movie.'),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () async {
+                          Navigator.pop(detailsCtx);
+                          await _openMovieQueueItem(index);
+                        },
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Play now'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          _queueMovieForPlayNext(index);
+                          Navigator.pop(detailsCtx);
+                        },
+                        icon: const Icon(Icons.playlist_play),
+                        label: const Text('Play next'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          children: [
+            ListTile(
+              title: Text(
+                'Movie queue (${_movieQueue.length})',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: const Text('Shuffled order • premium metadata'),
+            ),
+            for (var i = 0; i < _movieQueue.length; i++)
+              ListTile(
+                leading: _movieQueue[i].posterUrl?.trim().isNotEmpty == true
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.network(
+                          _movieQueue[i].posterUrl!,
+                          width: 42,
+                          height: 62,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Icon(
+                            i == _movieQueueIndex
+                                ? Icons.play_arrow
+                                : Icons.movie_outlined,
+                          ),
+                        ),
+                      )
+                    : Icon(
+                        i == _movieQueueIndex
+                            ? Icons.play_arrow
+                            : Icons.movie_outlined,
+                      ),
+                title: Text(_movieQueue[i].title),
+                subtitle: Text(
+                  _movieQueueMetadata(_movieQueue[i]),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                selected: i == _movieQueueIndex,
+                trailing: Wrap(
+                  spacing: 4,
+                  children: [
+                    IconButton(
+                      tooltip: 'Play next',
+                      onPressed: i == _movieQueueIndex
+                          ? null
+                          : () => _queueMovieForPlayNext(i),
+                      icon: const Icon(Icons.playlist_play),
+                    ),
+                    IconButton(
+                      tooltip: 'Details',
+                      onPressed: () =>
+                          unawaited(showDetails(_movieQueue[i], i)),
+                      icon: const Icon(Icons.info_outline),
+                    ),
+                  ],
+                ),
+                onTap: () => Navigator.pop(ctx, i),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected == _movieQueueIndex) {
+      return;
+    }
+    await _openMovieQueueItem(selected);
+  }
+
+  void _queueMovieForPlayNext(int index) {
+    if (!_hasMovieQueue ||
+        index < 0 ||
+        index >= _movieQueue.length ||
+        index == _movieQueueIndex) {
+      return;
+    }
+    final target = _movieQueue[index];
+    final reordered = List<_MovieQueueEntry>.from(_movieQueue)
+      ..removeAt(index)
+      ..insert(_movieQueueIndex + 1, target);
+    setState(() {
+      _movieQueue = reordered;
+      statusMessage = 'Queued "${target.title}" to play next.';
+    });
+  }
+
+  Future<void> _openSeriesEpisodeAt(
+    int index, {
+    String? status,
+    bool autoplayed = false,
+  }) async {
+    if (!_hasSeriesEpisodes ||
+        index < 0 ||
+        index >= _seriesEpisodes.length ||
+        player == null) {
+      return;
+    }
+    final entry = _seriesEpisodes[index];
+    await _saveFinalProgress();
+    if (mounted && status != null && status.trim().isNotEmpty) {
+      setState(() => statusMessage = status);
+    }
+    jellyfin = widget.jellyfinFor?.call(entry.streamUrl);
+    await player!.open(Media(jellyfin?.playUrl ?? entry.streamUrl), play: true);
+    resumePositionMs = 0;
+    if (mounted) {
+      setState(() {
+        _seriesEpisodeIndex = index;
+        if (autoplayed) {
+          showSeriesEpisodesPanel = false;
+        }
+        error = '';
+        creditsVisible = false;
+      });
+    } else {
+      _seriesEpisodeIndex = index;
+      if (autoplayed) {
+        showSeriesEpisodesPanel = false;
+      }
+      error = '';
+      creditsVisible = false;
+    }
+    await memory.saveProgress(
+      entry.streamUrl,
+      positionMs: 0,
+      durationMs: 0,
+      complete: false,
+    );
+  }
+
+  void _toggleContextPanel() {
+    if (widget.seriesEpisodePlayback && _hasSeriesEpisodes) {
+      setState(() {
+        showSeriesEpisodesPanel = !showSeriesEpisodesPanel;
+        if (showSeriesEpisodesPanel) {
+          showMovieQueuePanel = false;
+        }
+      });
+      return;
+    }
+    if (_hasMovieQueue) {
+      if (MediaQuery.sizeOf(context).width < 960) {
+        unawaited(_openMovieQueue());
+        return;
+      }
+      setState(() {
+        showMovieQueuePanel = !showMovieQueuePanel;
+        if (showMovieQueuePanel) {
+          showSeriesEpisodesPanel = false;
+        }
+      });
+    }
+  }
+
+  Future<void> _showCurrentDescription() async {
+    final description = _currentTopDescription();
+    if (description == null || description.trim().isEmpty) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Description'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(child: Text(description.trim())),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMovieQueueSidePanel() {
+    return Card(
+      color: _LiveTvMediaPaint.overlayStrong,
+      child: SizedBox(
+        width: 360,
+        child: Column(
+          children: [
+            ListTile(
+              title: const Text(
+                'Movie Queue',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: Text('${_movieQueue.length} movies • Plays in order'),
+              trailing: IconButton(
+                tooltip: 'Close',
+                onPressed: () => setState(() => showMovieQueuePanel = false),
+                icon: const Icon(Icons.close),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _movieQueue.length,
+                itemBuilder: (context, index) {
+                  final entry = _movieQueue[index];
+                  final nowPlaying = index == _movieQueueIndex;
+                  final nextUp = index == _movieQueueIndex + 1;
+                  return ListTile(
+                    selected: nowPlaying,
+                    leading: entry.posterUrl?.trim().isNotEmpty == true
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.network(
+                              entry.posterUrl!,
+                              width: 48,
+                              height: 68,
+                              fit: BoxFit.cover,
+                            ),
+                          )
+                        : const Icon(Icons.movie_outlined),
+                    title: Text(
+                      entry.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      nowPlaying
+                          ? '${_movieQueueMetadata(entry)} • Now playing'
+                          : nextUp
+                          ? '${_movieQueueMetadata(entry)} • Up next'
+                          : _movieQueueMetadata(entry),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Play next',
+                      onPressed: nowPlaying
+                          ? null
+                          : () => _queueMovieForPlayNext(index),
+                      icon: const Icon(Icons.playlist_play),
+                    ),
+                    onTap: () => unawaited(_openMovieQueueItem(index)),
+                  );
+                },
+              ),
+            ),
+            SwitchListTile(
+              title: const Text('Autoplay queue'),
+              value: autoplayNext,
+              onChanged: (value) {
+                setState(() => autoplayNext = value);
+                unawaited(_savePlayerPreferences());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSeriesEpisodesSidePanel() {
+    return Card(
+      color: _LiveTvMediaPaint.overlayStrong,
+      child: SizedBox(
+        width: 360,
+        child: Column(
+          children: [
+            ListTile(
+              title: const Text(
+                'Episodes',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: Text('${_seriesEpisodes.length} episodes'),
+              trailing: IconButton(
+                tooltip: 'Close',
+                onPressed: () =>
+                    setState(() => showSeriesEpisodesPanel = false),
+                icon: const Icon(Icons.close),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _seriesEpisodes.length,
+                itemBuilder: (context, index) {
+                  final entry = _seriesEpisodes[index];
+                  final nowPlaying = index == _seriesEpisodeIndex;
+                  return ListTile(
+                    selected: nowPlaying,
+                    leading: entry.posterUrl?.trim().isNotEmpty == true
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.network(
+                              entry.posterUrl!,
+                              width: 48,
+                              height: 68,
+                              fit: BoxFit.cover,
+                            ),
+                          )
+                        : const Icon(Icons.live_tv_outlined),
+                    title: Text(
+                      'E${entry.episode} · ${entry.title}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      nowPlaying
+                          ? 'S${entry.season} • Now playing'
+                          : 'S${entry.season}',
+                    ),
+                    trailing: nowPlaying
+                        ? const Icon(Icons.play_circle_fill)
+                        : const Icon(Icons.play_arrow),
+                    onTap: () => unawaited(
+                      _openSeriesEpisodeAt(
+                        index,
+                        status: 'Starting ${entry.title}...',
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            SwitchListTile(
+              title: const Text('Autoplay next episode'),
+              value: autoplayNext,
+              onChanged: (value) {
+                setState(() => autoplayNext = value);
+                unawaited(_savePlayerPreferences());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _snoozePlayNextPrompt() {
+    final totalMs = duration.inMilliseconds;
+    if (!_hasNextMovieQueueItem || totalMs <= 0) {
+      return;
+    }
+    final remainingMs = max(0, totalMs - position.inMilliseconds);
+    final snoozedTarget = max(
+      0,
+      remainingMs - const Duration(minutes: 2).inMilliseconds,
+    );
+    setState(() {
+      playNextPromptVisible = false;
+      nextMoviePromptRemainingMs = snoozedTarget;
+    });
+  }
+
+  void _dismissPlayNextPrompt() {
+    if (!_hasNextMovieQueueItem) {
+      return;
+    }
+    setState(() {
+      playNextPromptVisible = false;
+      playNextPromptDismissed = true;
+    });
   }
 
   Future<void> _pickAudioTrack() async {
@@ -6849,7 +8089,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         !buffering &&
         error.isEmpty &&
         statusMessage.isEmpty &&
-        !creditsVisible;
+        !creditsVisible &&
+        !showMovieQueuePanel &&
+        !showSeriesEpisodesPanel;
     if (!shouldAutoHide) {
       if (mounted && !controlsVisible) {
         setState(() => controlsVisible = true);
@@ -6990,7 +8232,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Subtitle & accessibility',
+                  'Subtitle & accessibility (premium)',
                   style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                 ),
                 const SizedBox(height: 10),
@@ -7105,6 +8347,29 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                   ),
                 ),
                 ListTile(
+                  title: const Text('Subtitle font family'),
+                  subtitle: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final family in const [
+                        'Default',
+                        'Arial',
+                        'Roboto',
+                        'Noto Sans',
+                        'Open Sans',
+                        'Verdana',
+                      ])
+                        ChoiceChip(
+                          label: Text(family),
+                          selected: subtitleFontFamily == family,
+                          onSelected: (_) =>
+                              setLocalState(() => subtitleFontFamily = family),
+                        ),
+                    ],
+                  ),
+                ),
+                ListTile(
                   title: Text(
                     'Subtitle font size: ${subtitleFontSize.toStringAsFixed(0)}',
                   ),
@@ -7145,9 +8410,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                     'Subtitle timing offset: ${subtitleDelaySeconds.toStringAsFixed(2)}s',
                   ),
                   subtitle: Slider(
-                    value: subtitleDelaySeconds.clamp(-5, 5),
-                    min: -5,
-                    max: 5,
+                    value: subtitleDelaySeconds.clamp(-10, 10),
+                    min: -10,
+                    max: 10,
                     onChanged: (value) =>
                         setLocalState(() => subtitleDelaySeconds = value),
                   ),
@@ -7656,11 +8921,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
-            for (final track in tracks.subtitle)
+            for (var i = 0; i < tracks.subtitle.length; i++)
               ListTile(
-                title: Text(track.title ?? '(Unnamed subtitle)'),
-                subtitle: Text(_langLabel(track.language)),
-                onTap: () => Navigator.pop(ctx, track),
+                title: Text(_subtitleTrackTitle(tracks.subtitle[i], i)),
+                subtitle: Text(_langLabel(tracks.subtitle[i].language)),
+                onTap: () => Navigator.pop(ctx, tracks.subtitle[i]),
               ),
           ],
         ),
@@ -7799,9 +9064,6 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       return;
     }
     final options = tracks.subtitle;
-    if (options.isEmpty) {
-      return;
-    }
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -7813,50 +9075,81 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
-            for (final track in options)
-              ListTile(
-                leading: Icon(
-                  selectedTrack.subtitle == track
-                      ? Icons.check_circle
-                      : Icons.subtitles_outlined,
-                ),
-                title: Text(track.title ?? '(Unnamed subtitle track)'),
-                subtitle: Text(
-                  '${_langLabel(track.language)} • ${_trackKindLabel(track.title ?? '')}',
-                ),
-                onTap: () async {
-                  try {
-                    await current.setSubtitleTrack(track);
-                    final subtitleLabel =
-                        '${track.title ?? ''} ${track.language ?? ''}'
-                            .toLowerCase();
-                    final likelyImageSubtitle =
-                        subtitleLabel.contains('pgs') ||
-                        subtitleLabel.contains('dvd') ||
-                        subtitleLabel.contains('vobsub');
-                    if (mounted) {
-                      setState(() {
-                        if (likelyImageSubtitle) {
-                          transcodeReason =
-                              'Selected subtitle may require provider-side burn-in on some servers.';
-                          qualityRoute = 'compatibility-constrained';
-                        } else {
-                          transcodeReason =
-                              'Subtitle track switched without forced transcoding.';
+            ListTile(
+              leading: const Icon(Icons.upload_file_outlined),
+              title: const Text('Import subtitle file'),
+              subtitle: const Text('Load SRT, ASS, SSA, VTT, or SUB file'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await _importSubtitleFile();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.tune),
+              title: const Text('Subtitle appearance & timing'),
+              subtitle: const Text(
+                'Font, size, colors, and subtitle delay/offset',
+              ),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await _openSubtitleAccessibilitySettings();
+              },
+            ),
+            if (options.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.info_outline),
+                title: Text('No embedded subtitle tracks'),
+                subtitle: Text('Import a subtitle file to continue.'),
+              ),
+            for (var i = 0; i < options.length; i++)
+              Builder(
+                builder: (context) {
+                  final track = options[i];
+                  return ListTile(
+                    leading: Icon(
+                      selectedTrack.subtitle == track
+                          ? Icons.check_circle
+                          : Icons.subtitles_outlined,
+                    ),
+                    title: Text(_subtitleTrackTitle(track, i)),
+                    subtitle: Text(
+                      '${_langLabel(track.language)} • ${_trackKindLabel(track.title ?? '')}',
+                    ),
+                    onTap: () async {
+                      try {
+                        await current.setSubtitleTrack(track);
+                        final subtitleLabel =
+                            '${track.title ?? ''} ${track.language ?? ''}'
+                                .toLowerCase();
+                        final likelyImageSubtitle =
+                            subtitleLabel.contains('pgs') ||
+                            subtitleLabel.contains('dvd') ||
+                            subtitleLabel.contains('vobsub');
+                        if (mounted) {
+                          setState(() {
+                            if (likelyImageSubtitle) {
+                              transcodeReason =
+                                  'Selected subtitle may require provider-side burn-in on some servers.';
+                              qualityRoute = 'compatibility-constrained';
+                            } else {
+                              transcodeReason =
+                                  'Subtitle track switched without forced transcoding.';
+                            }
+                          });
                         }
-                      });
-                    }
-                  } catch (_) {
-                    if (mounted) {
-                      setState(() {
-                        error =
-                            'This subtitle format could not be rendered on this platform. Try another track or compatible playback.';
-                      });
-                    }
-                  }
-                  if (ctx.mounted) {
-                    Navigator.pop(ctx);
-                  }
+                      } catch (_) {
+                        if (mounted) {
+                          setState(() {
+                            error =
+                                'This subtitle format could not be rendered on this platform. Try another track or compatible playback.';
+                          });
+                        }
+                      }
+                      if (ctx.mounted) {
+                        Navigator.pop(ctx);
+                      }
+                    },
+                  );
                 },
               ),
           ],
@@ -8456,6 +9749,117 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                             ),
                           if (!fullscreen || controlsVisible)
                             Positioned(
+                              top: 8,
+                              left: 10,
+                              child: SafeArea(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    color: _LiveTvMediaPaint.overlayMuted,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_currentTopPosterUrl()
+                                                ?.trim()
+                                                .isNotEmpty ==
+                                            true)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              right: 10,
+                                            ),
+                                            child: ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              child: Image.network(
+                                                _currentTopPosterUrl()!,
+                                                width: 44,
+                                                height: 62,
+                                                fit: BoxFit.cover,
+                                              ),
+                                            ),
+                                          ),
+                                        Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              widget.title,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 18,
+                                              ),
+                                            ),
+                                            Text(
+                                              _currentTopMetaLine(),
+                                              style: TextStyle(
+                                                color: _LiveTvMediaPaint
+                                                    .onSurface70,
+                                              ),
+                                            ),
+                                            if (_currentTopDescription()
+                                                    ?.trim()
+                                                    .isNotEmpty ==
+                                                true)
+                                              TextButton.icon(
+                                                onPressed: () => unawaited(
+                                                  _showCurrentDescription(),
+                                                ),
+                                                style: TextButton.styleFrom(
+                                                  visualDensity:
+                                                      VisualDensity.compact,
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 4,
+                                                      ),
+                                                  minimumSize: const Size(
+                                                    0,
+                                                    28,
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.info_outline,
+                                                  size: 16,
+                                                ),
+                                                label: const Text(
+                                                  'Description',
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          if (showMovieQueuePanel && _hasMovieQueue)
+                            Positioned(
+                              top: 92,
+                              right: 12,
+                              bottom: 118,
+                              child: SafeArea(
+                                child: _buildMovieQueueSidePanel(),
+                              ),
+                            ),
+                          if (showSeriesEpisodesPanel &&
+                              widget.seriesEpisodePlayback &&
+                              _hasSeriesEpisodes)
+                            Positioned(
+                              top: 92,
+                              right: 12,
+                              bottom: 118,
+                              child: SafeArea(
+                                child: _buildSeriesEpisodesSidePanel(),
+                              ),
+                            ),
+                          if (!fullscreen || controlsVisible)
+                            Positioned(
                               top: 6,
                               right: 6,
                               child: SafeArea(
@@ -8648,35 +10052,203 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                                     ),
                                                     tooltip: 'Forward',
                                                   ),
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekRelative(
-                                                        const Duration(
-                                                          seconds: 90,
+                                                  if (_seriesSkipControlsEnabled)
+                                                    IconButton.filledTonal(
+                                                      onPressed: () =>
+                                                          unawaited(
+                                                            _seekRelative(
+                                                              const Duration(
+                                                                seconds: 90,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                      icon: const Icon(
+                                                        Icons
+                                                            .skip_next_outlined,
+                                                      ),
+                                                      tooltip: 'Skip intro',
+                                                    ),
+                                                  if (_seriesSkipControlsEnabled)
+                                                    IconButton.filledTonal(
+                                                      onPressed: () =>
+                                                          unawaited(
+                                                            _seekRelative(
+                                                              const Duration(
+                                                                seconds: 30,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                      icon: const Icon(
+                                                        Icons
+                                                            .fast_forward_outlined,
+                                                      ),
+                                                      tooltip: 'Skip recap',
+                                                    ),
+                                                  if (widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasSeriesEpisodes)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _hasPreviousSeriesEpisode
+                                                          ? () => unawaited(
+                                                              _openSeriesEpisodeAt(
+                                                                _seriesEpisodeIndex -
+                                                                    1,
+                                                                status:
+                                                                    'Starting previous episode...',
+                                                              ),
+                                                            )
+                                                          : null,
+                                                      icon: const Icon(
+                                                        Icons.skip_previous,
+                                                      ),
+                                                      tooltip:
+                                                          'Previous episode',
+                                                    ),
+                                                  if (widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasSeriesEpisodes)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _hasNextSeriesEpisode
+                                                          ? () => unawaited(
+                                                              _openSeriesEpisodeAt(
+                                                                _seriesEpisodeIndex +
+                                                                    1,
+                                                                status:
+                                                                    _nextSeriesEpisodeLabel ==
+                                                                        null
+                                                                    ? 'Starting next episode...'
+                                                                    : 'Starting $_nextSeriesEpisodeLabel...',
+                                                              ),
+                                                            )
+                                                          : null,
+                                                      icon: const Icon(
+                                                        Icons.skip_next,
+                                                      ),
+                                                      tooltip: 'Next episode',
+                                                    ),
+                                                  if (widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasSeriesEpisodes)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _toggleContextPanel,
+                                                      icon: const Icon(
+                                                        Icons.list_alt,
+                                                      ),
+                                                      tooltip: 'Episodes',
+                                                    ),
+                                                  if (!widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasMovieQueue)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _hasPreviousMovieQueueItem
+                                                          ? () => unawaited(
+                                                              _openMovieQueueItem(
+                                                                _movieQueueIndex -
+                                                                    1,
+                                                                status:
+                                                                    'Starting previous movie...',
+                                                              ),
+                                                            )
+                                                          : null,
+                                                      icon: const Icon(
+                                                        Icons.skip_previous,
+                                                      ),
+                                                      tooltip: 'Previous movie',
+                                                    ),
+                                                  if (!widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasMovieQueue)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _hasNextMovieQueueItem
+                                                          ? () => unawaited(
+                                                              _openMovieQueueItem(
+                                                                _movieQueueIndex +
+                                                                    1,
+                                                                status:
+                                                                    _nextMovieTitle ==
+                                                                        null
+                                                                    ? 'Starting next movie...'
+                                                                    : 'Starting $_nextMovieTitle...',
+                                                              ),
+                                                            )
+                                                          : null,
+                                                      icon: const Icon(
+                                                        Icons.skip_next,
+                                                      ),
+                                                      tooltip: 'Next movie',
+                                                    ),
+                                                  if (!widget
+                                                          .seriesEpisodePlayback &&
+                                                      _hasMovieQueue)
+                                                    IconButton.filledTonal(
+                                                      onPressed:
+                                                          _toggleContextPanel,
+                                                      icon: const Icon(
+                                                        Icons.queue_music,
+                                                      ),
+                                                      tooltip: 'Queue',
+                                                    ),
+                                                  DecoratedBox(
+                                                    decoration: BoxDecoration(
+                                                      color: _LiveTvMediaPaint
+                                                          .overlayMuted,
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            10,
+                                                          ),
+                                                    ),
+                                                    child: Padding(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                            horizontal: 10,
+                                                            vertical: 6,
+                                                          ),
+                                                      child: Text(
+                                                        widget.seriesEpisodePlayback
+                                                            ? 'Series controls'
+                                                            : 'Movie controls',
+                                                        style: const TextStyle(
+                                                          fontSize: 11,
                                                         ),
                                                       ),
                                                     ),
-                                                    icon: const Icon(
-                                                      Icons.skip_next_outlined,
-                                                    ),
-                                                    tooltip: 'Skip intro',
-                                                  ),
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekRelative(
-                                                        const Duration(
-                                                          seconds: 30,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons
-                                                          .fast_forward_outlined,
-                                                    ),
-                                                    tooltip: 'Skip recap',
                                                   ),
                                                 ],
                                               ),
+                                              if ((widget.seriesEpisodePlayback &&
+                                                      _hasSeriesEpisodes) ||
+                                                  (!widget.seriesEpisodePlayback &&
+                                                      _hasMovieQueue))
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        top: 6,
+                                                        bottom: 2,
+                                                      ),
+                                                  child: Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
+                                                    child: FilledButton.tonalIcon(
+                                                      onPressed:
+                                                          _toggleContextPanel,
+                                                      icon: Icon(
+                                                        widget.seriesEpisodePlayback
+                                                            ? Icons.view_list
+                                                            : Icons.queue_music,
+                                                      ),
+                                                      label: Text(
+                                                        widget.seriesEpisodePlayback
+                                                            ? 'Episodes'
+                                                            : 'Queue',
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
                                               Slider(
                                                 value:
                                                     duration.inMilliseconds <= 0
@@ -8822,28 +10394,160 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                                 ),
                                                 tooltip: 'Forward',
                                               ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekRelative(
-                                                    const Duration(seconds: 90),
+                                              if (_seriesSkipControlsEnabled)
+                                                IconButton(
+                                                  onPressed: () => unawaited(
+                                                    _seekRelative(
+                                                      const Duration(
+                                                        seconds: 90,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  icon: const Icon(
+                                                    Icons.skip_next_outlined,
+                                                  ),
+                                                  tooltip: 'Skip intro',
+                                                ),
+                                              if (_seriesSkipControlsEnabled)
+                                                IconButton(
+                                                  onPressed: () => unawaited(
+                                                    _seekRelative(
+                                                      const Duration(
+                                                        seconds: 30,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  icon: const Icon(
+                                                    Icons.fast_forward_outlined,
+                                                  ),
+                                                  tooltip: 'Skip recap',
+                                                ),
+                                              if (widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasSeriesEpisodes)
+                                                IconButton(
+                                                  onPressed:
+                                                      _hasPreviousSeriesEpisode
+                                                      ? () => unawaited(
+                                                          _openSeriesEpisodeAt(
+                                                            _seriesEpisodeIndex -
+                                                                1,
+                                                            status:
+                                                                'Starting previous episode...',
+                                                          ),
+                                                        )
+                                                      : null,
+                                                  icon: const Icon(
+                                                    Icons.skip_previous,
+                                                  ),
+                                                  tooltip: 'Previous episode',
+                                                ),
+                                              if (widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasSeriesEpisodes)
+                                                IconButton(
+                                                  onPressed:
+                                                      _hasNextSeriesEpisode
+                                                      ? () => unawaited(
+                                                          _openSeriesEpisodeAt(
+                                                            _seriesEpisodeIndex +
+                                                                1,
+                                                            status:
+                                                                _nextSeriesEpisodeLabel ==
+                                                                    null
+                                                                ? 'Starting next episode...'
+                                                                : 'Starting $_nextSeriesEpisodeLabel...',
+                                                          ),
+                                                        )
+                                                      : null,
+                                                  icon: const Icon(
+                                                    Icons.skip_next,
+                                                  ),
+                                                  tooltip: 'Next episode',
+                                                ),
+                                              if (widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasSeriesEpisodes)
+                                                IconButton(
+                                                  onPressed:
+                                                      _toggleContextPanel,
+                                                  icon: const Icon(
+                                                    Icons.list_alt,
+                                                  ),
+                                                  tooltip: 'Episodes',
+                                                ),
+                                              if (!widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasMovieQueue)
+                                                IconButton(
+                                                  onPressed:
+                                                      _hasPreviousMovieQueueItem
+                                                      ? () => unawaited(
+                                                          _openMovieQueueItem(
+                                                            _movieQueueIndex -
+                                                                1,
+                                                            status:
+                                                                'Starting previous movie...',
+                                                          ),
+                                                        )
+                                                      : null,
+                                                  icon: const Icon(
+                                                    Icons.skip_previous,
+                                                  ),
+                                                  tooltip: 'Previous movie',
+                                                ),
+                                              if (!widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasMovieQueue)
+                                                IconButton(
+                                                  onPressed:
+                                                      _hasNextMovieQueueItem
+                                                      ? () => unawaited(
+                                                          _openMovieQueueItem(
+                                                            _movieQueueIndex +
+                                                                1,
+                                                            status:
+                                                                _nextMovieTitle ==
+                                                                    null
+                                                                ? 'Starting next movie...'
+                                                                : 'Starting $_nextMovieTitle...',
+                                                          ),
+                                                        )
+                                                      : null,
+                                                  icon: const Icon(
+                                                    Icons.skip_next,
+                                                  ),
+                                                  tooltip: 'Next movie',
+                                                ),
+                                              if (!widget
+                                                      .seriesEpisodePlayback &&
+                                                  _hasMovieQueue)
+                                                IconButton(
+                                                  onPressed:
+                                                      _toggleContextPanel,
+                                                  icon: const Icon(
+                                                    Icons.queue_music,
+                                                  ),
+                                                  tooltip: 'Queue',
+                                                ),
+                                              if ((widget.seriesEpisodePlayback &&
+                                                      _hasSeriesEpisodes) ||
+                                                  (!widget.seriesEpisodePlayback &&
+                                                      _hasMovieQueue))
+                                                FilledButton.tonalIcon(
+                                                  onPressed:
+                                                      _toggleContextPanel,
+                                                  icon: Icon(
+                                                    widget.seriesEpisodePlayback
+                                                        ? Icons.view_list
+                                                        : Icons.queue_music,
+                                                  ),
+                                                  label: Text(
+                                                    widget.seriesEpisodePlayback
+                                                        ? 'Episodes'
+                                                        : 'Queue',
                                                   ),
                                                 ),
-                                                icon: const Icon(
-                                                  Icons.skip_next_outlined,
-                                                ),
-                                                tooltip: 'Skip intro',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekRelative(
-                                                    const Duration(seconds: 30),
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.fast_forward_outlined,
-                                                ),
-                                                tooltip: 'Skip recap',
-                                              ),
                                               IconButton(
                                                 onPressed: () =>
                                                     unawaited(_toggleMute()),
@@ -9002,21 +10706,60 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                                 ),
                               ),
                             ),
-                          if (creditsVisible &&
-                              widget.nextEpisodeStreamUrl?.trim().isNotEmpty ==
-                                  true)
+                          if (_showPlayNextOverlay)
                             Positioned(
                               right: 12,
                               bottom: 124,
                               child: SafeArea(
-                                child: FilledButton.icon(
-                                  onPressed: () =>
-                                      unawaited(_handlePlaybackCompleted()),
-                                  icon: const Icon(Icons.skip_next),
-                                  label: Text(
-                                    widget.nextEpisodeTitle == null
-                                        ? 'Next episode'
-                                        : 'Next: ${widget.nextEpisodeTitle}',
+                                child: Card(
+                                  color: highContrastInterface
+                                      ? Theme.of(context).colorScheme.surface
+                                      : _LiveTvMediaPaint.overlayStrong,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        FilledButton.icon(
+                                          onPressed: () => unawaited(
+                                            _handlePlaybackCompleted(
+                                              force: true,
+                                            ),
+                                          ),
+                                          icon: const Icon(Icons.skip_next),
+                                          label: Text(
+                                            widget.nextEpisodeStreamUrl
+                                                        ?.trim()
+                                                        .isNotEmpty ==
+                                                    true
+                                                ? (widget.nextEpisodeTitle ==
+                                                          null
+                                                      ? 'Next episode'
+                                                      : 'Next: ${widget.nextEpisodeTitle}')
+                                                : (widget.seriesEpisodePlayback &&
+                                                      _hasNextSeriesEpisode)
+                                                ? (_nextSeriesEpisodeLabel ==
+                                                          null
+                                                      ? 'Next episode'
+                                                      : 'Next: $_nextSeriesEpisodeLabel')
+                                                : (_nextMovieTitle == null
+                                                      ? 'Play Next'
+                                                      : 'Play Next: $_nextMovieTitle'),
+                                          ),
+                                        ),
+                                        if (_hasNextMovieQueueItem) ...[
+                                          const SizedBox(width: 8),
+                                          TextButton(
+                                            onPressed: _snoozePlayNextPrompt,
+                                            child: const Text('Snooze 2 min'),
+                                          ),
+                                          TextButton(
+                                            onPressed: _dismissPlayNextPrompt,
+                                            child: const Text('Dismiss'),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),

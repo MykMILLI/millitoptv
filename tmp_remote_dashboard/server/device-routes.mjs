@@ -112,15 +112,14 @@ export function registerDeviceRoutes(app, pool) {
           d.last_seen_at,
           d.last_activity_at,
           d.reported_state,
-          d.revoked_at,
           CASE
-            WHEN d.revoked_at IS NOT NULL THEN 'revoked'
             WHEN d.last_seen_at > now() - interval '90 seconds'
               THEN 'online'
             ELSE 'offline'
           END AS connection_status
         FROM millitop_tv.devices d
         JOIN millitop_tv.households h ON h.id = d.household_id
+        WHERE d.revoked_at IS NULL
         ORDER BY d.enrolled_at DESC
       `);
 
@@ -130,7 +129,7 @@ export function registerDeviceRoutes(app, pool) {
     }
   });
 
-  app.post('/api/admin/devices/:id/revoke', async (req, res, next) => {
+  async function deleteDevice(req, res, next) {
     if (!uuidPattern.test(req.params.id)) {
       return res.status(400).json({ error: 'Invalid device ID.' });
     }
@@ -164,19 +163,23 @@ export function registerDeviceRoutes(app, pool) {
       await connection.query(
         `INSERT INTO millitop_tv.audit_log
            (actor_user_id, action, entity_type, entity_id)
-         VALUES ($1, 'device.revoked', 'device', $2)`,
+         VALUES ($1, 'device.deleted', 'device', $2)`,
         [req.admin.id, req.params.id]
       );
 
       await connection.query('COMMIT');
-      res.json({ revoked: true });
+      res.json({ deleted: true });
     } catch (error) {
       if (connection) await connection.query('ROLLBACK').catch(() => {});
       next(error);
     } finally {
       connection?.release();
     }
-  });
+  }
+
+  app.post('/api/admin/devices/:id/delete', deleteDevice);
+  // Backward-compatible alias for older dashboard clients.
+  app.post('/api/admin/devices/:id/revoke', deleteDevice);
 
   app.post('/api/device/enroll', enrollmentLimit, async (req, res, next) => {
     const input = req.body?.code;
@@ -346,6 +349,37 @@ export function registerDeviceRoutes(app, pool) {
          WHERE id = $1`,
         [deviceId, inserted.rowCount === 1, active, state, appVersion]
       );
+
+      const reported = /^(\d+\.\d+\.\d+)\+(\d+)$/.exec(appVersion.trim());
+      if (reported) {
+        const version = reported[1];
+        const build = Number.parseInt(reported[2], 10);
+        if (Number.isInteger(build) && build > 0) {
+          const verified = await connection.query(
+            `UPDATE millitop_tv.app_update_assignments a
+             SET status = 'verified',
+                 verified_at = COALESCE(a.verified_at, now()),
+                 updated_at = now(),
+                 last_error = NULL
+             FROM millitop_tv.app_releases r
+             WHERE a.release_id = r.id
+               AND a.device_id = $1
+               AND a.status NOT IN ('verified', 'failed')
+               AND r.version = $2
+               AND r.build = $3
+             RETURNING a.id`,
+            [deviceId, version, build]
+          );
+          for (const row of verified.rows) {
+            await connection.query(
+              `INSERT INTO millitop_tv.app_update_events
+                 (id, assignment_id, status)
+               VALUES ($1, $2, 'verified')`,
+              [randomUUID(), row.id]
+            );
+          }
+        }
+      }
 
       await connection.query('COMMIT');
 

@@ -118,4 +118,88 @@ export function registerTelemetryRoutes(app, { store, deviceLimit, options = {} 
       next(error);
     }
   });
+
+  app.get('/api/admin/telemetry/events', async (req, res, next) => {
+    try {
+      const householdId = /^[0-9a-f-]{36}$/i.test(String(req.query.household ?? ''))
+        ? String(req.query.household)
+        : null;
+      const categoryRaw = clip(req.query.category, 40);
+      const levelRaw = String(req.query.level ?? '').trim().toLowerCase();
+      const level = LEVELS.has(levelRaw) ? levelRaw : null;
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
+      const sinceIdRaw = req.query.sinceId == null ? null : Number(req.query.sinceId);
+      const sinceId = Number.isSafeInteger(sinceIdRaw) && sinceIdRaw >= 0 ? sinceIdRaw : null;
+      const events = await store.recentEvents({
+        sinceId,
+        householdId,
+        category: categoryRaw,
+        level,
+        limit,
+      });
+      const nextSinceId = events.length ? events[events.length - 1].id : sinceId;
+      res.json({ events, nextSinceId });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/admin/telemetry/live', async (req, res, next) => {
+    try {
+      const householdId = /^[0-9a-f-]{36}$/i.test(String(req.query.household ?? ''))
+        ? String(req.query.household)
+        : null;
+      const categoryRaw = clip(req.query.category, 40);
+      const levelRaw = String(req.query.level ?? '').trim().toLowerCase();
+      const level = LEVELS.has(levelRaw) ? levelRaw : null;
+      let sinceIdRaw = req.query.sinceId == null ? null : Number(req.query.sinceId);
+      let sinceId = Number.isSafeInteger(sinceIdRaw) && sinceIdRaw >= 0 ? sinceIdRaw : null;
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
+
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+
+      let closed = false;
+      const pollMs = 1500;
+      const heartbeatMs = 15000;
+      let lastHeartbeatAt = Date.now();
+
+      const send = async () => {
+        if (closed) return;
+        const events = await store.recentEvents({
+          sinceId,
+          householdId,
+          category: categoryRaw,
+          level,
+          limit,
+        });
+        if (events.length) {
+          sinceId = events[events.length - 1].id;
+          res.write(`event: telemetry\n`);
+          res.write(`data: ${JSON.stringify({ events, nextSinceId: sinceId })}\n\n`);
+          lastHeartbeatAt = Date.now();
+        } else if (Date.now() - lastHeartbeatAt >= heartbeatMs) {
+          res.write(`event: keepalive\ndata: {"ok":true}\n\n`);
+          lastHeartbeatAt = Date.now();
+        }
+      };
+
+      await send();
+      const timer = setInterval(() => {
+        send().catch(error => {
+          logger.error('Telemetry live stream failed', error);
+        });
+      }, pollMs);
+      timer.unref?.();
+
+      req.on('close', () => {
+        closed = true;
+        clearInterval(timer);
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
 }

@@ -12,6 +12,14 @@ class MemoryStore {
   async insertEvents(rows) { this.rows.push(...rows); return rows.length; }
   async prune() {}
   async summary() { return { totals: { error: this.rows.filter(r => r.level === 'error').length } }; }
+  async recentEvents({ sinceId = null, category = null, level = null, limit = 100 } = {}) {
+    return this.rows
+      .map((row, index) => ({ id: index + 1, ...row }))
+      .filter(row => (sinceId == null || row.id > sinceId))
+      .filter(row => (!category || row.category === category))
+      .filter(row => (!level || row.level === level))
+      .slice(0, limit);
+  }
 }
 
 async function harness() {
@@ -67,6 +75,32 @@ test('device upload requires auth and stores valid rows', async () => {
     assert.equal(h.store.rows[0].householdId, HH);
     assert.equal(h.store.rows[0].error, 'SocketException http://***:***@h');
     assert.equal(h.store.rows[1].platform, 'windows');
+  } finally {
+    h.close();
+  }
+});
+
+test('admin recent events endpoint filters and cursors', async () => {
+  const h = await harness();
+  try {
+    await h.post({
+      sessionId: 'abc',
+      appVersion: '2.0+5',
+      platform: 'android',
+      events: [
+        { t: new Date().toISOString(), lvl: 'info', cat: 'analytics', msg: 'screen.view' },
+        { t: new Date().toISOString(), lvl: 'warn', cat: 'playback', msg: 'live_tv.buffer.end', details: { bufferedMs: 6200 } },
+      ],
+    });
+    const first = await fetch(`${h.base}/api/admin/telemetry/events?category=playback`);
+    assert.equal(first.status, 200);
+    const one = await first.json();
+    assert.equal(one.events.length, 1);
+    assert.equal(one.events[0].category, 'playback');
+    const second = await fetch(`${h.base}/api/admin/telemetry/events?sinceId=${one.nextSinceId}`);
+    assert.equal(second.status, 200);
+    const two = await second.json();
+    assert.equal(two.events.length, 0);
   } finally {
     h.close();
   }

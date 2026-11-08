@@ -2496,6 +2496,7 @@ class MusicService {
       'sessionHistory': await _mapListByKey(
         '$_sessionHistoryKeyPrefix$profileId',
       ),
+      'playbackSession': await loadPlaybackSession(profileId),
       'historyPaused': await historyCollectionPaused(profileId),
       'excludedSessions': await _mapListByKey(
         '$_excludedSessionsKeyPrefix$profileId',
@@ -2676,6 +2677,23 @@ class MusicService {
         '$_sessionHistoryKeyPrefix$profileId',
         values.take(20000).toList(),
       );
+    }
+    final playbackSessionRaw = state['playbackSession'];
+    if (playbackSessionRaw is Map) {
+      final payload = Map<String, dynamic>.from(playbackSessionRaw);
+      final queueRaw = payload['queue'];
+      final index = int.tryParse(payload['index']?.toString() ?? '');
+      if (queueRaw is List &&
+          queueRaw.isNotEmpty &&
+          index != null &&
+          index >= 0) {
+        if (!await (await SharedPreferences.getInstance()).setString(
+          '$_sessionKeyPrefix$profileId',
+          jsonEncode(payload),
+        )) {
+          throw StateError('Could not apply synced music playback session.');
+        }
+      }
     }
     final historyPausedRaw = state['historyPaused'];
     if (historyPausedRaw is bool) {

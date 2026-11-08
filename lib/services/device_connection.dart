@@ -286,22 +286,44 @@ class DeviceConnection {
     if (old.scheme == 'https') {
       return;
     }
-    if (old.scheme != 'http' ||
-        old.host != '192.168.1.36' ||
-        old.port != 8185) {
+    if (old.scheme != 'http') {
       throw const BillingTransportException(
         0,
         'origin',
-        'This connection cannot be automatically moved. Ask support to verify the secure server origin.',
+        'This connection cannot be automatically moved. Pair again using an HTTP or HTTPS server origin.',
       );
     }
     final secure = validateServer('https://tvadmin.millitop.net');
-    final proof = await _post(secure, '/api/device/heartbeat', {
-      'sessionId': _sessionId,
-      'state': _mediaSessions.isNotEmpty ? 'media_active' : 'browsing',
-      'active': true,
-      'appVersion': _version,
-    }, token: record['deviceToken'] as String);
+    Map<String, dynamic> proof;
+    try {
+      proof = await _post(secure, '/api/device/heartbeat', {
+        'sessionId': _sessionId,
+        'state': _mediaSessions.isNotEmpty ? 'media_active' : 'browsing',
+        'active': true,
+        'appVersion': _version,
+      }, token: record['deviceToken'] as String);
+    } on DeviceRequestFailure catch (error) {
+      final message = error.message.trim();
+      throw BillingTransportException(
+        error.statusCode,
+        'origin',
+        message.isEmpty
+            ? 'The secure server did not accept this device credential.'
+            : message,
+      );
+    } on HandshakeException catch (error) {
+      throw BillingTransportException(
+        0,
+        'origin',
+        'Secure connection failed TLS validation. Confirm the HTTPS certificate and system clock, then retry. Details: $error',
+      );
+    } on SocketException {
+      throw const BillingTransportException(
+        0,
+        'origin',
+        'Could not reach the secure server. Confirm https://tvadmin.millitop.net is reachable from this device.',
+      );
+    }
     if (proof['accepted'] != true || previous != connectionKey) {
       throw const BillingTransportException(
         0,
@@ -329,12 +351,18 @@ class DeviceConnection {
   String get serverUrl => _record?['serverUrl'] as String? ?? '';
 
   static const String _secureDefaultOrigin = 'https://tvadmin.millitop.net';
-  static const String _localTestOrigin = 'http://192.168.1.36:8185';
+  static const String _knownMistypedSecureOrigin =
+      'https://tvadmin.milltop.net';
 
   static String _normalizeServerInput(String input) {
     final trimmed = input.trim();
     if (trimmed.isEmpty) {
       throw const FormatException('Enter the dashboard server address.');
+    }
+    if (trimmed.toLowerCase().startsWith('http://')) {
+      throw const FormatException(
+        'Use HTTPS for the dashboard server, for example https://tvadmin.millitop.net.',
+      );
     }
     if (trimmed.contains('://')) {
       return trimmed;
@@ -344,7 +372,8 @@ class DeviceConnection {
 
   static List<Uri> _enrollmentServerCandidates(String address) {
     final primary = validateServer(_normalizeServerInput(address));
-    final localTest = validateServer(_localTestOrigin);
+    final secureDefault = validateServer(_secureDefaultOrigin);
+    final mistypedSecure = validateServer(_knownMistypedSecureOrigin);
     final candidates = <Uri>[primary];
 
     void addIfMissing(Uri value) {
@@ -353,18 +382,12 @@ class DeviceConnection {
       }
     }
 
-    if (primary == localTest) {
-      addIfMissing(validateServer(_secureDefaultOrigin));
+    if (primary == mistypedSecure) {
+      addIfMissing(secureDefault);
     }
 
-    if (primary.scheme == 'http') {
-      addIfMissing(
-        Uri(
-          scheme: 'https',
-          host: primary.host,
-          port: primary.hasPort && primary.port != 80 ? primary.port : null,
-        ),
-      );
+    if (primary.host.toLowerCase() == 'tvadmin.milltop.net') {
+      addIfMissing(secureDefault);
     }
 
     return candidates;
@@ -544,10 +567,23 @@ class DeviceConnection {
         if (lastRequestFailure != null) {
           throw lastRequestFailure;
         }
+        final normalizedInput = _normalizeServerInput(address);
+        final typoHint =
+            normalizedInput.toLowerCase().contains('tvadmin.milltop.net')
+            ? ' Use https://tvadmin.millitop.net.'
+            : '';
         if (lastNetworkFailure != null) {
+          if (lastNetworkFailure is HandshakeException) {
+            throw StateError(
+              'TLS handshake failed while pairing.$typoHint Confirm the '
+              'dashboard certificate, server time, and exact HTTPS address.',
+            );
+          }
           throw lastNetworkFailure;
         }
-        throw StateError('Pairing could not reach the dashboard server.');
+        throw StateError(
+          'Pairing could not reach the dashboard server.$typoHint',
+        );
       }
 
       if (data['deviceId'] is! String ||
@@ -601,6 +637,21 @@ class DeviceConnection {
       status.value = 'Pairing did not finish';
 
       if (error is StateError) rethrow;
+      if (error is SocketException) {
+        final typoHint = address.toLowerCase().contains('tvadmin.milltop.net')
+            ? ' Use https://tvadmin.millitop.net.'
+            : '';
+        throw StateError(
+          'Pairing could not resolve or reach the dashboard host.$typoHint',
+        );
+      }
+      if (error is HandshakeException) {
+        throw StateError(
+          'Secure pairing failed because TLS could not be established. '
+          'Confirm the exact HTTPS server URL, certificate trust, and '
+          'system clock. Details: $error',
+        );
+      }
 
       throw StateError(
         'Pairing could not finish. If the server created a device, revoke '

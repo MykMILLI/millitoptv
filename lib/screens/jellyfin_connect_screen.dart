@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../services/jellyfin_client.dart';
+import '../services/profile_sync.dart';
 
 /// Signs a Millitop profile into Jellyfin (Quick Connect or password) and
 /// picks which libraries appear in Movies & Series. Pops `true` when the
@@ -265,6 +266,7 @@ class _JellyfinConnectScreenState extends State<JellyfinConnectScreen> {
 
   Future<void> _save(JellyfinAccount next) async {
     await store.save(widget.profileId, next);
+    ProfileSync.schedulePush(widget.profileId);
     if (mounted) {
       setState(() {
         account = next;
@@ -275,6 +277,7 @@ class _JellyfinConnectScreenState extends State<JellyfinConnectScreen> {
 
   Future<void> _signOut() async {
     await store.clear(widget.profileId);
+    ProfileSync.schedulePush(widget.profileId);
     AppLog.audit(
       'Jellyfin signed out',
       details: {'profileId': widget.profileId},

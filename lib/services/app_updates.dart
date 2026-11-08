@@ -8,8 +8,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:uuid/uuid.dart';
 import '../profiles/household_store.dart';
 import '../store/store_job.dart';
@@ -56,14 +57,68 @@ class AppUpdates with WidgetsBindingObserver {
   bool _started = false, _checking = false, _installing = false;
   bool recoveryRequired = false;
   bool _prepared = false;
+  final Set<String> _androidConfirmedAssignments = <String>{};
   late final UpdatePoller _poller = UpdatePoller(check);
   PackageInfo? _info;
-  Directory get root {
-    final base = Platform.environment['LOCALAPPDATA'];
-    if (base == null) {
-      throw StateError('Windows app-data directory unavailable.');
+
+  String _releasePlatform() {
+    if (Platform.isWindows) return 'windows-x64';
+    if (Platform.isAndroid) return 'android-universal';
+    if (Platform.isIOS) return 'ios-universal';
+    if (Platform.isLinux) return 'linux-x64';
+    if (Platform.isMacOS) return 'macos-universal';
+    return 'unknown';
+  }
+
+  Map<String, dynamic> _updateCheckPayload(PackageInfo info) {
+    final build = int.tryParse(info.buildNumber);
+    final payload = <String, dynamic>{'platform': _releasePlatform()};
+    if (RegExp(r'^\d+\.\d+\.\d+$').hasMatch(info.version) &&
+        build != null &&
+        build > 0) {
+      payload['version'] = info.version;
+      payload['build'] = build;
     }
-    return Directory('$base\\MILLITOPTV\\updates');
+    return payload;
+  }
+
+  String _currentPlatformKey() => _releasePlatform().toLowerCase();
+
+  bool _releaseMatchesCurrentPlatform(Map<String, dynamic> release) {
+    final offered = release['platform']?.toString().toLowerCase().trim();
+    return offered != null &&
+        offered.isNotEmpty &&
+        offered == _currentPlatformKey();
+  }
+
+  String _updateFailureContext(Map<String, dynamic>? release, String branch) {
+    final info = _info;
+    final currentVersion = info == null
+        ? 'unknown'
+        : '${info.version}+${info.buildNumber}';
+    final offeredPlatform = release?['platform']?.toString() ?? 'unknown';
+    final offeredVersion = release == null
+        ? 'unknown'
+        : '${release['version'] ?? 'unknown'}+${release['build'] ?? 'unknown'}';
+    return 'branch=$branch runtime=${_currentPlatformKey()} app=$currentVersion offeredPlatform=$offeredPlatform offered=$offeredVersion';
+  }
+
+  String _windowsLocalAppDataPath() {
+    final direct = Platform.environment['LOCALAPPDATA']?.trim();
+    if (direct != null && direct.isNotEmpty) {
+      return direct;
+    }
+    final profile = Platform.environment['USERPROFILE']?.trim();
+    if (profile != null && profile.isNotEmpty) {
+      return '$profile\\AppData\\Local';
+    }
+    throw StateError(
+      'Windows update storage could not be resolved. LOCALAPPDATA and USERPROFILE are unavailable.',
+    );
+  }
+
+  Directory get root {
+    return Directory('${_windowsLocalAppDataPath()}\\MILLITOPTV\\updates');
   }
 
   File get pending => File('${root.path}\\pending.json');
@@ -212,7 +267,7 @@ class AppUpdates with WidgetsBindingObserver {
       final expected = link.connectionKey;
       final response = await link.postDevice(
         '/api/device/updates/check',
-        {},
+        _updateCheckPayload(_info!),
         expectedConnection: expected,
       );
       if (link.connectionKey != expected || !link.isConnected) return;
@@ -224,6 +279,16 @@ class AppUpdates with WidgetsBindingObserver {
           r['assignmentId'] is! String) {
         return;
       }
+      if (!_releaseMatchesCurrentPlatform(r)) {
+        await _report(
+          r['assignmentId'] as String,
+          'failed',
+          error:
+              'Offered release platform does not match this device platform.',
+        );
+        return;
+      }
+      await _confirmAndroidInstallIfCurrent(r, expectedConnection: expected);
       if (!newerRelease(
         r['version'] as String,
         r['build'] as int,
@@ -249,6 +314,41 @@ class AppUpdates with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _confirmAndroidInstallIfCurrent(
+    Map<String, dynamic> release, {
+    required String expectedConnection,
+  }) async {
+    if (!Platform.isAndroid || _info == null || !link.isConnected) return;
+    if (link.connectionKey != expectedConnection) return;
+    final id = release['assignmentId']?.toString() ?? '';
+    final version = release['version']?.toString() ?? '';
+    final build = release['build'];
+    final installedBuild = int.tryParse(_info!.buildNumber);
+    if (id.isEmpty ||
+        _androidConfirmedAssignments.contains(id) ||
+        build is! int ||
+        installedBuild == null ||
+        version != _info!.version ||
+        build != installedBuild) {
+      return;
+    }
+    try {
+      await _report(id, 'awaiting_confirmation');
+      if (link.connectionKey != expectedConnection || !link.isConnected) return;
+      await link.postDevice('/api/device/updates/confirm', {
+        'assignmentId': id,
+        'version': _info!.version,
+        'build': installedBuild,
+        'startupVerified': true,
+      }, expectedConnection: expectedConnection);
+      _androidConfirmedAssignments.add(id);
+    } catch (_) {
+      debugPrint(
+        'Android update verification is pending; confirmation will retry.',
+      );
+    }
+  }
+
   Future<Map<String, dynamic>?> availableForAccount() async {
     await link.start();
     if (!link.isEnrolled || link.isSuspended) {
@@ -260,7 +360,7 @@ class AppUpdates with WidgetsBindingObserver {
     final info = _info ?? await PackageInfo.fromPlatform();
     final response = await link.postDevice(
       '/api/device/updates/check',
-      {},
+      _updateCheckPayload(info),
       expectedConnection: expected,
     );
     if (link.connectionKey != expected) {
@@ -274,6 +374,7 @@ class AppUpdates with WidgetsBindingObserver {
     if (result['version'] is! String ||
         result['build'] is! int ||
         result['assignmentId'] is! String ||
+        !_releaseMatchesCurrentPlatform(result) ||
         !newerRelease(
           result['version'] as String,
           result['build'] as int,
@@ -440,6 +541,22 @@ class AppUpdates with WidgetsBindingObserver {
   Future<void> install() async {
     final r = view.value.release;
     if (r == null || _installing) return;
+    if (!_releaseMatchesCurrentPlatform(r)) {
+      final id = r['assignmentId']?.toString() ?? '';
+      if (id.isNotEmpty) {
+        await _report(
+          id,
+          'failed',
+          error:
+              'Release platform does not match this device. ${_updateFailureContext(r, 'install_guard')}',
+        );
+      }
+      _show(
+        'This update does not match this device platform. Refresh release status.',
+        release: r,
+      );
+      return;
+    }
     if (Platform.isAndroid) {
       await _installAndroid(r);
       return;
@@ -453,7 +570,7 @@ class AppUpdates with WidgetsBindingObserver {
     }
     final storeInstallPending = Platform.isWindows
         ? await File(
-            '${Platform.environment['LOCALAPPDATA']}\\MILLITOPTV\\store\\installation-pending.json',
+            '${_windowsLocalAppDataPath()}\\MILLITOPTV\\store\\installation-pending.json',
           ).exists()
         : false;
     if (StoreJob.operationActive || link.mediaActive || storeInstallPending) {
@@ -667,7 +784,7 @@ class AppUpdates with WidgetsBindingObserver {
       await _report(
         r['assignmentId'].toString(),
         'failed',
-        error: e.toString(),
+        error: '${e.toString()} ${_updateFailureContext(r, 'windows_install')}',
       );
       _show(e.toString().replaceFirst('Bad state: ', ''), release: r);
     } finally {
@@ -683,6 +800,8 @@ class AppUpdates with WidgetsBindingObserver {
     try {
       final id = release['assignmentId']?.toString() ?? '';
       final uri = Uri.parse(release['installerUrl']?.toString() ?? '');
+      final bytes = int.tryParse(release['sizeBytes']?.toString() ?? '');
+      final expectedSha = release['sha256']?.toString().toLowerCase() ?? '';
       if (id.isEmpty) {
         throw const FormatException('Invalid Android update assignment.');
       }
@@ -694,26 +813,52 @@ class AppUpdates with WidgetsBindingObserver {
           'Android update URL must be stable HTTPS without query parameters.',
         );
       }
-      if (!await canLaunchUrl(uri)) {
-        throw StateError(
-          'Android cannot open the update URL. Check browser/install permissions.',
+      if (bytes == null || bytes < 1 || bytes > 1073741824) {
+        throw const FormatException('Invalid Android update size metadata.');
+      }
+      if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(expectedSha)) {
+        throw const FormatException(
+          'Invalid Android update signature metadata.',
         );
       }
+      final support = await getApplicationSupportDirectory();
+      final downloadDir = await Directory(
+        '${support.path}/updates/android',
+      ).create(recursive: true);
+      final apk = File('${downloadDir.path}/$id.apk');
       await _report(id, 'downloading');
-      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!opened) {
-        throw StateError('Android update download could not be opened.');
+      _show('Downloading Android update...', release: release, busy: true);
+      await _download(uri, apk, bytes, expected: bytes, release: release);
+      final actualSha = await sha256.bind(apk.openRead()).first;
+      if (actualSha.toString() != expectedSha) {
+        throw const FormatException(
+          'Downloaded Android update does not match the signed release hash.',
+        );
+      }
+      await _report(id, 'downloaded');
+      _show('Opening Android installer...', release: release, busy: true);
+      final result = await OpenFilex.open(
+        apk.path,
+        type: 'application/vnd.android.package-archive',
+      );
+      if (result.type != ResultType.done) {
+        throw StateError(
+          result.message.isEmpty
+              ? 'Android installer could not be opened. Allow install from this app and try again.'
+              : result.message,
+        );
       }
       await _report(id, 'installing');
       _show(
-        'Android update opened in your installer/browser. Complete installation, then reopen Millitop.',
+        'Android installer is ready. Complete installation, then reopen Millitop for verification.',
         release: release,
       );
     } catch (e) {
       await _report(
         release['assignmentId']?.toString() ?? '',
         'failed',
-        error: e.toString(),
+        error:
+            '${e.toString()} ${_updateFailureContext(release, 'android_install')}',
       );
       _show(e.toString().replaceFirst('Bad state: ', ''), release: release);
     } finally {
