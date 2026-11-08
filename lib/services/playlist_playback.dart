@@ -113,6 +113,18 @@ class PlaylistPlaybackSession extends ChangeNotifier {
       _entries.isNotEmpty &&
       _currentIndex >= 0 &&
       _currentIndex < _entries.length - 1;
+  PlaylistPlaybackEntry? get nextEntry =>
+      hasNext ? _entries[_currentIndex + 1] : null;
+  PlaylistPlaybackEntry? get previousEntry =>
+      hasPrevious ? _entries[_currentIndex - 1] : null;
+  PlaylistPlaybackEntry? entryById(String entryId) {
+    for (final entry in _entries) {
+      if (entry.entryId == entryId) {
+        return entry;
+      }
+    }
+    return null;
+  }
 
   void setAutoplay(bool value) {
     if (_autoplay == value) {
@@ -362,6 +374,7 @@ class PlaylistPlayback {
           break;
         }
         final segment = plan.first;
+        final expectedEntryId = segment.first.entryId;
         session.markOpening();
         if (!segment.isMusic &&
             session.currentIndex > 0 &&
@@ -390,6 +403,9 @@ class PlaylistPlayback {
             session.state == PlaylistPlaybackSessionState.stopped) {
           break;
         }
+        if (session.current?.entryId != expectedEntryId) {
+          continue;
+        }
         if (exit == null) {
           session.stop();
           break;
@@ -397,8 +413,16 @@ class PlaylistPlayback {
         switch (exit.kind) {
           case PlaylistPlaybackExitKind.switched:
             final target = exit.targetEntryId;
-            if (target == null || !session.playEntry(target)) {
+            if (target == null) {
               session.stop();
+              break;
+            }
+            if (target == expectedEntryId) {
+              session.markPlaying();
+              break;
+            }
+            if (!session.playEntry(target)) {
+              session.markPlaying();
             }
             break;
           case PlaylistPlaybackExitKind.completed:

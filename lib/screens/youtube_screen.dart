@@ -80,14 +80,16 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
   String? downloading;
   final downloadedIds = <String>{};
   bool handedOffToMiniPlayer = false;
+  bool _mixedExitSent = false;
   PlaylistPlaybackSession? get _mixedSession => widget.mixedSession;
   bool get _hasMixedSession =>
       _mixedSession != null && widget.mixedSessionEntryId != null;
 
   void _exitMixed(PlaylistPlaybackExit exit) {
-    if (!mounted) {
+    if (!mounted || _mixedExitSent) {
       return;
     }
+    _mixedExitSent = true;
     Navigator.of(context).pop<Object?>(exit);
   }
 
@@ -535,7 +537,9 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
 
   Future<void> _switchMixedEntry(String entryId) async {
     final session = _mixedSession;
-    if (session == null || !session.playEntry(entryId)) {
+    if (session == null ||
+        session.entryById(entryId) == null ||
+        session.current?.entryId == entryId) {
       return;
     }
     _saveProgress(sync: true);
@@ -545,10 +549,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
 
   Future<void> _mixedNext() async {
     final session = _mixedSession;
-    if (session == null || !session.next()) {
-      return;
-    }
-    final target = session.current;
+    final target = session?.nextEntry;
     if (target == null) {
       return;
     }
@@ -559,10 +560,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
 
   Future<void> _mixedPrevious() async {
     final session = _mixedSession;
-    if (session == null || !session.previous()) {
-      return;
-    }
-    final target = session.current;
+    final target = session?.previousEntry;
     if (target == null) {
       return;
     }

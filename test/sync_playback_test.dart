@@ -362,5 +362,66 @@ void main() {
         expect(opened[1], 'movie-b');
       },
     );
+
+    testWidgets(
+      'switched exit does not stop when provider already moved session target',
+      (tester) async {
+        final opened = <String>[];
+        late BuildContext context;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (ctx) {
+                context = ctx;
+                return const Scaffold();
+              },
+            ),
+          ),
+        );
+        final mixed = [
+          HubItem.youtube(_video),
+          HubItem(
+            type: HubMediaType.movie,
+            sourceId: 'provider-a',
+            id: 'movie-b',
+            title: 'Movie B',
+            sourceName: 'Provider A',
+            payload: const {
+              'sourceId': 'provider-a',
+              'sourceName': 'Provider A',
+              'mediaType': 'movie',
+              'mediaId': 'movie-b',
+              'title': 'Movie B',
+              'streamUrl': 'https://example.invalid/movie-b.mp4',
+            },
+          ),
+          HubItem.youtube(_video2),
+        ];
+        final player = PlaylistPlayback(
+          profileId: 1,
+          open: (_, session, segment) async {
+            opened.add(segment.first.item.id);
+            if (opened.length == 1) {
+              final target = session.entries.firstWhere(
+                (entry) => entry.item.id == 'movie-b',
+              );
+              session.playEntry(target.entryId);
+              return PlaylistPlaybackExit.switched(target.entryId);
+            }
+            if (opened.length == 2) {
+              return const PlaylistPlaybackExit.completed();
+            }
+            return const PlaylistPlaybackExit.explicitStop();
+          },
+        );
+        await player.play(
+          context,
+          playlistId: 'mixed',
+          name: 'Mixed',
+          items: mixed,
+        );
+        expect(opened, ['v1', 'movie-b', 'v2']);
+      },
+    );
   });
 }

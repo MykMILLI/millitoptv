@@ -3170,7 +3170,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         return;
       }
       final result = await Navigator.of(context).push<Object?>(
-        MaterialPageRoute<void>(
+        MaterialPageRoute<Object?>(
           builder: (_) => _MediaPlayerScreen(
             profileKey: 'profile-${widget.profileId}',
             title: item.title,
@@ -5664,6 +5664,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   int _playbackSessionId = 0;
   bool _backActionInProgress = false;
   bool _routeExitTriggered = false;
+  bool _mixedExitSent = false;
   bool _globalShortcutsSuppressed = false;
   final FocusScopeNode _panelFocusNode = FocusScopeNode();
   late _ActivePlaybackMedia _activeMedia = _initialActiveMedia();
@@ -5693,6 +5694,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               (widget.seriesEpisodePlayback && _hasNextSeriesEpisode)) &&
           creditsVisible) ||
       (_hasNextMovieQueueItem && playNextPromptVisible);
+
+  void _exitMixed(PlaylistPlaybackExit exit) {
+    if (!mounted || _mixedExitSent) {
+      return;
+    }
+    _mixedExitSent = true;
+    Navigator.of(context).pop<Object?>(exit);
+  }
 
   _ActivePlaybackMedia _initialActiveMedia() {
     if (widget.seriesEpisodePlayback && _seriesEpisodes.isNotEmpty) {
@@ -7018,9 +7027,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       if (!mounted) {
         return;
       }
-      Navigator.of(
-        context,
-      ).pop<Object?>(const PlaylistPlaybackExit.completed());
+      _exitMixed(const PlaylistPlaybackExit.completed());
       return;
     }
     if (!autoplayNext && !force) {
@@ -7614,49 +7621,33 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _switchToMixedEntry(String entryId) async {
     final session = widget.mixedSession;
-    if (session == null || !session.playEntry(entryId)) {
+    if (session == null ||
+        session.entryById(entryId) == null ||
+        session.current?.entryId == entryId) {
       return;
     }
     await _saveFinalProgress(allowDuringTransition: true);
-    if (mounted) {
-      Navigator.of(
-        context,
-      ).pop<Object?>(PlaylistPlaybackExit.switched(entryId));
-    }
+    _exitMixed(PlaylistPlaybackExit.switched(entryId));
   }
 
   Future<void> _switchToMixedPrevious() async {
     final session = widget.mixedSession;
-    if (session == null || !session.previous()) {
-      return;
-    }
-    final current = session.current;
-    if (current == null) {
+    final target = session?.previousEntry;
+    if (target == null) {
       return;
     }
     await _saveFinalProgress(allowDuringTransition: true);
-    if (mounted) {
-      Navigator.of(
-        context,
-      ).pop<Object?>(PlaylistPlaybackExit.switched(current.entryId));
-    }
+    _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
   }
 
   Future<void> _switchToMixedNext() async {
     final session = widget.mixedSession;
-    if (session == null || !session.next()) {
-      return;
-    }
-    final current = session.current;
-    if (current == null) {
+    final target = session?.nextEntry;
+    if (target == null) {
       return;
     }
     await _saveFinalProgress(allowDuringTransition: true);
-    if (mounted) {
-      Navigator.of(
-        context,
-      ).pop<Object?>(PlaylistPlaybackExit.switched(current.entryId));
-    }
+    _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
   }
 
   void _moveQueueItem(int oldIndex, int newIndex) {
@@ -7821,9 +7812,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       _routeExitTriggered = true;
       if (_hasMixedSession) {
         widget.mixedSession?.stop();
-        Navigator.of(
-          context,
-        ).pop<Object?>(const PlaylistPlaybackExit.explicitBack());
+        _exitMixed(const PlaylistPlaybackExit.explicitBack());
       } else {
         Navigator.of(context).pop();
       }
