@@ -49,6 +49,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   final timerSessionKey = 'native-live-tv';
   final secondaryTimerSessionKey = 'native-live-tv-secondary';
   final search = TextEditingController();
+  final FocusNode searchFocusNode = FocusNode();
   final FocusNode screenFocusNode = FocusNode();
   final FocusNode fullScreenFocusNode = FocusNode();
   final ScrollController channelScrollController = ScrollController();
@@ -507,6 +508,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     fullScreenControlsHide?.cancel();
     profileSyncDebounce?.cancel();
     playbackStatusTimer?.cancel();
+    searchFocusNode.dispose();
     screenFocusNode.dispose();
     fullScreenFocusNode.dispose();
     channelScrollController.dispose();
@@ -530,6 +532,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
   }
 
   bool get _isTextInputFocused {
+    if (searchFocusNode.hasFocus) {
+      return true;
+    }
     final focused = FocusManager.instance.primaryFocus;
     final context = focused?.context;
     if (context == null) {
@@ -3321,6 +3326,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                                             flex: 3,
                                             child: TextField(
                                               controller: search,
+                                              focusNode: searchFocusNode,
                                               decoration: const InputDecoration(
                                                 labelText: 'Search channels',
                                                 border: OutlineInputBorder(),

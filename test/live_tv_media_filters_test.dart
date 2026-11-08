@@ -126,10 +126,14 @@ void main() {
     expect(find.text('Spooky Movie'), findsOneWidget);
     expect(find.text('Funny Movie'), findsOneWidget);
 
-    final horrorChip = find.widgetWithText(FilterChip, 'Horror').first;
-    await tester.ensureVisible(horrorChip);
+    final genreButton = find.text('All genres');
+    await tester.ensureVisible(genreButton.first);
+    await tester.tap(genreButton.first);
     await tester.pumpAndSettle();
+    final horrorChip = find.widgetWithText(FilterChip, 'Horror').first;
     await tester.tap(horrorChip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
     await tester.pumpAndSettle();
 
     expect(find.text('Spooky Movie'), findsOneWidget);

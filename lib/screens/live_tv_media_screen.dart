@@ -1,5 +1,7 @@
 // ignore_for_file: deprecated_member_use, use_build_context_synchronously, prefer_collection_literals, unnecessary_brace_in_string_interps, unnecessary_string_interpolations
 
+// ignore_for_file: unused_element
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -9,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/playlist_hub.dart';
@@ -28,9 +31,13 @@ import '../services/app_log.dart';
 import 'jellyfin_connect_screen.dart';
 import 'diagnostics_screen.dart';
 import 'media_home_view.dart';
+import 'playlists_screen.dart';
 import '../services/subtitle_provider_service.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
+import '../widgets/redesign/media_library_shell.dart';
+import '../widgets/redesign/media_player_chrome.dart';
+import '../widgets/redesign/media_side_panels.dart';
 
 enum _MediaTab { movies, series, adult }
 
@@ -421,6 +428,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   int catalogMoviesLoaded = 0;
   int catalogSeriesLoaded = 0;
   String? focusedMediaId;
+  bool filtersOpen = false;
+  double posterCardScale = 1.0;
+  final ScrollController _catalogScrollController = ScrollController();
+  String? _selectedAlphabetLetter;
+  final Map<String, int> _alphabetFirstIndex = <String, int>{};
+  int _alphabetCrossAxisCount = 1;
+  double _alphabetTileStride = 1;
   Timer? profileSyncDebounce;
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
@@ -438,6 +452,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   void initState() {
     super.initState();
     service = widget.playlistService ?? const LiveTvPlaylistService();
+    unawaited(_loadPosterCardScalePreference());
+    _catalogScrollController.addListener(() {
+      _updateAlphabetSelectionFromScroll(visibleItems);
+    });
     search.addListener(() {
       setState(() {});
       _logSearchSoon();
@@ -474,6 +492,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   void dispose() {
     _searchLogDebounce?.cancel();
     profileSyncDebounce?.cancel();
+    _catalogScrollController.dispose();
     searchFocus.dispose();
     search.dispose();
     super.dispose();
@@ -2129,6 +2148,16 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final shuffled = [...movieCandidates]..shuffle();
       final pick = shuffled.first;
       setState(() => focusedMediaId = pick.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Shuffling ${shuffled.length} movies from the current filters.',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
       await _openMovie(pick, queue: shuffled, queueIndex: 0);
       return;
     }
@@ -2390,81 +2419,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
   }
 
-  static const _mixedPlaylistChoice = '__mixed__';
-
   Future<void> _addToPlaylist(LiveTvLibraryItem item) async {
-    if (playlists.isEmpty) {
-      await _createPlaylist();
-      playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
-      if (playlists.isEmpty) {
-        return;
-      }
-    }
     if (!mounted) {
       return;
     }
-    final selectedPlaylistId = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(
-              title: Text(
-                'Add to playlist',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-            ),
-            ListTile(
-              key: const ValueKey('vod-mixed-playlist'),
-              leading: const Icon(Icons.playlist_add_circle_outlined),
-              title: const Text('Mixed playlist...'),
-              subtitle: const Text('Mix with music, YouTube and podcasts'),
-              onTap: () => Navigator.pop(ctx, _mixedPlaylistChoice),
-            ),
-            const Divider(),
-            for (final playlist in playlists)
-              ListTile(
-                leading: const Icon(Icons.playlist_add),
-                title: Text(playlist.name),
-                subtitle: Text('${playlist.items.length} items'),
-                onTap: () => Navigator.pop(ctx, playlist.id),
-              ),
-          ],
-        ),
-      ),
+    await addToMixedPlaylist(
+      context,
+      profileId: widget.profileId,
+      item: vodHubItem(item),
     );
-    if (selectedPlaylistId == null || !mounted) {
-      return;
-    }
-    if (selectedPlaylistId == _mixedPlaylistChoice) {
-      await addToMixedPlaylist(
-        context,
-        profileId: widget.profileId,
-        item: vodHubItem(item),
-      );
-      return;
-    }
-    final playlist = playlists.firstWhere(
-      (entry) => entry.id == selectedPlaylistId,
-      orElse: () => playlists.first,
-    );
-    final nextItems = [
-      item,
-      ...playlist.items.where((entry) => entry.key != item.key),
-    ];
-    final updated = LiveTvUserPlaylist(
-      id: playlist.id,
-      name: playlist.name,
-      items: nextItems,
-      updatedAtUtc: DateTime.now().toUtc(),
-    );
-    await HomePreferences().upsertLiveTvPlaylist(widget.profileId, updated);
-    playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
-    if (mounted) {
-      setState(() {});
-    }
-    unawaited(_scheduleProfileSync());
   }
 
   Future<void> _playLibraryItem(LiveTvLibraryItem item) async {
@@ -2561,45 +2524,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   Future<void> _managePlaylists() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (_) => _PlaylistsScreen(
-          playlists: playlists,
-          reloadPlaylists: () =>
-              HomePreferences().liveTvPlaylists(widget.profileId),
-          onCreate: _createPlaylist,
-          onPlay: _playLibraryItem,
-          onDeletePlaylist: (playlist) async {
-            await HomePreferences().removeLiveTvPlaylist(
-              widget.profileId,
-              playlist.id,
-            );
-            playlists = await HomePreferences().liveTvPlaylists(
-              widget.profileId,
-            );
-            if (mounted) {
-              setState(() {});
-            }
-            unawaited(_scheduleProfileSync());
-          },
-          onUpdatePlaylist: (playlist) async {
-            await HomePreferences().upsertLiveTvPlaylist(
-              widget.profileId,
-              playlist,
-            );
-            playlists = await HomePreferences().liveTvPlaylists(
-              widget.profileId,
-            );
-            if (mounted) {
-              setState(() {});
-            }
-            unawaited(_scheduleProfileSync());
-          },
-        ),
+        builder: (_) => PlaylistsScreen(profileId: widget.profileId),
       ),
     );
-    playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
-    if (mounted) {
-      setState(() {});
-    }
   }
 
   Future<void> _showMediaDetails(LiveTvMediaItem item) async {
@@ -4579,6 +4506,24 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     _showHome();
   }
 
+  String get _posterScalePreferenceKey =>
+      'media.posterScale.v1.${widget.profileId}';
+
+  Future<void> _loadPosterCardScalePreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = prefs.getDouble(_posterScalePreferenceKey);
+    if (value == null || !mounted) {
+      return;
+    }
+    final clamped = value.clamp(0.75, 1.4).toDouble();
+    setState(() => posterCardScale = clamped);
+  }
+
+  Future<void> _savePosterCardScalePreference(double value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_posterScalePreferenceKey, value);
+  }
+
   Future<void> _requestExitToHome() async {
     if (!mounted) {
       return;
@@ -4590,12 +4535,448 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     await Navigator.of(context).maybePop();
   }
 
+  LibrarySection get _librarySection => homeView
+      ? LibrarySection.home
+      : (tab == _MediaTab.series
+            ? LibrarySection.series
+            : LibrarySection.movies);
+
+  String get _sortLabel => switch (sortMode) {
+    _MediaSortMode.relevance => 'Relevance',
+    _MediaSortMode.title => 'Title A-Z',
+    _MediaSortMode.source => 'Source',
+    _MediaSortMode.inTheaters => 'In theaters proximity',
+    _MediaSortMode.recentlyAdded => 'Recently Added',
+  };
+
+  String get _genreLabel => selectedGenres.isEmpty
+      ? 'All genres'
+      : '${selectedGenres.length} selected';
+
+  String get _libraryScopeLabel => allSourcesSelected
+      ? 'All libraries'
+      : (source?.name ?? 'Selected library');
+
+  String get _librarySummary {
+    if (loading) {
+      return 'Loading your movies and series libraries...';
+    }
+    return '$_libraryScopeLabel · ${visibleItems.length} titles in view';
+  }
+
+  bool get _showAlphabetRail =>
+      !homeView &&
+      tab != _MediaTab.adult &&
+      sortMode == _MediaSortMode.title &&
+      visibleItems.isNotEmpty;
+
+  void _refreshAlphabetMap(List<LiveTvMediaItem> items) {
+    _alphabetFirstIndex.clear();
+    for (var i = 0; i < items.length; i++) {
+      final letter = mediaLetter(mediaSortKey(items[i].title));
+      _alphabetFirstIndex.putIfAbsent(letter, () => i);
+    }
+    _selectedAlphabetLetter ??= _alphabetFirstIndex.keys.isEmpty
+        ? null
+        : _alphabetFirstIndex.keys.first;
+  }
+
+  void _updateAlphabetSelectionFromScroll(List<LiveTvMediaItem> items) {
+    if (!_showAlphabetRail ||
+        !_catalogScrollController.hasClients ||
+        items.isEmpty) {
+      return;
+    }
+    final offset = _catalogScrollController.offset.clamp(
+      0.0,
+      _catalogScrollController.position.maxScrollExtent,
+    );
+    final row = (offset / max(1.0, _alphabetTileStride)).floor();
+    final index = (row * _alphabetCrossAxisCount).clamp(0, items.length - 1);
+    final letter = mediaLetter(mediaSortKey(items[index].title));
+    if (letter != _selectedAlphabetLetter && mounted) {
+      setState(() => _selectedAlphabetLetter = letter);
+    }
+  }
+
+  Future<void> _jumpToAlphabetLetter(
+    String letter,
+    List<LiveTvMediaItem> items,
+  ) async {
+    if (!_showAlphabetRail || !_catalogScrollController.hasClients) {
+      return;
+    }
+    final first = _alphabetFirstIndex[letter];
+    if (first == null) {
+      return;
+    }
+    final row = first ~/ _alphabetCrossAxisCount;
+    final target = row * _alphabetTileStride;
+    setState(() => _selectedAlphabetLetter = letter);
+    await _catalogScrollController.animateTo(
+      target.clamp(0.0, _catalogScrollController.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  Future<void> _chooseSort() async {
+    final selected = await showModalBottomSheet<_MediaSortMode>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text(
+                'Sort titles',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final option in <(_MediaSortMode, String)>[
+              (_MediaSortMode.relevance, 'Relevance'),
+              (_MediaSortMode.title, 'Title A-Z'),
+              (_MediaSortMode.source, 'Source'),
+              (_MediaSortMode.inTheaters, 'In theaters proximity'),
+              (_MediaSortMode.recentlyAdded, 'Recently Added'),
+            ])
+              ListTile(
+                leading: Icon(
+                  option.$1 == sortMode
+                      ? Icons.check_circle
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(option.$2),
+                onTap: () => Navigator.pop(ctx, option.$1),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected == sortMode) {
+      return;
+    }
+    setState(() {
+      sortMode = selected;
+      _selectedAlphabetLetter = null;
+    });
+  }
+
+  Future<void> _chooseGenre() async {
+    final picks = Set<String>.from(selectedGenres);
+    final applied = await showDialog<Set<String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialog) => AlertDialog(
+          title: const Text('Genres'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final genre in availableGenres)
+                    FilterChip(
+                      label: Text(genre),
+                      selected: picks.contains(genre),
+                      onSelected: (on) {
+                        setDialog(() {
+                          if (on) {
+                            picks.add(genre);
+                          } else {
+                            picks.remove(genre);
+                          }
+                        });
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, <String>{}),
+              child: const Text('Clear'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, picks),
+              child: const Text('Apply'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (applied == null) {
+      return;
+    }
+    setState(() {
+      selectedGenres = applied;
+      _selectedAlphabetLetter = null;
+    });
+  }
+
+  Future<void> _chooseLibraryScope() async {
+    final selected = await showModalBottomSheet<LiveTvSource?>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: const Text('All libraries'),
+              selected: allSourcesSelected,
+              onTap: () => Navigator.pop(ctx, null),
+            ),
+            for (final item in _visibleSources)
+              ListTile(
+                title: Text(item.name),
+                selected: !allSourcesSelected && source?.id == item.id,
+                onTap: () => Navigator.pop(ctx, item),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) {
+      return;
+    }
+    if (selected == null) {
+      if (!allSourcesSelected) {
+        setState(() {
+          allSourcesSelected = true;
+          filtersOpen = false;
+          _selectedAlphabetLetter = null;
+        });
+        await _loadCatalog();
+      }
+      return;
+    }
+    if (!allSourcesSelected && source?.id == selected.id) {
+      return;
+    }
+    setState(() {
+      source = selected;
+      allSourcesSelected = false;
+      filtersOpen = false;
+      _selectedAlphabetLetter = null;
+    });
+    await _loadCatalog();
+  }
+
   @override
   Widget build(BuildContext context) {
     final items = visibleItems;
     final viewport = MediaQuery.sizeOf(context);
-    final compact = viewport.width < 600;
+    final compact = viewport.width < 720;
     final showingHome = homeView && search.text.trim().isEmpty;
+    final groups = <String>{'All', ...items.map((item) => item.group).nonNulls}
+      ..removeWhere((value) => value.trim().isEmpty);
+    final groupOptions = groups.toList()..sort();
+    _refreshAlphabetMap(items);
+    final collectionChips = <Widget>[
+      ..._tabChips(),
+      InkWell(
+        key: ValueKey('media-group-$groupFilter-${groupOptions.length}'),
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _showCategoryPicker(groupOptions),
+        child: Chip(
+          avatar: const Icon(Icons.filter_alt_outlined, size: 18),
+          label: Text('Category: $groupFilter'),
+        ),
+      ),
+      ActionChip(
+        avatar: const Icon(Icons.shuffle, size: 18),
+        label: Text(
+          selectedGenres.isEmpty
+              ? 'Shuffle all movies'
+              : 'Shuffle selected genres',
+        ),
+        onPressed: () => unawaited(_shuffleWithinFilters()),
+      ),
+      ...activeSeasonalCollections.map((collection) {
+        return FilterChip(
+          avatar: Icon(collection.icon, size: 16),
+          label: Text(collection.label),
+          selected: activeCollectionId == collection.id,
+          onSelected: (_) => _toggleCollection(collection.id),
+        );
+      }),
+    ];
+
+    Widget buildFilters() {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => _showCategoryPicker(groupOptions),
+            child: InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Category',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.filter_alt_outlined),
+                suffixIcon: Icon(Icons.arrow_drop_down),
+              ),
+              child: Text(
+                groupOptions.contains(groupFilter)
+                    ? groupFilter
+                    : groupOptions.first,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Show multi-version titles only'),
+            value: versionAwareOnly,
+            onChanged: (value) => setState(() => versionAwareOnly = value),
+          ),
+          const SizedBox(height: 12),
+          Text('Poster size', style: Theme.of(context).textTheme.labelLarge),
+          Slider(
+            value: posterCardScale,
+            min: 0.75,
+            max: 1.4,
+            divisions: 13,
+            label: '${(posterCardScale * 100).round()}%',
+            onChanged: (value) {
+              setState(() => posterCardScale = value);
+              unawaited(_savePosterCardScalePreference(value));
+            },
+          ),
+          const Text(
+            'Smaller posters show more titles on screen.',
+            style: TextStyle(fontSize: 12),
+          ),
+        ],
+      );
+    }
+
+    Widget buildCatalogGrid() {
+      return LayoutBuilder(
+        builder: (context, box) {
+          final width = box.maxWidth;
+          final scaledWidth = width / posterCardScale.clamp(0.75, 1.4);
+          final crossAxisCount = scaledWidth >= 1480
+              ? 6
+              : scaledWidth >= 1180
+              ? 5
+              : scaledWidth >= 900
+              ? 4
+              : scaledWidth >= 620
+              ? 3
+              : 2;
+          _alphabetCrossAxisCount = crossAxisCount;
+          final tileWidth = width / crossAxisCount;
+          _alphabetTileStride = tileWidth * (16 / 10);
+          if (items.isEmpty) {
+            return const Center(
+              child: Text('No titles match the current filters.'),
+            );
+          }
+          return GridView.builder(
+            key: const ValueKey('media-grid'),
+            controller: _catalogScrollController,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+            itemCount: items.length,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: crossAxisCount,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: 10 / 16,
+            ),
+            itemBuilder: (context, index) {
+              final item = items[index];
+              final selected = focusedMediaId == item.id;
+              final posterUrl = item.posterUrl?.trim();
+              return Card(
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: selected
+                      ? BorderSide(
+                          color: Theme.of(context).colorScheme.primary,
+                          width: 2,
+                        )
+                      : BorderSide.none,
+                ),
+                child: InkWell(
+                  onTap: () => unawaited(_showMediaDetails(item)),
+                  onFocusChange: (value) {
+                    if (value) {
+                      setState(() => focusedMediaId = item.id);
+                    }
+                  },
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: posterUrl == null || posterUrl.isEmpty
+                            ? const ColoredBox(
+                                color: Colors.black26,
+                                child: Icon(Icons.ondemand_video, size: 42),
+                              )
+                            : Image.network(
+                                posterUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => const ColoredBox(
+                                  color: Colors.black26,
+                                  child: Icon(Icons.ondemand_video, size: 42),
+                                ),
+                              ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              item.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              item.group?.trim().isNotEmpty == true
+                                  ? item.group!
+                                  : (mediaItemOrigins[item]?.sourceName ??
+                                        'Library title'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+    }
+
+    Future<void> onSectionChanged(LibrarySection section) async {
+      if (section == LibrarySection.home) {
+        _showHome();
+        return;
+      }
+      setState(() {
+        homeView = false;
+        tab = section == LibrarySection.series
+            ? _MediaTab.series
+            : _MediaTab.movies;
+        groupFilter = 'All';
+        _selectedAlphabetLetter = null;
+      });
+    }
+
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -4658,8 +5039,6 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       child: Focus(
         autofocus: true,
         child: PopScope(
-          // Back from a library/grid/search returns to the Movies & Series
-          // Home first; only Back from Home leaves the screen.
           canPop: _atMediaHome,
           onPopInvokedWithResult: (didPop, _) {
             if (!didPop) {
@@ -4763,816 +5142,51 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 children: [
                   ExcludeFocus(
                     excluding: loading,
-                    child: Column(
-                      children: [
-                        if (showingHome) ...[
-                          _homeHeader(compact: compact, viewport: viewport),
-                          Expanded(child: _buildHome()),
-                        ] else ...[
-                          ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxHeight: viewport.height < 500
-                                  ? 150
-                                  : (compact
-                                        ? 340
-                                        : min(viewport.height * 0.55, 480.0)),
-                            ),
-                            child: SingleChildScrollView(
-                              child: Column(
-                                children: [
-                                  if (status.isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.all(8),
-                                      child: Text(status),
-                                    ),
-                                  if (error.isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                      ),
-                                      child: Text(
-                                        error,
-                                        style: TextStyle(
-                                          color: _LiveTvMediaPaint.warning,
-                                        ),
-                                      ),
-                                    ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Card(
-                                      child: ListTile(
-                                        dense: true,
-                                        leading: Icon(
-                                          tab == _MediaTab.series
-                                              ? Icons.tv
-                                              : Icons.movie_outlined,
-                                        ),
-                                        title: Text(_browseContextTitle),
-                                        subtitle: Text(_browseContextSubtitle),
-                                      ),
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      8,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Wrap(
-                                      runSpacing: 8,
-                                      crossAxisAlignment:
-                                          WrapCrossAlignment.center,
-                                      children: [
-                                        SizedBox(
-                                          width: compact
-                                              ? viewport.width - 24
-                                              : (viewport.width - 148) * 0.6,
-                                          child: TextField(
-                                            controller: search,
-                                            focusNode: searchFocus,
-                                            decoration: InputDecoration(
-                                              labelText: _searchHintText,
-                                              border: OutlineInputBorder(),
-                                              prefixIcon: Icon(Icons.search),
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        IconButton.filledTonal(
-                                          tooltip: 'On-screen keyboard search',
-                                          onPressed: () =>
-                                              unawaited(_openSearchKeyboard()),
-                                          icon: const Icon(Icons.keyboard),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        IconButton.filledTonal(
-                                          tooltip: 'Voice search',
-                                          onPressed: () =>
-                                              unawaited(_openVoiceSearch()),
-                                          icon: const Icon(Icons.mic),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      8,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: _sectionLabel(
-                                        'Browse and filters',
-                                        icon: Icons.tune,
-                                      ),
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Card(
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(10),
-                                        child: Column(
-                                          children: [
-                                            Align(
-                                              alignment: Alignment.centerLeft,
-                                              child: Wrap(
-                                                spacing: 8,
-                                                runSpacing: 8,
-                                                children: [
-                                                  ChoiceChip(
-                                                    label: const Text(
-                                                      'All Sources',
-                                                    ),
-                                                    selected:
-                                                        allSourcesSelected,
-                                                    onSelected: loading
-                                                        ? null
-                                                        : (_) async {
-                                                            setState(
-                                                              () =>
-                                                                  allSourcesSelected =
-                                                                      true,
-                                                            );
-                                                            await _loadCatalog();
-                                                          },
-                                                  ),
-                                                  ..._visibleSources.map(
-                                                    (item) => ChoiceChip(
-                                                      label: Text(
-                                                        item.name,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                      ),
-                                                      selected:
-                                                          !allSourcesSelected &&
-                                                          source?.id == item.id,
-                                                      onSelected: loading
-                                                          ? null
-                                                          : (_) async {
-                                                              setState(() {
-                                                                source = item;
-                                                                allSourcesSelected =
-                                                                    false;
-                                                              });
-                                                              await _loadCatalog();
-                                                            },
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(height: 10),
-                                            Align(
-                                              alignment: Alignment.centerLeft,
-                                              child: Wrap(
-                                                spacing: 8,
-                                                runSpacing: 8,
-                                                children: [..._tabChips()],
-                                              ),
-                                            ),
-                                            if (activeSeasonalCollections
-                                                .isNotEmpty) ...[
-                                              const SizedBox(height: 10),
-                                              Align(
-                                                alignment: Alignment.centerLeft,
-                                                child: Wrap(
-                                                  spacing: 8,
-                                                  runSpacing: 8,
-                                                  children: activeSeasonalCollections
-                                                      .map((collection) {
-                                                        return FilterChip(
-                                                          avatar: Icon(
-                                                            collection.icon,
-                                                            size: 18,
-                                                          ),
-                                                          label: Text(
-                                                            collection.label,
-                                                          ),
-                                                          selected:
-                                                              activeCollectionId ==
-                                                              collection.id,
-                                                          onSelected: (_) =>
-                                                              _toggleCollection(
-                                                                collection.id,
-                                                              ),
-                                                        );
-                                                      })
-                                                      .toList(),
-                                                ),
-                                              ),
-                                            ],
-                                            const SizedBox(height: 10),
-                                            InkWell(
-                                              key: ValueKey(
-                                                'media-group-$groupFilter-${groups.length}',
-                                              ),
-                                              borderRadius:
-                                                  BorderRadius.circular(4),
-                                              onTap: () =>
-                                                  _showCategoryPicker(groups),
-                                              child: InputDecorator(
-                                                decoration:
-                                                    const InputDecoration(
-                                                      labelText: 'Category',
-                                                      border:
-                                                          OutlineInputBorder(),
-                                                      isDense: true,
-                                                      prefixIcon: Icon(
-                                                        Icons
-                                                            .filter_alt_outlined,
-                                                      ),
-                                                      suffixIcon: Icon(
-                                                        Icons.arrow_drop_down,
-                                                      ),
-                                                    ),
-                                                child: Text(
-                                                  groups.contains(groupFilter)
-                                                      ? groupFilter
-                                                      : groups.first,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  maxLines: 1,
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(height: 10),
-                                            if (compact)
-                                              Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  DropdownButtonFormField<
-                                                    _MediaSortMode
-                                                  >(
-                                                    isExpanded: true,
-                                                    initialValue: sortMode,
-                                                    decoration:
-                                                        const InputDecoration(
-                                                          labelText: 'Sort',
-                                                          border:
-                                                              OutlineInputBorder(),
-                                                        ),
-                                                    items: const [
-                                                      DropdownMenuItem(
-                                                        value: _MediaSortMode
-                                                            .relevance,
-                                                        child: Text(
-                                                          'Relevance',
-                                                        ),
-                                                      ),
-                                                      DropdownMenuItem(
-                                                        value: _MediaSortMode
-                                                            .title,
-                                                        child: Text('Title'),
-                                                      ),
-                                                      DropdownMenuItem(
-                                                        value: _MediaSortMode
-                                                            .source,
-                                                        child: Text('Source'),
-                                                      ),
-                                                      DropdownMenuItem(
-                                                        value: _MediaSortMode
-                                                            .inTheaters,
-                                                        child: Text(
-                                                          'In Theaters',
-                                                        ),
-                                                      ),
-                                                      DropdownMenuItem(
-                                                        value: _MediaSortMode
-                                                            .recentlyAdded,
-                                                        child: Text(
-                                                          'Recently Added',
-                                                        ),
-                                                      ),
-                                                    ],
-                                                    onChanged: (value) {
-                                                      if (value == null) {
-                                                        return;
-                                                      }
-                                                      setState(
-                                                        () => sortMode = value,
-                                                      );
-                                                    },
-                                                  ),
-                                                  const SizedBox(height: 8),
-                                                  FilterChip(
-                                                    selected: versionAwareOnly,
-                                                    onSelected: (selected) {
-                                                      setState(
-                                                        () => versionAwareOnly =
-                                                            selected,
-                                                      );
-                                                    },
-                                                    avatar: const Icon(
-                                                      Icons
-                                                          .collections_bookmark_outlined,
-                                                    ),
-                                                    label: Text(
-                                                      _multiVersionCount == 0
-                                                          ? 'Multiple versions only'
-                                                          : 'Multiple versions only ($_multiVersionCount titles)',
-                                                    ),
-                                                  ),
-                                                ],
-                                              )
-                                            else
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    flex: 2,
-                                                    child:
-                                                        DropdownButtonFormField<
-                                                          _MediaSortMode
-                                                        >(
-                                                          isExpanded: true,
-                                                          initialValue:
-                                                              sortMode,
-                                                          decoration:
-                                                              const InputDecoration(
-                                                                labelText:
-                                                                    'Sort',
-                                                                border:
-                                                                    OutlineInputBorder(),
-                                                              ),
-                                                          items: const [
-                                                            DropdownMenuItem(
-                                                              value:
-                                                                  _MediaSortMode
-                                                                      .relevance,
-                                                              child: Text(
-                                                                'Relevance',
-                                                              ),
-                                                            ),
-                                                            DropdownMenuItem(
-                                                              value:
-                                                                  _MediaSortMode
-                                                                      .title,
-                                                              child: Text(
-                                                                'Title',
-                                                              ),
-                                                            ),
-                                                            DropdownMenuItem(
-                                                              value:
-                                                                  _MediaSortMode
-                                                                      .source,
-                                                              child: Text(
-                                                                'Source',
-                                                              ),
-                                                            ),
-                                                            DropdownMenuItem(
-                                                              value:
-                                                                  _MediaSortMode
-                                                                      .inTheaters,
-                                                              child: Text(
-                                                                'In Theaters',
-                                                              ),
-                                                            ),
-                                                            DropdownMenuItem(
-                                                              value: _MediaSortMode
-                                                                  .recentlyAdded,
-                                                              child: Text(
-                                                                'Recently Added',
-                                                              ),
-                                                            ),
-                                                          ],
-                                                          onChanged: (value) {
-                                                            if (value == null) {
-                                                              return;
-                                                            }
-                                                            setState(
-                                                              () => sortMode =
-                                                                  value,
-                                                            );
-                                                          },
-                                                        ),
-                                                  ),
-                                                  const SizedBox(width: 12),
-                                                  Expanded(
-                                                    flex: 3,
-                                                    child: Align(
-                                                      alignment:
-                                                          Alignment.centerLeft,
-                                                      child: FilterChip(
-                                                        selected:
-                                                            versionAwareOnly,
-                                                        onSelected: (selected) {
-                                                          setState(
-                                                            () =>
-                                                                versionAwareOnly =
-                                                                    selected,
-                                                          );
-                                                        },
-                                                        avatar: const Icon(
-                                                          Icons
-                                                              .collections_bookmark_outlined,
-                                                        ),
-                                                        label: Text(
-                                                          _multiVersionCount ==
-                                                                  0
-                                                              ? 'Multiple versions only'
-                                                              : 'Multiple versions only ($_multiVersionCount titles)',
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  if (availableGenres.isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.fromLTRB(
-                                        12,
-                                        4,
-                                        12,
-                                        4,
-                                      ),
-                                      child: Card(
-                                        child: ExpansionTile(
-                                          title: const Text(
-                                            'Genres and shuffle',
-                                          ),
-                                          initiallyExpanded: true,
-                                          subtitle: Text(
-                                            selectedGenres.isEmpty
-                                                ? 'No genres selected'
-                                                : '${selectedGenres.length} selected',
-                                          ),
-                                          childrenPadding:
-                                              const EdgeInsets.fromLTRB(
-                                                12,
-                                                0,
-                                                12,
-                                                12,
-                                              ),
-                                          children: [
-                                            Align(
-                                              alignment: Alignment.centerLeft,
-                                              child: Wrap(
-                                                spacing: 8,
-                                                runSpacing: 8,
-                                                crossAxisAlignment:
-                                                    WrapCrossAlignment.center,
-                                                children: [
-                                                  ...availableGenres.map(
-                                                    (genre) => FilterChip(
-                                                      label: Text(genre),
-                                                      selected: selectedGenres
-                                                          .contains(genre),
-                                                      onSelected: (_) =>
-                                                          _toggleGenre(genre),
-                                                    ),
-                                                  ),
-                                                  IconButton(
-                                                    tooltip:
-                                                        'Shuffle from selection',
-                                                    onPressed:
-                                                        visibleItems.isEmpty
-                                                        ? null
-                                                        : () => unawaited(
-                                                            _shuffleWithinFilters(),
-                                                          ),
-                                                    icon: const Icon(
-                                                      Icons.shuffle,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  const SizedBox(height: 8),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      0,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: _sectionLabel(
-                                        _continueWatchingTitle,
-                                        icon: Icons.play_circle_outline,
-                                      ),
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      0,
-                                      12,
-                                      8,
-                                    ),
-                                    child: _continueWatchingCard(),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      0,
-                                      12,
-                                      4,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: _sectionLabel(
-                                        'Recent and favorites',
-                                        icon: Icons.history,
-                                      ),
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      4,
-                                      12,
-                                      8,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: _historyPanel(),
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      0,
-                                      12,
-                                      8,
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: _favoritesPanel(),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: items.isEmpty
-                                ? const Center(
-                                    child: Text(
-                                      'No items match the current filter.',
+                    child: showingHome
+                        ? Column(
+                            children: [
+                              _homeHeader(compact: compact, viewport: viewport),
+                              Expanded(child: _buildHome()),
+                            ],
+                          )
+                        : MediaLibraryShell(
+                            section: _librarySection,
+                            onSectionChanged: (section) {
+                              unawaited(onSectionChanged(section));
+                            },
+                            searchController: search,
+                            searchFocusNode: searchFocus,
+                            onSearchChanged: (_) => setState(() {}),
+                            libraryName: _libraryScopeLabel,
+                            onChooseLibrary: () =>
+                                unawaited(_chooseLibraryScope()),
+                            summary: _librarySummary,
+                            genreLabel: _genreLabel,
+                            onChooseGenre: () => unawaited(_chooseGenre()),
+                            sortLabel: _sortLabel,
+                            onChooseSort: () => unawaited(_chooseSort()),
+                            filtersOpen: filtersOpen,
+                            onToggleFilters: () {
+                              setState(() => filtersOpen = !filtersOpen);
+                            },
+                            onCloseFilters: () {
+                              setState(() => filtersOpen = false);
+                            },
+                            filters: buildFilters(),
+                            collections: collectionChips,
+                            onVoiceSearch: () => unawaited(_openVoiceSearch()),
+                            embedInScaffold: false,
+                            alphabetRail: _showAlphabetRail
+                                ? AlphabetRail(
+                                    selected: _selectedAlphabetLetter,
+                                    available: _alphabetFirstIndex.keys.toSet(),
+                                    onJump: (letter) => unawaited(
+                                      _jumpToAlphabetLetter(letter, items),
                                     ),
                                   )
-                                : LayoutBuilder(
-                                    builder: (context, constraints) {
-                                      final width = constraints.maxWidth;
-                                      final maxCardWidth = max(
-                                        190.0,
-                                        width / 5.2,
-                                      ).toDouble();
-                                      final titleLines = width > 1200 ? 3 : 2;
-                                      return GridView.builder(
-                                        padding: const EdgeInsets.all(12),
-                                        gridDelegate:
-                                            SliverGridDelegateWithMaxCrossAxisExtent(
-                                              maxCrossAxisExtent: maxCardWidth,
-                                              childAspectRatio: .70,
-                                              crossAxisSpacing: 12,
-                                              mainAxisSpacing: 14,
-                                            ),
-                                        itemCount: items.length,
-                                        itemBuilder: (context, index) {
-                                          final item = items[index];
-                                          final origin = mediaItemOrigins[item];
-                                          final favorite = origin == null
-                                              ? false
-                                              : _isFavorite(
-                                                  origin.sourceId,
-                                                  item.series
-                                                      ? 'series'
-                                                      : 'movie',
-                                                  item.id,
-                                                );
-                                          final focused =
-                                              focusedMediaId == item.id;
-                                          return InkWell(
-                                            onTap: () {
-                                              setState(
-                                                () => focusedMediaId = item.id,
-                                              );
-                                              unawaited(
-                                                _showMediaDetails(item),
-                                              );
-                                            },
-                                            child: FocusableActionDetector(
-                                              onFocusChange: (value) {
-                                                if (value) {
-                                                  setState(
-                                                    () => focusedMediaId =
-                                                        item.id,
-                                                  );
-                                                }
-                                              },
-                                              child: Card(
-                                                clipBehavior: Clip.antiAlias,
-                                                shape: RoundedRectangleBorder(
-                                                  borderRadius:
-                                                      BorderRadius.circular(12),
-                                                  side: BorderSide(
-                                                    color: focused
-                                                        ? _LiveTvMediaPaint
-                                                              .accent
-                                                        : _LiveTvMediaPaint
-                                                              .transparent,
-                                                    width: 2,
-                                                  ),
-                                                ),
-                                                child: Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    Expanded(
-                                                      child:
-                                                          item.posterUrl ==
-                                                                  null ||
-                                                              item.posterUrl!
-                                                                  .trim()
-                                                                  .isEmpty
-                                                          ? ColoredBox(
-                                                              color:
-                                                                  _LiveTvMediaPaint
-                                                                      .panel,
-                                                              child: Center(
-                                                                child: Icon(
-                                                                  Icons.live_tv,
-                                                                  size: 46,
-                                                                ),
-                                                              ),
-                                                            )
-                                                          : Image.network(
-                                                              item.posterUrl!,
-                                                              fit: BoxFit.cover,
-                                                              width: double
-                                                                  .infinity,
-                                                              errorBuilder:
-                                                                  (
-                                                                    _,
-                                                                    __,
-                                                                    ___,
-                                                                  ) => ColoredBox(
-                                                                    color: _LiveTvMediaPaint
-                                                                        .panel,
-                                                                    child: Center(
-                                                                      child: Icon(
-                                                                        Icons
-                                                                            .movie_outlined,
-                                                                        size:
-                                                                            46,
-                                                                      ),
-                                                                    ),
-                                                                  ),
-                                                            ),
-                                                    ),
-                                                    Padding(
-                                                      padding:
-                                                          const EdgeInsets.all(
-                                                            10,
-                                                          ),
-                                                      child: Column(
-                                                        crossAxisAlignment:
-                                                            CrossAxisAlignment
-                                                                .start,
-                                                        children: [
-                                                          Row(
-                                                            children: [
-                                                              Expanded(
-                                                                child: Text(
-                                                                  item.title,
-                                                                  maxLines:
-                                                                      titleLines,
-                                                                  overflow:
-                                                                      TextOverflow
-                                                                          .ellipsis,
-                                                                  style: const TextStyle(
-                                                                    fontWeight:
-                                                                        FontWeight
-                                                                            .w700,
-                                                                    fontSize:
-                                                                        14,
-                                                                  ),
-                                                                ),
-                                                              ),
-                                                              if (_versionCountFor(
-                                                                    item,
-                                                                  ) >
-                                                                  1) ...[
-                                                                const SizedBox(
-                                                                  width: 6,
-                                                                ),
-                                                                DecoratedBox(
-                                                                  decoration: BoxDecoration(
-                                                                    color: _LiveTvMediaPaint
-                                                                        .onSurface
-                                                                        .withAlpha(
-                                                                          42,
-                                                                        ),
-                                                                    borderRadius:
-                                                                        BorderRadius.circular(
-                                                                          999,
-                                                                        ),
-                                                                  ),
-                                                                  child: Padding(
-                                                                    padding: const EdgeInsets.symmetric(
-                                                                      horizontal:
-                                                                          6,
-                                                                      vertical:
-                                                                          2,
-                                                                    ),
-                                                                    child: Text(
-                                                                      'x${_versionCountFor(item)}',
-                                                                      style: TextStyle(
-                                                                        fontSize:
-                                                                            11,
-                                                                        color: _LiveTvMediaPaint
-                                                                            .onSurface70,
-                                                                      ),
-                                                                    ),
-                                                                  ),
-                                                                ),
-                                                              ],
-                                                              Icon(
-                                                                favorite
-                                                                    ? Icons
-                                                                          .favorite
-                                                                    : Icons
-                                                                          .favorite_border,
-                                                                size: 16,
-                                                                color: favorite
-                                                                    ? _LiveTvMediaPaint
-                                                                          .error
-                                                                    : _LiveTvMediaPaint
-                                                                          .onSurface54,
-                                                              ),
-                                                            ],
-                                                          ),
-                                                          if (item.group !=
-                                                                  null &&
-                                                              item.group!
-                                                                  .trim()
-                                                                  .isNotEmpty)
-                                                            Text(
-                                                              item.group!,
-                                                              maxLines: 1,
-                                                              overflow:
-                                                                  TextOverflow
-                                                                      .ellipsis,
-                                                              style: TextStyle(
-                                                                color: _LiveTvMediaPaint
-                                                                    .onSurface70,
-                                                                fontSize: 12,
-                                                              ),
-                                                            ),
-                                                          if (origin != null)
-                                                            Text(
-                                                              origin.sourceName,
-                                                              maxLines: 1,
-                                                              overflow:
-                                                                  TextOverflow
-                                                                      .ellipsis,
-                                                              style: TextStyle(
-                                                                color: _LiveTvMediaPaint
-                                                                    .onSurface54,
-                                                                fontSize: 11,
-                                                              ),
-                                                            ),
-                                                        ],
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          );
-                                        },
-                                      );
-                                    },
-                                  ),
+                                : null,
+                            content: buildCatalogGrid(),
                           ),
-                        ],
-                      ],
-                    ),
                   ),
                   if (loading)
                     Positioned.fill(
@@ -7494,159 +7108,141 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Widget _buildMovieQueueSidePanel() {
-    return Card(
-      color: _LiveTvMediaPaint.overlayStrong,
-      child: SizedBox(
-        width: 360,
-        child: Column(
-          children: [
-            ListTile(
-              title: const Text(
-                'Movie Queue',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-              subtitle: Text('${_movieQueue.length} movies • Plays in order'),
-              trailing: IconButton(
-                tooltip: 'Close',
-                onPressed: () => setState(() => showMovieQueuePanel = false),
-                icon: const Icon(Icons.close),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _movieQueue.length,
-                itemBuilder: (context, index) {
-                  final entry = _movieQueue[index];
-                  final nowPlaying = index == _movieQueueIndex;
-                  final nextUp = index == _movieQueueIndex + 1;
-                  return ListTile(
-                    selected: nowPlaying,
-                    leading: entry.posterUrl?.trim().isNotEmpty == true
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: Image.network(
-                              entry.posterUrl!,
-                              width: 48,
-                              height: 68,
-                              fit: BoxFit.cover,
-                            ),
-                          )
-                        : const Icon(Icons.movie_outlined),
-                    title: Text(
-                      entry.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+    return MovieQueuePanel(
+      items: [
+        for (var i = 0; i < _movieQueue.length; i++)
+          MediaQueueRow(
+            id: '$i',
+            title: _movieQueue[i].title,
+            subtitle: i == _movieQueueIndex
+                ? '${_movieQueueMetadata(_movieQueue[i])} • Now playing'
+                : (i == _movieQueueIndex + 1
+                      ? '${_movieQueueMetadata(_movieQueue[i])} • Up next'
+                      : _movieQueueMetadata(_movieQueue[i])),
+            nowPlaying: i == _movieQueueIndex,
+            poster: _movieQueue[i].posterUrl?.trim().isNotEmpty == true
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.network(
+                      _movieQueue[i].posterUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          const Icon(Icons.movie_outlined),
                     ),
-                    subtitle: Text(
-                      nowPlaying
-                          ? '${_movieQueueMetadata(entry)} • Now playing'
-                          : nextUp
-                          ? '${_movieQueueMetadata(entry)} • Up next'
-                          : _movieQueueMetadata(entry),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: IconButton(
-                      tooltip: 'Play next',
-                      onPressed: nowPlaying
-                          ? null
-                          : () => _queueMovieForPlayNext(index),
-                      icon: const Icon(Icons.playlist_play),
-                    ),
-                    onTap: () => unawaited(_openMovieQueueItem(index)),
-                  );
-                },
-              ),
-            ),
-            SwitchListTile(
-              title: const Text('Autoplay queue'),
-              value: autoplayNext,
-              onChanged: (value) {
-                setState(() => autoplayNext = value);
-                unawaited(_savePlayerPreferences());
-              },
-            ),
-          ],
-        ),
-      ),
+                  )
+                : null,
+          ),
+      ],
+      autoplay: autoplayNext,
+      onAutoplayChanged: (value) {
+        setState(() => autoplayNext = value);
+        unawaited(_savePlayerPreferences());
+      },
+      onPlay: (id) => unawaited(_openMovieQueueItem(int.parse(id))),
+      onRemove: (id) {
+        final index = int.tryParse(id);
+        if (index == null || index < 0 || index >= _movieQueue.length) {
+          return;
+        }
+        final current = _movieQueueIndex;
+        final updated = List<_MovieQueueEntry>.from(_movieQueue)
+          ..removeAt(index);
+        setState(() {
+          _movieQueue = updated;
+          if (_movieQueue.isEmpty) {
+            _movieQueueIndex = 0;
+            showMovieQueuePanel = false;
+          } else if (index < current) {
+            _movieQueueIndex = current - 1;
+          } else if (index == current) {
+            _movieQueueIndex = _movieQueueIndex.clamp(
+              0,
+              _movieQueue.length - 1,
+            );
+          }
+        });
+      },
+      onReorder: (oldIndex, newIndex) {
+        if (oldIndex < newIndex) {
+          newIndex -= 1;
+        }
+        if (oldIndex == newIndex ||
+            oldIndex < 0 ||
+            newIndex < 0 ||
+            oldIndex >= _movieQueue.length ||
+            newIndex >= _movieQueue.length) {
+          return;
+        }
+        final moved = _movieQueue[oldIndex];
+        final reordered = List<_MovieQueueEntry>.from(_movieQueue)
+          ..removeAt(oldIndex)
+          ..insert(newIndex, moved);
+        final currentItem = _movieQueue[_movieQueueIndex];
+        final updatedCurrent = reordered.indexWhere(
+          (item) => identical(item, currentItem),
+        );
+        setState(() {
+          _movieQueue = reordered;
+          _movieQueueIndex = updatedCurrent < 0 ? 0 : updatedCurrent;
+        });
+      },
     );
   }
 
   Widget _buildSeriesEpisodesSidePanel() {
-    return Card(
-      color: _LiveTvMediaPaint.overlayStrong,
-      child: SizedBox(
-        width: 360,
-        child: Column(
-          children: [
-            ListTile(
-              title: const Text(
-                'Episodes',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-              subtitle: Text('${_seriesEpisodes.length} episodes'),
-              trailing: IconButton(
-                tooltip: 'Close',
-                onPressed: () =>
-                    setState(() => showSeriesEpisodesPanel = false),
-                icon: const Icon(Icons.close),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _seriesEpisodes.length,
-                itemBuilder: (context, index) {
-                  final entry = _seriesEpisodes[index];
-                  final nowPlaying = index == _seriesEpisodeIndex;
-                  return ListTile(
-                    selected: nowPlaying,
-                    leading: entry.posterUrl?.trim().isNotEmpty == true
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: Image.network(
-                              entry.posterUrl!,
-                              width: 48,
-                              height: 68,
-                              fit: BoxFit.cover,
-                            ),
-                          )
-                        : const Icon(Icons.live_tv_outlined),
-                    title: Text(
-                      'E${entry.episode} · ${entry.title}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+    final seasons =
+        _seriesEpisodes.map((entry) => entry.season).toSet().toList()..sort();
+    final selectedSeason = _hasSeriesEpisodes
+        ? _seriesEpisodes[_seriesEpisodeIndex].season
+        : (seasons.isNotEmpty ? seasons.first : null);
+    return SeriesEpisodesPanel(
+      seasons: seasons,
+      selectedSeason: selectedSeason,
+      onSeasonChanged: (season) {
+        final index = _seriesEpisodes.indexWhere(
+          (entry) => entry.season == season,
+        );
+        if (index >= 0) {
+          unawaited(
+            _openSeriesEpisodeAt(index, status: 'Opening season $season...'),
+          );
+        }
+      },
+      episodes: [
+        for (var i = 0; i < _seriesEpisodes.length; i++)
+          EpisodeRow(
+            id: '$i',
+            season: _seriesEpisodes[i].season,
+            number: _seriesEpisodes[i].episode,
+            title: _seriesEpisodes[i].title,
+            subtitle: _seriesEpisodes[i].description?.trim().isNotEmpty == true
+                ? _seriesEpisodes[i].description!
+                : 'Season ${_seriesEpisodes[i].season}',
+            nowPlaying: i == _seriesEpisodeIndex,
+            thumbnail: _seriesEpisodes[i].posterUrl?.trim().isNotEmpty == true
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.network(
+                      _seriesEpisodes[i].posterUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const Icon(Icons.tv),
                     ),
-                    subtitle: Text(
-                      nowPlaying
-                          ? 'S${entry.season} • Now playing'
-                          : 'S${entry.season}',
-                    ),
-                    trailing: nowPlaying
-                        ? const Icon(Icons.play_circle_fill)
-                        : const Icon(Icons.play_arrow),
-                    onTap: () => unawaited(
-                      _openSeriesEpisodeAt(
-                        index,
-                        status: 'Starting ${entry.title}...',
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            SwitchListTile(
-              title: const Text('Autoplay next episode'),
-              value: autoplayNext,
-              onChanged: (value) {
-                setState(() => autoplayNext = value);
-                unawaited(_savePlayerPreferences());
-              },
-            ),
-          ],
-        ),
-      ),
+                  )
+                : null,
+          ),
+      ],
+      onPlay: (id) {
+        final index = int.tryParse(id);
+        if (index == null) {
+          return;
+        }
+        unawaited(_openSeriesEpisodeAt(index, status: 'Starting episode...'));
+      },
+      autoplay: autoplayNext,
+      onAutoplayChanged: (value) {
+        setState(() => autoplayNext = value);
+        unawaited(_savePlayerPreferences());
+      },
     );
   }
 
@@ -9263,1567 +8859,264 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     );
   }
 
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: false,
-    onPopInvokedWithResult: (_, __) {
-      unawaited(_minimizeToPipAndGoHome());
-    },
-    child: CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): () {
-          if (fullscreen) {
-            unawaited(_setFullscreen(false));
-            return;
-          }
-          unawaited(_minimizeToPipAndGoHome());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyP): () {
-          unawaited(_minimizeToPipAndGoHome());
-        },
-        const SingleActivator(LogicalKeyboardKey.enter): () {
-          unawaited(_togglePlayPause());
-        },
-        const SingleActivator(LogicalKeyboardKey.space): () {
-          unawaited(_togglePlayPause());
-        },
-        const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-          unawaited(_seekByConfigured(-1));
-        },
-        const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-          unawaited(_seekByConfigured(1));
-        },
-        const SingleActivator(LogicalKeyboardKey.arrowUp): () {
-          unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
-        },
-        const SingleActivator(LogicalKeyboardKey.arrowDown): () {
-          unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
-        },
-        const SingleActivator(LogicalKeyboardKey.keyM): () {
-          unawaited(_toggleMute());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyF): () {
-          unawaited(_toggleFullscreen());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyC): () {
-          unawaited(_pickSubtitle());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyA): () {
-          unawaited(_pickAudioTrack());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyQ): () {
-          unawaited(_pickVideoTrackQuality());
-        },
-        const SingleActivator(LogicalKeyboardKey.keyH): () {
-          unawaited(_showRemoteControlHelp());
-        },
-      },
-      child: Focus(
-        autofocus: true,
-        child: MouseRegion(
-          onHover: (_) => _registerControlsInteraction(),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _registerControlsInteraction,
-            onPanStart: (_) => _registerControlsInteraction(),
-            child: MediaQuery(
-              data: MediaQuery.of(context).copyWith(
-                textScaler: TextScaler.linear(playerTextScale.clamp(0.8, 1.8)),
+  Future<void> _openSpeedPicker() async {
+    final selected = await showModalBottomSheet<double>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text(
+                'Playback speed',
+                style: TextStyle(fontWeight: FontWeight.w700),
               ),
-              child: Scaffold(
-                appBar: fullscreen
-                    ? null
-                    : AppBar(
-                        title: Text(widget.title),
-                        leading: IconButton(
-                          tooltip: 'Home (PiP)',
-                          onPressed: () => unawaited(_minimizeToPipAndGoHome()),
-                          icon: const Icon(Icons.arrow_back),
-                        ),
-                        actions: [
-                          IconButton(
-                            tooltip: fullscreen
-                                ? 'Exit fullscreen'
-                                : 'Fullscreen',
-                            onPressed: () => unawaited(_toggleFullscreen()),
-                            icon: Icon(
-                              fullscreen
-                                  ? Icons.fullscreen_exit
-                                  : Icons.fullscreen,
-                            ),
+            ),
+            for (final speed in const [0.5, 1.0, 1.25, 1.5, 2.0])
+              ListTile(
+                leading: Icon(
+                  (playbackSpeed - speed).abs() < 0.001
+                      ? Icons.check_circle
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(
+                  '${speed.toStringAsFixed(speed == 1.25 || speed == 1.5 ? 2 : 1)}×',
+                ),
+                onTap: () => Navigator.pop(ctx, speed),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) {
+      await _setPlaybackSpeed(selected);
+    }
+  }
+
+  Future<void> _openPlaybackSettings() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text(
+                'Playback settings',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.graphic_eq),
+              title: const Text('Audio track'),
+              subtitle: const Text('Select audio language and mix'),
+              onTap: () => Navigator.pop(ctx, 'audio'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.high_quality_outlined),
+              title: const Text('Video quality'),
+              subtitle: const Text('Choose a quality profile'),
+              onTap: () => Navigator.pop(ctx, 'quality'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.keyboard),
+              title: const Text('Remote shortcuts'),
+              subtitle: const Text('View keyboard and remote controls'),
+              onTap: () => Navigator.pop(ctx, 'shortcuts'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected == 'audio') {
+      await _pickAudioTrack();
+    } else if (selected == 'quality') {
+      await _pickVideoTrackQuality();
+    } else if (selected == 'shortcuts') {
+      await _showRemoteControlHelp();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final activePlayer = player;
+    final activeVideo = video;
+    final playerPanel =
+        showSeriesEpisodesPanel &&
+            widget.seriesEpisodePlayback &&
+            _hasSeriesEpisodes
+        ? PlayerSidePanel.episodes
+        : (showMovieQueuePanel && _hasMovieQueue
+              ? PlayerSidePanel.queue
+              : PlayerSidePanel.none);
+
+    Future<void> onPanelChanged(PlayerSidePanel panel) async {
+      setState(() {
+        showMovieQueuePanel = panel == PlayerSidePanel.queue;
+        showSeriesEpisodesPanel = panel == PlayerSidePanel.episodes;
+      });
+    }
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (_, __) {
+        unawaited(_minimizeToPipAndGoHome());
+      },
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (fullscreen) {
+              unawaited(_setFullscreen(false));
+              return;
+            }
+            unawaited(_minimizeToPipAndGoHome());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyP): () {
+            unawaited(_minimizeToPipAndGoHome());
+          },
+          const SingleActivator(LogicalKeyboardKey.enter): () {
+            unawaited(_togglePlayPause());
+          },
+          const SingleActivator(LogicalKeyboardKey.space): () {
+            unawaited(_togglePlayPause());
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            unawaited(_seekByConfigured(-1));
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+            unawaited(_seekByConfigured(1));
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+            unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+            unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
+          },
+          const SingleActivator(LogicalKeyboardKey.keyM): () {
+            unawaited(_toggleMute());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyF): () {
+            unawaited(_toggleFullscreen());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyC): () {
+            unawaited(_pickSubtitle());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyA): () {
+            unawaited(_pickAudioTrack());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyQ): () {
+            unawaited(_pickVideoTrackQuality());
+          },
+          const SingleActivator(LogicalKeyboardKey.keyH): () {
+            unawaited(_showRemoteControlHelp());
+          },
+        },
+        child: Focus(
+          autofocus: true,
+          child: MouseRegion(
+            onHover: (_) => _registerControlsInteraction(),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _registerControlsInteraction,
+              onPanStart: (_) => _registerControlsInteraction(),
+              child: MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: TextScaler.linear(
+                    playerTextScale.clamp(0.8, 1.8),
+                  ),
+                ),
+                child: Scaffold(
+                  backgroundColor: Colors.black,
+                  body: activePlayer == null || activeVideo == null
+                      ? const Center(child: CircularProgressIndicator())
+                      : MediaPlayerChrome(
+                          video: Video(
+                            controller: activeVideo,
+                            controls: NoVideoControls,
                           ),
-                          IconButton(
-                            tooltip: 'Subtitles',
-                            onPressed: _pickSubtitle,
-                            icon: const Icon(Icons.subtitles),
-                          ),
-                          IconButton(
-                            tooltip: subtitlesEnabled
-                                ? 'Disable subtitles'
-                                : 'Enable subtitles',
-                            onPressed: () =>
-                                unawaited(_toggleSubtitles(!subtitlesEnabled)),
-                            icon: Icon(
-                              subtitlesEnabled
-                                  ? Icons.closed_caption
-                                  : Icons.closed_caption_disabled,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Audio track',
-                            onPressed: _pickAudioTrack,
-                            icon: const Icon(Icons.audiotrack),
-                          ),
-                          IconButton(
-                            tooltip: 'Quality',
-                            onPressed: _pickVideoTrackQuality,
-                            icon: const Icon(Icons.hd),
-                          ),
-                          PopupMenuButton<String>(
-                            tooltip: 'Playback options',
-                            onSelected: (value) async {
-                              switch (value) {
-                                case 'speed_05':
-                                  await _setPlaybackSpeed(0.5);
-                                  break;
-                                case 'speed_10':
-                                  await _setPlaybackSpeed(1.0);
-                                  break;
-                                case 'speed_125':
-                                  await _setPlaybackSpeed(1.25);
-                                  break;
-                                case 'speed_150':
-                                  await _setPlaybackSpeed(1.5);
-                                  break;
-                                case 'speed_200':
-                                  await _setPlaybackSpeed(2.0);
-                                  break;
-                                case 'bookmark_add':
-                                  await _addBookmark();
-                                  break;
-                                case 'bookmark_open':
-                                  await _openBookmarks();
-                                  break;
-                                case 'chapters':
-                                  await _openChapters();
-                                  break;
-                                case 'restart':
-                                  await _restartPlayback();
-                                  break;
-                                case 'resume_saved':
-                                  await _resumeSavedPosition();
-                                  break;
-                                case 'seek_10':
-                                  seekIncrementSeconds = 10;
-                                  await _savePlayerPreferences();
-                                  break;
-                                case 'seek_30':
-                                  seekIncrementSeconds = 30;
-                                  await _savePlayerPreferences();
-                                  break;
-                                case 'seek_45':
-                                  seekIncrementSeconds = 45;
-                                  await _savePlayerPreferences();
-                                  break;
-                                case 'aspect_contain':
-                                  await _setAspectMode('contain');
-                                  break;
-                                case 'aspect_cover':
-                                  await _setAspectMode('cover');
-                                  break;
-                                case 'aspect_fill':
-                                  await _setAspectMode('fill');
-                                  break;
-                                case 'aspect_fit_width':
-                                  await _setAspectMode('fitWidth');
-                                  break;
-                                case 'aspect_fit_height':
-                                  await _setAspectMode('fitHeight');
-                                  break;
-                                case 'autoplay':
-                                  setState(() => autoplayNext = !autoplayNext);
-                                  await _savePlayerPreferences();
-                                  break;
-                                case 'output_auto':
-                                  await _setAudioOutputProfile('auto');
-                                  break;
-                                case 'output_theater':
-                                  await _setAudioOutputProfile('theater');
-                                  break;
-                                case 'output_night':
-                                  await _setAudioOutputProfile('night');
-                                  break;
-                                case 'history_pause':
-                                  setState(() => pauseHistory = !pauseHistory);
-                                  await _savePlayerPreferences();
-                                  break;
-                                case 'handoff_create':
-                                  await _createSessionHandoff();
-                                  break;
-                                case 'handoff_consume':
-                                  await _consumeSessionHandoff();
-                                  break;
-                                case 'external':
-                                  await _openExternalPlayer();
-                                  break;
-                                case 'step_back':
-                                  await _stepFrame(-1);
-                                  break;
-                                case 'step_forward':
-                                  await _stepFrame(1);
-                                  break;
-                                case 'stats':
-                                  await _showPlaybackStats();
-                                  break;
-                                case 'capabilities':
-                                  await _showCapabilitiesReport();
-                                  break;
-                                case 'try_compatible':
-                                  await _tryCompatiblePlayback();
-                                  break;
-                                case 'subtitle_access':
-                                  await _openSubtitleAccessibilitySettings();
-                                  break;
-                                case 'subtitle_import':
-                                  await _importSubtitleFile();
-                                  break;
-                                case 'subtitle_quality':
-                                  await _subtitleQualityReport();
-                                  break;
-                                case 'subtitle_search':
-                                  await _subtitleSearchAuthorizedWorkflow();
-                                  break;
-                                case 'subtitle_translate':
-                                  await _translationAuthorizedWorkflow();
-                                  break;
-                                case 'subtitle_secondary':
-                                  await _pickSecondarySubtitleTrack();
-                                  break;
-                              }
-                            },
-                            itemBuilder: (context) => [
-                              const PopupMenuItem(
-                                value: 'subtitle_access',
-                                child: Text(
-                                  'Subtitle & accessibility settings',
-                                ),
-                              ),
-                              const PopupMenuItem(
-                                value: 'chapters',
-                                child: Text('Chapters'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'bookmark_add',
-                                child: Text('Add bookmark'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'bookmark_open',
-                                child: Text('Go to bookmark'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'restart',
-                                child: Text('Restart from beginning'),
-                              ),
-                              if ((resumePositionMs ?? 0) > 0)
-                                const PopupMenuItem(
-                                  value: 'resume_saved',
-                                  child: Text('Resume saved progress'),
-                                ),
-                              const PopupMenuDivider(),
-                              CheckedPopupMenuItem(
-                                value: 'autoplay',
-                                checked: autoplayNext,
-                                child: const Text('Autoplay next episode'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'history_pause',
-                                checked: pauseHistory,
-                                child: const Text('Pause history collection'),
-                              ),
-                              const PopupMenuDivider(),
-                              CheckedPopupMenuItem(
-                                value: 'output_auto',
-                                checked: audioOutputProfile == 'auto',
-                                child: const Text('Output: auto'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'output_theater',
-                                checked: audioOutputProfile == 'theater',
-                                child: const Text('Output: theater'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'output_night',
-                                checked: audioOutputProfile == 'night',
-                                child: const Text('Output: night'),
-                              ),
-                              const PopupMenuDivider(),
-                              const PopupMenuItem(
-                                value: 'seek_10',
-                                child: Text('Seek increment: 10s'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'seek_30',
-                                child: Text('Seek increment: 30s'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'seek_45',
-                                child: Text('Seek increment: 45s'),
-                              ),
-                              const PopupMenuDivider(),
-                              CheckedPopupMenuItem(
-                                value: 'aspect_contain',
-                                checked: aspectMode == 'contain',
-                                child: Text('Aspect: contain'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'aspect_cover',
-                                checked: aspectMode == 'cover',
-                                child: Text('Aspect: cover'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'aspect_fill',
-                                checked: aspectMode == 'fill',
-                                child: Text('Aspect: fill'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'aspect_fit_width',
-                                checked: aspectMode == 'fitWidth',
-                                child: Text('Aspect: fit width'),
-                              ),
-                              CheckedPopupMenuItem(
-                                value: 'aspect_fit_height',
-                                checked: aspectMode == 'fitHeight',
-                                child: Text('Aspect: fit height'),
-                              ),
-                              const PopupMenuDivider(),
-                              const PopupMenuItem(
-                                value: 'speed_05',
-                                child: Text('Speed 0.5x'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'speed_10',
-                                child: Text('Speed 1.0x'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'speed_125',
-                                child: Text('Speed 1.25x'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'speed_150',
-                                child: Text('Speed 1.5x'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'speed_200',
-                                child: Text('Speed 2.0x'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'step_back',
-                                child: Text('Step frame backward'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'step_forward',
-                                child: Text('Step frame forward'),
-                              ),
-                              const PopupMenuDivider(),
-                              const PopupMenuItem(
-                                value: 'handoff_create',
-                                child: Text('Create session handoff'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'handoff_consume',
-                                child: Text('Continue from handoff'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'external',
-                                child: Text('Open in external player'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'stats',
-                                child: Text('Playback stats'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'capabilities',
-                                child: Text('Capability report'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'try_compatible',
-                                child: Text('Try compatible playback'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'subtitle_import',
-                                child: Text('Import subtitle file'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'subtitle_quality',
-                                child: Text('Subtitle quality report'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'subtitle_search',
-                                child: Text('Search subtitles (authorized)'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'subtitle_translate',
-                                child: Text('Translate subtitles (authorized)'),
-                              ),
-                              const PopupMenuItem(
-                                value: 'subtitle_secondary',
-                                child: Text('Secondary subtitle track'),
-                              ),
-                            ],
-                          ),
-                        ],
-                        bottom: widget.subtitle == null
-                            ? null
-                            : PreferredSize(
-                                preferredSize: const Size.fromHeight(30),
-                                child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Text(
-                                    widget.subtitle!,
-                                    style: TextStyle(
-                                      color: _LiveTvMediaPaint.onSurface70,
-                                    ),
+                          title: widget.title,
+                          metadata: _currentTopMetaLine(),
+                          poster: widget.posterUrl?.trim().isNotEmpty == true
+                              ? ClipRRect(
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: Image.network(
+                                    widget.posterUrl!,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) =>
+                                        const Icon(Icons.movie_outlined),
                                   ),
-                                ),
-                              ),
-                      ),
-                body: video == null
-                    ? const Center(child: CircularProgressIndicator())
-                    : Stack(
-                        children: [
-                          ColoredBox(
-                            color: Theme.of(context).colorScheme.surface,
-                            child: Center(
-                              child: AspectRatio(
-                                aspectRatio: 16 / 9,
-                                child: FittedBox(
-                                  fit: _aspectFit(),
-                                  child: SizedBox(
-                                    width: 1920,
-                                    height: 1080,
-                                    child: Video(
-                                      controller: video!,
-                                      controls: NoVideoControls,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
+                                )
+                              : null,
+                          playing: playing,
+                          position: position,
+                          duration: duration,
+                          volume: volume,
+                          muted: muted,
+                          speed: playbackSpeed,
+                          onPlayPause: () => unawaited(_togglePlayPause()),
+                          onSeek: (target) => unawaited(
+                            _seekToPreview(target.inMilliseconds.toDouble()),
                           ),
-                          if (buffering)
-                            const Positioned(
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              child: LinearProgressIndicator(),
-                            ),
-                          if (statusMessage.isNotEmpty)
-                            Positioned(
-                              top: buffering ? 8 : 0,
-                              left: 12,
-                              child: SafeArea(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    color: highContrastInterface
-                                        ? Theme.of(context).colorScheme.surface
-                                        : _LiveTvMediaPaint.overlayMuted,
-                                    borderRadius: BorderRadius.circular(999),
-                                    border: highContrastInterface
-                                        ? Border.all(
-                                            color: _LiveTvMediaPaint.onSurface,
-                                          )
-                                        : null,
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 6,
-                                    ),
-                                    child: Text(
-                                      statusMessage,
-                                      style: const TextStyle(fontSize: 11),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (!fullscreen || controlsVisible)
-                            Positioned(
-                              top: 8,
-                              left: 10,
-                              child: SafeArea(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    color: _LiveTvMediaPaint.overlayMuted,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 8,
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        if (_currentTopPosterUrl()
-                                                ?.trim()
-                                                .isNotEmpty ==
-                                            true)
-                                          Padding(
-                                            padding: const EdgeInsets.only(
-                                              right: 10,
-                                            ),
-                                            child: ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                              child: Image.network(
-                                                _currentTopPosterUrl()!,
-                                                width: 44,
-                                                height: 62,
-                                                fit: BoxFit.cover,
-                                              ),
-                                            ),
-                                          ),
-                                        Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              widget.title,
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.w700,
-                                                fontSize: 18,
-                                              ),
-                                            ),
-                                            Text(
-                                              _currentTopMetaLine(),
-                                              style: TextStyle(
-                                                color: _LiveTvMediaPaint
-                                                    .onSurface70,
-                                              ),
-                                            ),
-                                            if (_currentTopDescription()
-                                                    ?.trim()
-                                                    .isNotEmpty ==
-                                                true)
-                                              TextButton.icon(
-                                                onPressed: () => unawaited(
-                                                  _showCurrentDescription(),
-                                                ),
-                                                style: TextButton.styleFrom(
-                                                  visualDensity:
-                                                      VisualDensity.compact,
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 4,
-                                                      ),
-                                                  minimumSize: const Size(
-                                                    0,
-                                                    28,
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.info_outline,
-                                                  size: 16,
-                                                ),
-                                                label: const Text(
-                                                  'Description',
-                                                ),
-                                              ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (showMovieQueuePanel && _hasMovieQueue)
-                            Positioned(
-                              top: 92,
-                              right: 12,
-                              bottom: 118,
-                              child: SafeArea(
-                                child: _buildMovieQueueSidePanel(),
-                              ),
-                            ),
-                          if (showSeriesEpisodesPanel &&
+                          onSeekBack: () => unawaited(_seekByConfigured(-1)),
+                          onSeekForward: () => unawaited(_seekByConfigured(1)),
+                          onToggleMute: () => unawaited(_toggleMute()),
+                          onVolumeChanged: (value) =>
+                              unawaited(_setVolume(value)),
+                          onDescription: () =>
+                              unawaited(_showCurrentDescription()),
+                          onSubtitles: _pickSubtitle,
+                          onSpeed: () => unawaited(_openSpeedPicker()),
+                          onSettings: () => unawaited(_openPlaybackSettings()),
+                          onFullscreen: () => unawaited(_toggleFullscreen()),
+                          onBack: () => unawaited(_minimizeToPipAndGoHome()),
+                          panel: playerPanel,
+                          onPanelChanged: (panel) {
+                            unawaited(onPanelChanged(panel));
+                          },
+                          queuePanel: _buildMovieQueueSidePanel(),
+                          episodesPanel:
+                              widget.seriesEpisodePlayback && _hasSeriesEpisodes
+                              ? _buildSeriesEpisodesSidePanel()
+                              : null,
+                          onPreviousEpisode:
                               widget.seriesEpisodePlayback &&
-                              _hasSeriesEpisodes)
-                            Positioned(
-                              top: 92,
-                              right: 12,
-                              bottom: 118,
-                              child: SafeArea(
-                                child: _buildSeriesEpisodesSidePanel(),
-                              ),
-                            ),
-                          if (!fullscreen || controlsVisible)
-                            Positioned(
-                              top: 6,
-                              right: 6,
-                              child: SafeArea(
-                                child: Wrap(
-                                  alignment: WrapAlignment.end,
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    IconButton.filledTonal(
-                                      tooltip: fullscreen
-                                          ? 'Exit fullscreen'
-                                          : 'Fullscreen',
-                                      onPressed: () =>
-                                          unawaited(_toggleFullscreen()),
-                                      icon: Icon(
-                                        fullscreen
-                                            ? Icons.fullscreen_exit
-                                            : Icons.fullscreen,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    IconButton.filledTonal(
-                                      tooltip: 'Subtitles',
-                                      onPressed: _pickSubtitle,
-                                      icon: const Icon(Icons.subtitles),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: _LiveTvMediaPaint.overlayMuted,
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 6,
-                                        ),
-                                        child: Text(
-                                          playbackEngineStatus,
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: _LiveTvMediaPaint.overlayMuted,
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 6,
-                                        ),
-                                        child: Text(
-                                          '$playbackRoute · $qualityRoute',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                      ),
-                                    ),
-                                    if (transcodeReason != 'None')
-                                      DecoratedBox(
-                                        decoration: BoxDecoration(
-                                          color: _LiveTvMediaPaint.overlayMuted,
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 10,
-                                            vertical: 6,
-                                          ),
-                                          child: Text(
-                                            'Why transcoding: $transcodeReason',
-                                            style: const TextStyle(
-                                              fontSize: 11,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: _LiveTvMediaPaint.overlayMuted,
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 6,
-                                        ),
-                                        child: Text(
-                                          outputEnvironment,
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton.filledTonal(
-                                      tooltip: 'Remote controls help',
-                                      onPressed: () =>
-                                          unawaited(_showRemoteControlHelp()),
-                                      icon: const Icon(Icons.keyboard),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          if (!fullscreen || controlsVisible)
-                            Positioned(
-                              left: 10,
-                              right: 10,
-                              bottom: 10,
-                              child: SafeArea(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    color: highContrastInterface
-                                        ? Theme.of(context).colorScheme.surface
-                                        : _LiveTvMediaPaint.overlayStrong,
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: highContrastInterface
-                                        ? Border.all(
-                                            color: _LiveTvMediaPaint.onSurface,
-                                          )
-                                        : null,
+                                  _hasPreviousSeriesEpisode
+                              ? () => unawaited(
+                                  _openSeriesEpisodeAt(
+                                    _seriesEpisodeIndex - 1,
+                                    status: 'Starting previous episode...',
                                   ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child:
-                                        MediaQuery.sizeOf(context).width < 760
-                                        ? Column(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Wrap(
-                                                alignment: WrapAlignment.center,
-                                                spacing: 6,
-                                                runSpacing: 6,
-                                                children: [
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekByConfigured(
-                                                        -1,
-                                                        accelerated: true,
-                                                      ),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons.replay_30,
-                                                    ),
-                                                    tooltip: 'Rewind',
-                                                  ),
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekByConfigured(-1),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons.replay_10,
-                                                    ),
-                                                    tooltip: 'Rewind step',
-                                                  ),
-                                                  IconButton.filled(
-                                                    onPressed: () => unawaited(
-                                                      _togglePlayPause(),
-                                                    ),
-                                                    icon: Icon(
-                                                      playing
-                                                          ? Icons.pause
-                                                          : Icons.play_arrow,
-                                                    ),
-                                                    tooltip: playing
-                                                        ? 'Pause'
-                                                        : 'Play',
-                                                  ),
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekByConfigured(1),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons.forward_10,
-                                                    ),
-                                                    tooltip: 'Forward step',
-                                                  ),
-                                                  IconButton.filledTonal(
-                                                    onPressed: () => unawaited(
-                                                      _seekByConfigured(
-                                                        1,
-                                                        accelerated: true,
-                                                      ),
-                                                    ),
-                                                    icon: const Icon(
-                                                      Icons.forward_30,
-                                                    ),
-                                                    tooltip: 'Forward',
-                                                  ),
-                                                  if (_seriesSkipControlsEnabled)
-                                                    IconButton.filledTonal(
-                                                      onPressed: () =>
-                                                          unawaited(
-                                                            _seekRelative(
-                                                              const Duration(
-                                                                seconds: 90,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                      icon: const Icon(
-                                                        Icons
-                                                            .skip_next_outlined,
-                                                      ),
-                                                      tooltip: 'Skip intro',
-                                                    ),
-                                                  if (_seriesSkipControlsEnabled)
-                                                    IconButton.filledTonal(
-                                                      onPressed: () =>
-                                                          unawaited(
-                                                            _seekRelative(
-                                                              const Duration(
-                                                                seconds: 30,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                      icon: const Icon(
-                                                        Icons
-                                                            .fast_forward_outlined,
-                                                      ),
-                                                      tooltip: 'Skip recap',
-                                                    ),
-                                                  if (widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasSeriesEpisodes)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _hasPreviousSeriesEpisode
-                                                          ? () => unawaited(
-                                                              _openSeriesEpisodeAt(
-                                                                _seriesEpisodeIndex -
-                                                                    1,
-                                                                status:
-                                                                    'Starting previous episode...',
-                                                              ),
-                                                            )
-                                                          : null,
-                                                      icon: const Icon(
-                                                        Icons.skip_previous,
-                                                      ),
-                                                      tooltip:
-                                                          'Previous episode',
-                                                    ),
-                                                  if (widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasSeriesEpisodes)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _hasNextSeriesEpisode
-                                                          ? () => unawaited(
-                                                              _openSeriesEpisodeAt(
-                                                                _seriesEpisodeIndex +
-                                                                    1,
-                                                                status:
-                                                                    _nextSeriesEpisodeLabel ==
-                                                                        null
-                                                                    ? 'Starting next episode...'
-                                                                    : 'Starting $_nextSeriesEpisodeLabel...',
-                                                              ),
-                                                            )
-                                                          : null,
-                                                      icon: const Icon(
-                                                        Icons.skip_next,
-                                                      ),
-                                                      tooltip: 'Next episode',
-                                                    ),
-                                                  if (widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasSeriesEpisodes)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _toggleContextPanel,
-                                                      icon: const Icon(
-                                                        Icons.list_alt,
-                                                      ),
-                                                      tooltip: 'Episodes',
-                                                    ),
-                                                  if (!widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasMovieQueue)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _hasPreviousMovieQueueItem
-                                                          ? () => unawaited(
-                                                              _openMovieQueueItem(
-                                                                _movieQueueIndex -
-                                                                    1,
-                                                                status:
-                                                                    'Starting previous movie...',
-                                                              ),
-                                                            )
-                                                          : null,
-                                                      icon: const Icon(
-                                                        Icons.skip_previous,
-                                                      ),
-                                                      tooltip: 'Previous movie',
-                                                    ),
-                                                  if (!widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasMovieQueue)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _hasNextMovieQueueItem
-                                                          ? () => unawaited(
-                                                              _openMovieQueueItem(
-                                                                _movieQueueIndex +
-                                                                    1,
-                                                                status:
-                                                                    _nextMovieTitle ==
-                                                                        null
-                                                                    ? 'Starting next movie...'
-                                                                    : 'Starting $_nextMovieTitle...',
-                                                              ),
-                                                            )
-                                                          : null,
-                                                      icon: const Icon(
-                                                        Icons.skip_next,
-                                                      ),
-                                                      tooltip: 'Next movie',
-                                                    ),
-                                                  if (!widget
-                                                          .seriesEpisodePlayback &&
-                                                      _hasMovieQueue)
-                                                    IconButton.filledTonal(
-                                                      onPressed:
-                                                          _toggleContextPanel,
-                                                      icon: const Icon(
-                                                        Icons.queue_music,
-                                                      ),
-                                                      tooltip: 'Queue',
-                                                    ),
-                                                  DecoratedBox(
-                                                    decoration: BoxDecoration(
-                                                      color: _LiveTvMediaPaint
-                                                          .overlayMuted,
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                            10,
-                                                          ),
-                                                    ),
-                                                    child: Padding(
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 10,
-                                                            vertical: 6,
-                                                          ),
-                                                      child: Text(
-                                                        widget.seriesEpisodePlayback
-                                                            ? 'Series controls'
-                                                            : 'Movie controls',
-                                                        style: const TextStyle(
-                                                          fontSize: 11,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                              if ((widget.seriesEpisodePlayback &&
-                                                      _hasSeriesEpisodes) ||
-                                                  (!widget.seriesEpisodePlayback &&
-                                                      _hasMovieQueue))
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        top: 6,
-                                                        bottom: 2,
-                                                      ),
-                                                  child: Align(
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: FilledButton.tonalIcon(
-                                                      onPressed:
-                                                          _toggleContextPanel,
-                                                      icon: Icon(
-                                                        widget.seriesEpisodePlayback
-                                                            ? Icons.view_list
-                                                            : Icons.queue_music,
-                                                      ),
-                                                      label: Text(
-                                                        widget.seriesEpisodePlayback
-                                                            ? 'Episodes'
-                                                            : 'Queue',
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ),
-                                              Slider(
-                                                value:
-                                                    duration.inMilliseconds <= 0
-                                                    ? 0
-                                                    : position.inMilliseconds
-                                                          .clamp(
-                                                            0,
-                                                            duration
-                                                                .inMilliseconds,
-                                                          )
-                                                          .toDouble(),
-                                                min: 0,
-                                                max:
-                                                    duration.inMilliseconds <= 0
-                                                    ? 1
-                                                    : duration.inMilliseconds
-                                                          .toDouble(),
-                                                onChanged:
-                                                    duration.inMilliseconds <= 0
-                                                    ? null
-                                                    : (value) => setState(
-                                                        () => scrubPreviewMs =
-                                                            value,
-                                                      ),
-                                                onChangeEnd:
-                                                    duration.inMilliseconds <= 0
-                                                    ? null
-                                                    : (value) => unawaited(
-                                                        _seekToPreview(value),
-                                                      ),
-                                              ),
-                                              if (scrubPreviewMs != null &&
-                                                  !reducedMotion)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        bottom: 6,
-                                                      ),
-                                                  child:
-                                                      _seekThumbnailPreview(),
-                                                ),
-                                              if (duration.inMilliseconds > 0)
-                                                Wrap(
-                                                  alignment:
-                                                      WrapAlignment.center,
-                                                  spacing: 12,
-                                                  runSpacing: 4,
-                                                  children: [
-                                                    Text(
-                                                      _clockText(position),
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      '-${_clockText(_remainingDuration())}',
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      'Runtime ${_runtimeText(duration)}',
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      'End ${_endTimeText(_remainingDuration())}',
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      'Step ${seekIncrementSeconds}s',
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      'Speed ${playbackSpeed.toStringAsFixed(2)}x',
-                                                      style: const TextStyle(
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                            ],
-                                          )
-                                        : Row(
-                                            children: [
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekByConfigured(
-                                                    -1,
-                                                    accelerated: true,
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.replay_30,
-                                                ),
-                                                tooltip: 'Rewind',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekByConfigured(-1),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.replay_10,
-                                                ),
-                                                tooltip: 'Rewind step',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _togglePlayPause(),
-                                                ),
-                                                icon: Icon(
-                                                  playing
-                                                      ? Icons.pause
-                                                      : Icons.play_arrow,
-                                                ),
-                                                tooltip: playing
-                                                    ? 'Pause'
-                                                    : 'Play',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekByConfigured(1),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.forward_10,
-                                                ),
-                                                tooltip: 'Forward step',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _seekByConfigured(
-                                                    1,
-                                                    accelerated: true,
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.forward_30,
-                                                ),
-                                                tooltip: 'Forward',
-                                              ),
-                                              if (_seriesSkipControlsEnabled)
-                                                IconButton(
-                                                  onPressed: () => unawaited(
-                                                    _seekRelative(
-                                                      const Duration(
-                                                        seconds: 90,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  icon: const Icon(
-                                                    Icons.skip_next_outlined,
-                                                  ),
-                                                  tooltip: 'Skip intro',
-                                                ),
-                                              if (_seriesSkipControlsEnabled)
-                                                IconButton(
-                                                  onPressed: () => unawaited(
-                                                    _seekRelative(
-                                                      const Duration(
-                                                        seconds: 30,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  icon: const Icon(
-                                                    Icons.fast_forward_outlined,
-                                                  ),
-                                                  tooltip: 'Skip recap',
-                                                ),
-                                              if (widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasSeriesEpisodes)
-                                                IconButton(
-                                                  onPressed:
-                                                      _hasPreviousSeriesEpisode
-                                                      ? () => unawaited(
-                                                          _openSeriesEpisodeAt(
-                                                            _seriesEpisodeIndex -
-                                                                1,
-                                                            status:
-                                                                'Starting previous episode...',
-                                                          ),
-                                                        )
-                                                      : null,
-                                                  icon: const Icon(
-                                                    Icons.skip_previous,
-                                                  ),
-                                                  tooltip: 'Previous episode',
-                                                ),
-                                              if (widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasSeriesEpisodes)
-                                                IconButton(
-                                                  onPressed:
-                                                      _hasNextSeriesEpisode
-                                                      ? () => unawaited(
-                                                          _openSeriesEpisodeAt(
-                                                            _seriesEpisodeIndex +
-                                                                1,
-                                                            status:
-                                                                _nextSeriesEpisodeLabel ==
-                                                                    null
-                                                                ? 'Starting next episode...'
-                                                                : 'Starting $_nextSeriesEpisodeLabel...',
-                                                          ),
-                                                        )
-                                                      : null,
-                                                  icon: const Icon(
-                                                    Icons.skip_next,
-                                                  ),
-                                                  tooltip: 'Next episode',
-                                                ),
-                                              if (widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasSeriesEpisodes)
-                                                IconButton(
-                                                  onPressed:
-                                                      _toggleContextPanel,
-                                                  icon: const Icon(
-                                                    Icons.list_alt,
-                                                  ),
-                                                  tooltip: 'Episodes',
-                                                ),
-                                              if (!widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasMovieQueue)
-                                                IconButton(
-                                                  onPressed:
-                                                      _hasPreviousMovieQueueItem
-                                                      ? () => unawaited(
-                                                          _openMovieQueueItem(
-                                                            _movieQueueIndex -
-                                                                1,
-                                                            status:
-                                                                'Starting previous movie...',
-                                                          ),
-                                                        )
-                                                      : null,
-                                                  icon: const Icon(
-                                                    Icons.skip_previous,
-                                                  ),
-                                                  tooltip: 'Previous movie',
-                                                ),
-                                              if (!widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasMovieQueue)
-                                                IconButton(
-                                                  onPressed:
-                                                      _hasNextMovieQueueItem
-                                                      ? () => unawaited(
-                                                          _openMovieQueueItem(
-                                                            _movieQueueIndex +
-                                                                1,
-                                                            status:
-                                                                _nextMovieTitle ==
-                                                                    null
-                                                                ? 'Starting next movie...'
-                                                                : 'Starting $_nextMovieTitle...',
-                                                          ),
-                                                        )
-                                                      : null,
-                                                  icon: const Icon(
-                                                    Icons.skip_next,
-                                                  ),
-                                                  tooltip: 'Next movie',
-                                                ),
-                                              if (!widget
-                                                      .seriesEpisodePlayback &&
-                                                  _hasMovieQueue)
-                                                IconButton(
-                                                  onPressed:
-                                                      _toggleContextPanel,
-                                                  icon: const Icon(
-                                                    Icons.queue_music,
-                                                  ),
-                                                  tooltip: 'Queue',
-                                                ),
-                                              if ((widget.seriesEpisodePlayback &&
-                                                      _hasSeriesEpisodes) ||
-                                                  (!widget.seriesEpisodePlayback &&
-                                                      _hasMovieQueue))
-                                                FilledButton.tonalIcon(
-                                                  onPressed:
-                                                      _toggleContextPanel,
-                                                  icon: Icon(
-                                                    widget.seriesEpisodePlayback
-                                                        ? Icons.view_list
-                                                        : Icons.queue_music,
-                                                  ),
-                                                  label: Text(
-                                                    widget.seriesEpisodePlayback
-                                                        ? 'Episodes'
-                                                        : 'Queue',
-                                                  ),
-                                                ),
-                                              IconButton(
-                                                onPressed: () =>
-                                                    unawaited(_toggleMute()),
-                                                icon: Icon(
-                                                  muted
-                                                      ? Icons.volume_off
-                                                      : Icons.volume_up,
-                                                ),
-                                                tooltip: muted
-                                                    ? 'Unmute'
-                                                    : 'Mute',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _setVolume(
-                                                    (volume - 10)
-                                                        .clamp(0, 100)
-                                                        .toDouble(),
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.volume_down,
-                                                ),
-                                                tooltip: 'Volume down',
-                                              ),
-                                              IconButton(
-                                                onPressed: () => unawaited(
-                                                  _setVolume(
-                                                    (volume + 10)
-                                                        .clamp(0, 100)
-                                                        .toDouble(),
-                                                  ),
-                                                ),
-                                                icon: const Icon(
-                                                  Icons.volume_up,
-                                                ),
-                                                tooltip: 'Volume up',
-                                              ),
-                                              Expanded(
-                                                child: Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Slider(
-                                                      value:
-                                                          duration.inMilliseconds <=
-                                                              0
-                                                          ? 0
-                                                          : position
-                                                                .inMilliseconds
-                                                                .clamp(
-                                                                  0,
-                                                                  duration
-                                                                      .inMilliseconds,
-                                                                )
-                                                                .toDouble(),
-                                                      min: 0,
-                                                      max:
-                                                          duration.inMilliseconds <=
-                                                              0
-                                                          ? 1
-                                                          : duration
-                                                                .inMilliseconds
-                                                                .toDouble(),
-                                                      onChanged:
-                                                          duration.inMilliseconds <=
-                                                              0
-                                                          ? null
-                                                          : (value) => setState(
-                                                              () =>
-                                                                  scrubPreviewMs =
-                                                                      value,
-                                                            ),
-                                                      onChangeEnd:
-                                                          duration.inMilliseconds <=
-                                                              0
-                                                          ? null
-                                                          : (
-                                                              value,
-                                                            ) => unawaited(
-                                                              _seekToPreview(
-                                                                value,
-                                                              ),
-                                                            ),
-                                                    ),
-                                                    if (scrubPreviewMs !=
-                                                            null &&
-                                                        !reducedMotion)
-                                                      Padding(
-                                                        padding:
-                                                            const EdgeInsets.only(
-                                                              bottom: 6,
-                                                            ),
-                                                        child:
-                                                            _seekThumbnailPreview(),
-                                                      ),
-                                                    if (duration
-                                                            .inMilliseconds >
-                                                        0)
-                                                      Wrap(
-                                                        spacing: 12,
-                                                        runSpacing: 4,
-                                                        children: [
-                                                          Text(
-                                                            _clockText(
-                                                              position,
-                                                            ),
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                          Text(
-                                                            '-${_clockText(_remainingDuration())}',
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                          Text(
-                                                            'Runtime ${_runtimeText(duration)}',
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                          Text(
-                                                            'End ${_endTimeText(_remainingDuration())}',
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                          Text(
-                                                            'Step ${seekIncrementSeconds}s',
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                          Text(
-                                                            'Speed ${playbackSpeed.toStringAsFixed(2)}x',
-                                                            style:
-                                                                const TextStyle(
-                                                                  fontSize: 11,
-                                                                ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ],
-                                          ),
+                                )
+                              : null,
+                          onNextEpisode:
+                              widget.seriesEpisodePlayback &&
+                                  _hasNextSeriesEpisode
+                              ? () => unawaited(
+                                  _openSeriesEpisodeAt(
+                                    _seriesEpisodeIndex + 1,
+                                    status: _nextSeriesEpisodeLabel == null
+                                        ? 'Starting next episode...'
+                                        : 'Starting $_nextSeriesEpisodeLabel...',
                                   ),
-                                ),
-                              ),
-                            ),
-                          if (_showPlayNextOverlay)
-                            Positioned(
-                              right: 12,
-                              bottom: 124,
-                              child: SafeArea(
-                                child: Card(
-                                  color: highContrastInterface
-                                      ? Theme.of(context).colorScheme.surface
-                                      : _LiveTvMediaPaint.overlayStrong,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        FilledButton.icon(
-                                          onPressed: () => unawaited(
-                                            _handlePlaybackCompleted(
-                                              force: true,
-                                            ),
-                                          ),
-                                          icon: const Icon(Icons.skip_next),
-                                          label: Text(
-                                            widget.nextEpisodeStreamUrl
-                                                        ?.trim()
-                                                        .isNotEmpty ==
-                                                    true
-                                                ? (widget.nextEpisodeTitle ==
-                                                          null
-                                                      ? 'Next episode'
-                                                      : 'Next: ${widget.nextEpisodeTitle}')
-                                                : (widget.seriesEpisodePlayback &&
-                                                      _hasNextSeriesEpisode)
-                                                ? (_nextSeriesEpisodeLabel ==
-                                                          null
-                                                      ? 'Next episode'
-                                                      : 'Next: $_nextSeriesEpisodeLabel')
-                                                : (_nextMovieTitle == null
-                                                      ? 'Play Next'
-                                                      : 'Play Next: $_nextMovieTitle'),
-                                          ),
-                                        ),
-                                        if (_hasNextMovieQueueItem) ...[
-                                          const SizedBox(width: 8),
-                                          TextButton(
-                                            onPressed: _snoozePlayNextPrompt,
-                                            child: const Text('Snooze 2 min'),
-                                          ),
-                                          TextButton(
-                                            onPressed: _dismissPlayNextPrompt,
-                                            child: const Text('Dismiss'),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (error.isNotEmpty)
-                            Positioned(
-                              left: 12,
-                              right: 12,
-                              top: 40,
-                              child: SafeArea(
-                                child: Card(
-                                  color: highContrastInterface
-                                      ? Theme.of(context).colorScheme.surface
-                                      : _LiveTvMediaPaint.overlayOpaque,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(10),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          Icons.error_outline,
-                                          color: _LiveTvMediaPaint.warning,
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: Text(
-                                            error,
-                                            style: TextStyle(
-                                              color: _LiveTvMediaPaint.warning,
-                                            ),
-                                          ),
-                                        ),
-                                        TextButton(
-                                          onPressed: () =>
-                                              setState(() => error = ''),
-                                          child: const Text('Dismiss'),
-                                        ),
-                                        FilledButton(
-                                          onPressed: () => unawaited(
-                                            _attemptStreamRecovery(),
-                                          ),
-                                          child: const Text('Retry'),
-                                        ),
-                                        const SizedBox(width: 6),
-                                        FilledButton.tonal(
-                                          onPressed: () => unawaited(
-                                            _tryCompatiblePlayback(),
-                                          ),
-                                          child: const Text('Try compatible'),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
+                                )
+                              : null,
+                          fullscreen: fullscreen,
+                          visible: !fullscreen || controlsVisible,
+                          onReveal: fullscreen && !controlsVisible
+                              ? () {
+                                  _registerControlsInteraction();
+                                  setState(() => controlsVisible = true);
+                                }
+                              : null,
+                        ),
+                ),
               ),
             ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _SeriesDetailsScreen extends StatefulWidget {
