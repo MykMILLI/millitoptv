@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../services/sleep_mode.dart';
+import '../services/sleep_sounds_controller.dart';
 import '../services/home_preferences.dart';
 import '../services/web_app_definition.dart';
 
@@ -39,10 +40,17 @@ class SleepModePanel extends StatefulWidget {
 
 class _SleepModePanelState extends State<SleepModePanel> {
   final sleep = SleepMode.instance;
+  final sounds = SleepSoundsController.instance;
   final minutes = TextEditingController(text: '45');
   final extensionMinutes = TextEditingController(text: '15');
   bool busy = false;
   String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(sounds.loadPreferences(widget.profileId));
+  }
 
   @override
   void dispose() {
@@ -113,9 +121,19 @@ class _SleepModePanelState extends State<SleepModePanel> {
     }
   }
 
+  Future<void> _openSounds() async {
+    final url = await HomePreferences().sleepUrl(widget.profileId);
+    await sounds.play(
+      profileId: widget.profileId,
+      url: url,
+      launcher: sleep.openSounds,
+      stopper: sleep.stopSounds,
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: sleep,
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([sleep, sounds]),
     builder: (context, _) => Card(
       child: Padding(
         padding: const EdgeInsets.all(22),
@@ -131,6 +149,40 @@ class _SleepModePanelState extends State<SleepModePanel> {
               'Start your sounds in the separate Sleep Sounds window, then return to watch TV. The viewing timer leaves that window running.',
             ),
             const SizedBox(height: 14),
+            Text(
+              'Sleep Sounds backend: ${sounds.backend == SleepSoundsBackend.browserFallback ? 'Browser fallback' : 'Embedded WebView'}',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                ChoiceChip(
+                  label: const Text('Browser fallback'),
+                  selected:
+                      sounds.backend == SleepSoundsBackend.browserFallback,
+                  onSelected: busy
+                      ? null
+                      : (_) => act(() async {
+                          sounds.setBackend(SleepSoundsBackend.browserFallback);
+                          await sounds.savePreferences(widget.profileId);
+                        }),
+                ),
+                ChoiceChip(
+                  label: const Text('Embedded WebView (coming soon)'),
+                  selected:
+                      sounds.backend == SleepSoundsBackend.embeddedWebView,
+                  onSelected: busy
+                      ? null
+                      : (_) => act(() async {
+                          sounds.setBackend(SleepSoundsBackend.embeddedWebView);
+                          await sounds.savePreferences(widget.profileId);
+                        }),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 12,
               runSpacing: 10,
@@ -138,14 +190,36 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 FilledButton.icon(
                   onPressed: busy || sleep.applying
                       ? null
-                      : () => act(() async {
-                          await sleep.openSounds(
-                            widget.profileId,
-                            await HomePreferences().sleepUrl(widget.profileId),
-                          );
-                        }),
+                      : () => act(_openSounds),
                   icon: const Icon(Icons.nightlight_outlined),
                   label: const Text('Open / return to Sleep Sounds'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: busy || sleep.applying
+                      ? null
+                      : () => act(() async {
+                          await sounds.resume();
+                        }),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Resume Sounds'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: busy || sleep.applying
+                      ? null
+                      : () => act(() async {
+                          await sounds.pause();
+                        }),
+                  icon: const Icon(Icons.pause),
+                  label: const Text('Pause Sounds'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: busy || sleep.applying
+                      ? null
+                      : () => act(() async {
+                          await sounds.stop();
+                        }),
+                  icon: const Icon(Icons.stop),
+                  label: const Text('Stop Sleep Sounds'),
                 ),
                 TextButton(
                   onPressed: busy ? null : () => act(editUrl),
@@ -153,6 +227,66 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                DropdownButton<String>(
+                  value: sounds.selectedPreset,
+                  items: const [
+                    DropdownMenuItem(value: 'rain', child: Text('Rain')),
+                    DropdownMenuItem(value: 'ocean', child: Text('Ocean')),
+                    DropdownMenuItem(value: 'forest', child: Text('Forest')),
+                    DropdownMenuItem(
+                      value: 'brown-noise',
+                      child: Text('Brown noise'),
+                    ),
+                  ],
+                  onChanged: busy
+                      ? null
+                      : (value) => unawaited(
+                          act(() async {
+                            if (value == null) {
+                              return;
+                            }
+                            sounds.setPreset(value);
+                            await sounds.savePreferences(widget.profileId);
+                          }),
+                        ),
+                ),
+                SizedBox(
+                  width: 180,
+                  child: Slider(
+                    min: 0,
+                    max: 100,
+                    value: sounds.volume.clamp(0, 100).toDouble(),
+                    label: '${sounds.volume.round()}%',
+                    onChanged: busy ? null : (value) => sounds.setVolume(value),
+                    onChangeEnd: busy
+                        ? null
+                        : (_) => unawaited(
+                            sounds.savePreferences(widget.profileId),
+                          ),
+                  ),
+                ),
+                Text('Sleep Sounds volume ${sounds.volume.round()}%'),
+              ],
+            ),
+            if (sounds.message.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(sounds.message),
+              ),
+            if (sounds.error.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  sounds.error,
+                  style: const TextStyle(color: Colors.orangeAccent),
+                ),
+              ),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
@@ -221,6 +355,12 @@ class _SleepModePanelState extends State<SleepModePanel> {
                     onPressed: sleep.applying ? null : sleep.cancelTimer,
                     child: const Text('Cancel timer'),
                   ),
+                OutlinedButton(
+                  onPressed: busy || sleep.applying
+                      ? null
+                      : () => act(sleep.stopEntertainmentNow),
+                  child: const Text('Stop entertainment now'),
+                ),
                 if (sleep.overnight)
                   TextButton(
                     onPressed: busy || sleep.applying

@@ -1,5 +1,5 @@
 param(
- [ValidateSet('SleepSounds','Support','DisplaysOff','LockScreen','Guard')][string]$Action,
+ [ValidateSet('SleepSounds','StopSleepSounds','Support','DisplaysOff','LockScreen','Guard')][string]$Action,
  [int]$ProfileId=1,
  [string]$Url='https://sleep.millitop.net',
  [int]$ParentPid=0,
@@ -81,6 +81,24 @@ foreach($candidate in $candidates){
 if(-not $exe){throw 'Microsoft Edge is unavailable or could not be verified. Contact support; your default browser was not changed.'}
 $purpose=if($Action -eq 'Support'){'support'}else{'sleep'}
 $profile=Join-Path $env:LOCALAPPDATA ('MILLITOPTV\edge-'+$purpose+'-'+$ProfileId)
+if($Action -eq 'StopSleepSounds'){
+ $owned=@(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object {
+  $_.ExecutablePath -ieq $exe -and $_.CommandLine -and $_.CommandLine.IndexOf($profile,[StringComparison]::OrdinalIgnoreCase) -ge 0
+ })
+ if($owned.Count -eq 0){
+  Write-Output 'No dedicated Sleep Sounds window was running.'
+  exit 0
+ }
+ foreach($item in $owned){
+  try{
+   Stop-Process -Id $item.ProcessId -ErrorAction Stop
+  }catch{
+   throw "Sleep Sounds window $($item.ProcessId) could not be closed."
+  }
+ }
+ Write-Output 'Dedicated Sleep Sounds window stopped.'
+ exit 0
+}
 # Reuse this dedicated profile only. Never close or take over a personal browser.
 $existing=@(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object {
  $_.ExecutablePath -ieq $exe -and $_.CommandLine -and $_.CommandLine.IndexOf($profile,[StringComparison]::OrdinalIgnoreCase) -ge 0

@@ -189,6 +189,15 @@ class SleepMode extends ChangeNotifier {
     }
   }
 
+  Future<void> stopSounds(int profile) async {
+    if (profile < 1) {
+      throw const FormatException('Invalid profile.');
+    }
+    await _run('StopSleepSounds', profile: profile);
+    message = 'Sleep Sounds window closed.';
+    notifyListeners();
+  }
+
   Future<void> openSupport(int profile) async {
     if (applying) {
       throw StateError(
@@ -394,6 +403,13 @@ class SleepMode extends ChangeNotifier {
     if (failure != null) {
       throw failure;
     }
+  }
+
+  Future<void> stopEntertainmentNow() async {
+    await _stopEntertainmentNow();
+    message =
+        'App-owned entertainment playback stopped. Sleep Sounds is unchanged.';
+    notifyListeners();
   }
 
   void setDarkScreenMode(bool enabled) {

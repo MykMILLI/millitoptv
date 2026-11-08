@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/services/home_preferences.dart';
 import 'package:millitop_tv/services/live_tv_playlist.dart';
 import 'package:millitop_tv/services/live_tv_source.dart';
+import 'package:millitop_tv/services/sleep_sounds_controller.dart';
 import 'package:millitop_tv/services/viewing_sessions.dart';
 import 'package:millitop_tv/services/sleep_mode.dart';
 
@@ -33,6 +34,65 @@ void main() {
         prefs.setSleepUrl(1, 'http://example.com'),
         throwsFormatException,
       );
+    },
+  );
+  test('sleep sounds preferences persist per profile', () async {
+    final prefs = HomePreferences();
+    expect(await prefs.sleepSoundsPreset(1), 'rain');
+    expect(await prefs.sleepSoundsVolume(1), 70);
+    expect(await prefs.sleepSoundsBackend(1), 'browser');
+    await prefs.setSleepSoundsPreset(1, 'ocean');
+    await prefs.setSleepSoundsVolume(1, 42);
+    await prefs.setSleepSoundsBackend(1, 'embedded');
+    expect(await prefs.sleepSoundsPreset(1), 'ocean');
+    expect(await prefs.sleepSoundsVolume(1), 42);
+    expect(await prefs.sleepSoundsBackend(1), 'embedded');
+    expect(await prefs.sleepSoundsPreset(2), 'rain');
+  });
+  test(
+    'sleep sounds controller starts and stops via launcher callbacks',
+    () async {
+      final controller = SleepSoundsController.instance;
+      controller.setBackend(SleepSoundsBackend.browserFallback);
+      var launched = 0;
+      var stopped = 0;
+      await controller.play(
+        profileId: 7,
+        url: 'https://sleep.millitop.net',
+        launcher: (_, __) async {
+          launched++;
+        },
+        stopper: (_) async {
+          stopped++;
+        },
+      );
+      expect(controller.state, SleepSoundsState.playing);
+      expect(launched, 1);
+      await controller.stop();
+      expect(controller.state, SleepSoundsState.stopped);
+      expect(stopped, 1);
+    },
+  );
+  test(
+    'sleep sounds embedded backend stays disabled and does not launch browser fallback',
+    () async {
+      final controller = SleepSoundsController.instance;
+      controller.setBackend(SleepSoundsBackend.embeddedWebView);
+      var launched = 0;
+      await expectLater(
+        controller.play(
+          profileId: 3,
+          url: 'https://sleep.millitop.net',
+          launcher: (_, __) async {
+            launched++;
+          },
+          stopper: (_) async {},
+        ),
+        throwsStateError,
+      );
+      expect(launched, 0);
+      expect(controller.state, SleepSoundsState.stopped);
+      controller.setBackend(SleepSoundsBackend.browserFallback);
     },
   );
   test('live tv playlist URL is profile scoped and validated', () async {

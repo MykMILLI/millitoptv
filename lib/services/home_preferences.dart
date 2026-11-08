@@ -351,6 +351,63 @@ class HomePreferences {
     }
   }
 
+  Future<String> sleepSoundsPreset(int profile) async =>
+      (await SharedPreferences.getInstance()).getString(
+        'home.sleepSoundsPreset.v1.$profile',
+      ) ??
+      'rain';
+
+  Future<void> setSleepSoundsPreset(int profile, String preset) async {
+    final normalized = preset.trim();
+    if (normalized.isEmpty) {
+      throw const FormatException('Sleep Sounds preset cannot be empty.');
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.sleepSoundsPreset.v1.$profile',
+      normalized,
+    )) {
+      throw StateError('Could not save Sleep Sounds preset.');
+    }
+  }
+
+  Future<double> sleepSoundsVolume(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getDouble(
+      'home.sleepSoundsVolume.v1.$profile',
+    );
+    return (raw ?? 70).clamp(0, 100).toDouble();
+  }
+
+  Future<void> setSleepSoundsVolume(int profile, double value) async {
+    final normalized = value.clamp(0, 100).toDouble();
+    if (!await (await SharedPreferences.getInstance()).setDouble(
+      'home.sleepSoundsVolume.v1.$profile',
+      normalized,
+    )) {
+      throw StateError('Could not save Sleep Sounds volume.');
+    }
+  }
+
+  Future<String> sleepSoundsBackend(int profile) async =>
+      (await SharedPreferences.getInstance()).getString(
+        'home.sleepSoundsBackend.v1.$profile',
+      ) ??
+      'browser';
+
+  Future<void> setSleepSoundsBackend(int profile, String backend) async {
+    final normalized = backend.trim().toLowerCase();
+    if (normalized != 'browser' && normalized != 'embedded') {
+      throw const FormatException(
+        'Sleep Sounds backend must be "browser" or "embedded".',
+      );
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.sleepSoundsBackend.v1.$profile',
+      normalized,
+    )) {
+      throw StateError('Could not save Sleep Sounds backend.');
+    }
+  }
+
   Future<String> liveTvPlaylistUrl(int profile) async =>
       (await SharedPreferences.getInstance()).getString(
         'home.liveTvPlaylistUrl.v1.$profile',
@@ -1430,6 +1487,9 @@ class HomePreferences {
       'youtube.pipedUrl.v1.$profile',
       'home.appOrder.v1.$profile',
       'home.sleepUrl.v1.$profile',
+      'home.sleepSoundsPreset.v1.$profile',
+      'home.sleepSoundsVolume.v1.$profile',
+      'home.sleepSoundsBackend.v1.$profile',
       'home.liveTvPlaylistUrl.v1.$profile',
       'home.tmdbApiKey.v1.$profile',
       'home.sharedFamilyAlbum.v1.$profile',
