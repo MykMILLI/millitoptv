@@ -38,7 +38,7 @@ class MovieQueuePanel extends StatelessWidget {
   final ValueChanged<String> onPlay, onRemove;
   final ValueChanged<String> onMoveUp, onMoveDown;
 
-  /// Raw Flutter reorder indices: subtract 1 from newIndex when oldIndex < newIndex.
+  /// Receives normalized indices from [onReorderItem].
   final void Function(int oldIndex, int newIndex) onReorder;
   @override
   Widget build(BuildContext context) => Column(

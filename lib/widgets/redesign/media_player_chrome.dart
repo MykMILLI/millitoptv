@@ -115,9 +115,7 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
             ),
           _button(
             'Seek backward ${widget.seekIntervalSeconds}s',
-            widget.seekIntervalSeconds >= 30
-                ? Icons.replay_30
-                : Icons.replay_10,
+            Icons.replay,
             widget.onSeekBack,
           ),
           IconButton.filled(
@@ -128,10 +126,12 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
           ),
           _button(
             'Seek forward ${widget.seekIntervalSeconds}s',
-            widget.seekIntervalSeconds >= 30
-                ? Icons.forward_30
-                : Icons.forward_10,
+            Icons.forward,
             widget.onSeekForward,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text('${widget.seekIntervalSeconds}s'),
           ),
           if (widget.episodesPanel != null)
             _button('Next episode', Icons.skip_next, widget.onNextEpisode),
@@ -238,25 +238,38 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                 ],
               ),
               if (wide)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 3,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: volume,
-                      ),
-                    ),
-                    Expanded(flex: 4, child: Center(child: playback)),
-                    Expanded(
-                      flex: 5,
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: options,
-                      ),
-                    ),
-                  ],
+                SizedBox(
+                  height: 72,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final sideWidth = (constraints.maxWidth * 0.28).clamp(
+                        220.0,
+                        360.0,
+                      );
+                      return Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Positioned(
+                            left: 0,
+                            width: sideWidth,
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: volume,
+                            ),
+                          ),
+                          Center(child: playback),
+                          Positioned(
+                            right: 0,
+                            width: sideWidth,
+                            child: Align(
+                              alignment: Alignment.centerRight,
+                              child: options,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 )
               else ...[
                 Center(child: playback),

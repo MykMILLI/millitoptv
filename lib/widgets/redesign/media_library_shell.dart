@@ -308,27 +308,36 @@ class AlphabetRail extends StatelessWidget {
         return Column(
           children: [
             const SizedBox(height: 8),
-            RotatedBox(
-              quarterTurns: 3,
-              child: DropdownButton<String>(
-                value: selected != null && available.contains(selected)
-                    ? selected
-                    : null,
-                hint: const Text('A-Z'),
-                items: [
-                  for (final letter in letters)
-                    DropdownMenuItem(
-                      value: letter,
-                      enabled: available.contains(letter),
-                      child: Text(letter),
+            IconButton(
+              tooltip: 'Open alphabet picker',
+              onPressed: () async {
+                final picked = await showDialog<String>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Jump to letter'),
+                    content: SizedBox(
+                      width: 340,
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final letter in letters)
+                            OutlinedButton(
+                              onPressed: available.contains(letter)
+                                  ? () => Navigator.pop(ctx, letter)
+                                  : null,
+                              child: Text(letter),
+                            ),
+                        ],
+                      ),
                     ),
-                ],
-                onChanged: (value) {
-                  if (value != null) {
-                    onJump(value);
-                  }
-                },
-              ),
+                  ),
+                );
+                if (picked != null) {
+                  onJump(picked);
+                }
+              },
+              icon: const Icon(Icons.sort_by_alpha),
             ),
           ],
         );

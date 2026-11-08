@@ -27,12 +27,14 @@ void main() {
         ),
       ),
     );
-    if (find.text('B').evaluate().isNotEmpty) {
-      await tester.tap(find.text('B'));
-    } else {
-      await tester.tap(find.byType(DropdownButton<String>));
+    if (find.byTooltip('Open alphabet picker').evaluate().isNotEmpty) {
+      await tester.tap(find.byTooltip('Open alphabet picker'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('B').last);
+      await tester.pumpAndSettle();
+    } else {
+      await tester.tap(find.text('B'));
+      await tester.pump();
     }
     expect(jumped, 'B');
   });

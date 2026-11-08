@@ -5616,6 +5616,12 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   late int _seriesEpisodeIndex = widget.seriesEpisodeIndex;
   int? _episodeBrowseSeason;
   Future<void> _episodeTransitionChain = Future<void>.value();
+  bool _episodeTransitionInProgress = false;
+  int _playbackSessionId = 0;
+  bool _backActionInProgress = false;
+  bool _routeExitTriggered = false;
+  bool _globalShortcutsSuppressed = false;
+  final FocusScopeNode _panelFocusNode = FocusScopeNode();
   late _ActivePlaybackMedia _activeMedia = _initialActiveMedia();
   bool showMovieQueuePanel = false;
   bool showSeriesEpisodesPanel = false;
@@ -5704,6 +5710,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       _seriesEpisodeIndex = 0;
     }
     _syncActiveMediaFromState();
+    FocusManager.instance.addListener(_handleGlobalFocusChanged);
+    _handleGlobalFocusChanged();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
   }
@@ -5724,6 +5732,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       },
     );
     WidgetsBinding.instance.removeObserver(this);
+    FocusManager.instance.removeListener(_handleGlobalFocusChanged);
+    _panelFocusNode.dispose();
     if (fullscreen) {
       unawaited(_setFullscreen(false));
     }
@@ -5839,10 +5849,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Future<void> _openWithPolicy(
     Player created, {
     required bool compatibleMode,
+    _ActivePlaybackMedia? media,
+    JellyfinPlaybackReporter? reporter,
   }) async {
-    final candidates = jellyfin != null
-        ? <String>[jellyfin!.playUrl]
-        : <String>[..._activeMedia.streamUrlCandidates, _activeMedia.streamUrl];
+    final targetMedia = media ?? _activeMedia;
+    final targetReporter = reporter ?? jellyfin;
+    final candidates = targetReporter != null
+        ? <String>[targetReporter.playUrl]
+        : <String>[...targetMedia.streamUrlCandidates, targetMedia.streamUrl];
     Object? lastError;
     StackTrace? lastStack;
     final watch = Stopwatch()..start();
@@ -5854,12 +5868,12 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         lastError = null;
         AppLog.info(
           LogCategory.playback,
-          'Playback opened "${_activeMedia.title}"',
+          'Playback opened "${targetMedia.title}"',
           details: {
             'attempt': attempt,
             'candidates': candidates.length,
             'compatible': compatibleMode,
-            'jellyfin': jellyfin != null,
+            'jellyfin': targetReporter != null,
             'ms': watch.elapsedMilliseconds,
           },
         );
@@ -5870,7 +5884,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         AppLog.warn(
           LogCategory.playback,
           'Stream candidate $attempt/${candidates.length} failed for '
-          '"${_activeMedia.title}"',
+          '"${targetMedia.title}"',
           error: error,
           details: {'url': candidate},
         );
@@ -5879,7 +5893,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (lastError != null) {
       AppLog.error(
         LogCategory.playback,
-        'Could not open "${_activeMedia.title}"',
+        'Could not open "${targetMedia.title}"',
         error: lastError,
         stackTrace: lastStack,
         details: {
@@ -6762,8 +6776,24 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     });
   }
 
-  Future<void> _saveProgressSnapshot() async {
+  Future<void> _saveProgressSnapshot({
+    _ActivePlaybackMedia? media,
+    JellyfinPlaybackReporter? reporter,
+    int? sessionId,
+    bool allowDuringTransition = false,
+  }) async {
+    if (_episodeTransitionInProgress &&
+        !allowDuringTransition &&
+        media == null) {
+      return;
+    }
+    final targetMedia = media ?? _activeMedia;
+    final targetReporter = reporter ?? jellyfin;
+    final targetSessionId = sessionId ?? _playbackSessionId;
     if (pauseHistory) {
+      return;
+    }
+    if (targetSessionId != _playbackSessionId && media == null) {
       return;
     }
     final durationMs = duration.inMilliseconds;
@@ -6772,10 +6802,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         durationMs > 0 &&
         positionMs >= (durationMs - const Duration(seconds: 8).inMilliseconds);
     if (positionMs > 0) {
-      jellyfin?.progress(positionMs, paused: !playing);
+      targetReporter?.progress(positionMs, paused: !playing);
     }
     await memory.saveProgress(
-      _activeMedia.streamUrl,
+      targetMedia.streamUrl,
       positionMs: positionMs,
       durationMs: durationMs,
       complete: complete,
@@ -6784,26 +6814,41 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       widget.profileKey,
       type: 'progress',
       payload: {
-        'streamUrl': _activeMedia.streamUrl,
+        'streamUrl': targetMedia.streamUrl,
         'positionMs': positionMs,
         'durationMs': durationMs,
         'buffering': buffering,
+        'sessionId': targetSessionId,
       },
     );
   }
 
-  Future<void> _saveFinalProgress() async {
+  Future<void> _saveFinalProgress({
+    _ActivePlaybackMedia? media,
+    JellyfinPlaybackReporter? reporter,
+    int? sessionId,
+    bool allowDuringTransition = false,
+  }) async {
+    final targetMedia = media ?? _activeMedia;
+    final targetReporter = reporter ?? jellyfin;
+    final targetSessionId = sessionId ?? _playbackSessionId;
     try {
-      await _saveProgressSnapshot();
-      await jellyfin?.stopped(position.inMilliseconds);
+      await _saveProgressSnapshot(
+        media: targetMedia,
+        reporter: targetReporter,
+        sessionId: targetSessionId,
+        allowDuringTransition: allowDuringTransition,
+      );
+      await targetReporter?.stopped(position.inMilliseconds);
       await memory.appendStatsEvent(
         widget.profileKey,
         type: 'final_progress',
         payload: {
-          'streamUrl': _activeMedia.streamUrl,
+          'streamUrl': targetMedia.streamUrl,
           'positionMs': position.inMilliseconds,
           'durationMs': duration.inMilliseconds,
-          'title': _activeMedia.title,
+          'title': targetMedia.title,
+          'sessionId': targetSessionId,
         },
       );
     } catch (_) {}
@@ -7180,42 +7225,68 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               player == null) {
             return;
           }
+          if (_episodeTransitionInProgress) {
+            return;
+          }
+          _episodeTransitionInProgress = true;
+          final outgoingMedia = _activeMedia;
+          final outgoingReporter = jellyfin;
+          final outgoingSession = _playbackSessionId;
           final entry = _seriesEpisodes[index];
-          await _saveFinalProgress();
+          await _saveFinalProgress(
+            media: outgoingMedia,
+            reporter: outgoingReporter,
+            sessionId: outgoingSession,
+            allowDuringTransition: true,
+          );
           if (mounted && status != null && status.trim().isNotEmpty) {
             setState(() => statusMessage = status);
           }
-          _seriesEpisodeIndex = index;
-          _episodeBrowseSeason = entry.season;
-          _syncActiveMediaFromState();
-          resumePositionMs = jellyfin?.resumeMs;
-          if (resumePositionMs == null || resumePositionMs! <= 0) {
-            final prior = await memory.loadProgress(_activeMedia.streamUrl);
-            resumePositionMs = int.tryParse(
+          final incomingMedia = _ActivePlaybackMedia(
+            id: entry.id,
+            title: widget.title,
+            subtitle: 'S${entry.season}E${entry.episode} · ${entry.title}',
+            streamUrl: entry.streamUrl,
+            streamUrlCandidates: <String>[entry.streamUrl],
+            posterUrl: entry.posterUrl ?? widget.posterUrl,
+            description: entry.description ?? widget.description,
+          );
+          final incomingReporter = widget.jellyfinFor?.call(entry.streamUrl);
+          var incomingResumeMs = incomingReporter?.resumeMs;
+          if (incomingResumeMs == null || incomingResumeMs <= 0) {
+            final prior = await memory.loadProgress(incomingMedia.streamUrl);
+            incomingResumeMs = int.tryParse(
               prior['positionMs']?.toString() ?? '',
             );
           }
           await _openWithPolicy(
             player!,
             compatibleMode: forceCompatiblePlayback,
+            media: incomingMedia,
+            reporter: incomingReporter,
           );
-          if (resumePositionMs != null && resumePositionMs! > 0) {
-            await player!.seek(Duration(milliseconds: resumePositionMs!));
+          if (incomingResumeMs != null && incomingResumeMs > 0) {
+            await player!.seek(Duration(milliseconds: incomingResumeMs));
           }
-          if (mounted) {
+          if (!mounted) {
+            _activeMedia = incomingMedia;
+            jellyfin = incomingReporter;
+            _seriesEpisodeIndex = index;
+            _episodeBrowseSeason = entry.season;
+            _playbackSessionId += 1;
+          } else {
             setState(() {
+              _activeMedia = incomingMedia;
+              jellyfin = incomingReporter;
+              _seriesEpisodeIndex = index;
+              _episodeBrowseSeason = entry.season;
+              _playbackSessionId += 1;
               if (autoplayed) {
                 showSeriesEpisodesPanel = false;
               }
               error = '';
               creditsVisible = false;
             });
-          } else {
-            if (autoplayed) {
-              showSeriesEpisodesPanel = false;
-            }
-            error = '';
-            creditsVisible = false;
           }
         })
         .catchError((_) {
@@ -7224,6 +7295,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               error = 'Could not switch episode. Please try again.';
             });
           }
+        })
+        .whenComplete(() {
+          _episodeTransitionInProgress = false;
         });
     await _episodeTransitionChain;
   }
@@ -7363,9 +7437,6 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         });
       },
       onReorder: (oldIndex, newIndex) {
-        if (oldIndex < newIndex) {
-          newIndex -= 1;
-        }
         if (oldIndex <= _movieQueueIndex || newIndex <= _movieQueueIndex) {
           return;
         }
@@ -7479,11 +7550,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     });
   }
 
-  bool get _suppressGlobalPlayerShortcuts {
+  bool _computeShortcutSuppression() {
     final focused = FocusManager.instance.primaryFocus;
     final context = focused?.context;
     if (context == null) {
-      return false;
+      return _panelFocusNode.hasFocus;
     }
     if (context.widget is EditableText ||
         context.findAncestorWidgetOfExactType<EditableText>() != null) {
@@ -7497,23 +7568,54 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         context.findAncestorWidgetOfExactType<DropdownButton>() != null) {
       return true;
     }
+    if (_panelFocusNode.hasFocus) {
+      return true;
+    }
     return false;
   }
 
-  Future<void> _handleBackIntent() async {
+  void _handleGlobalFocusChanged() {
+    final next = _computeShortcutSuppression();
+    if (next == _globalShortcutsSuppressed || !mounted) {
+      return;
+    }
+    setState(() => _globalShortcutsSuppressed = next);
+  }
+
+  bool get _canSystemPop =>
+      !_backActionInProgress &&
+      !showMovieQueuePanel &&
+      !showSeriesEpisodesPanel &&
+      !fullscreen;
+
+  Future<void> _handleBackIntent({bool didPop = false}) async {
+    if (didPop) {
+      _routeExitTriggered = true;
+      return;
+    }
+    if (_backActionInProgress) {
+      return;
+    }
+    _backActionInProgress = true;
     if (showMovieQueuePanel || showSeriesEpisodesPanel) {
       setState(() {
         showMovieQueuePanel = false;
         showSeriesEpisodesPanel = false;
       });
+      _backActionInProgress = false;
       return;
     }
     if (fullscreen) {
       await _setFullscreen(false);
+      _backActionInProgress = false;
       return;
     }
-    if (mounted) {
-      await Navigator.of(context).maybePop();
+    if (mounted && !_routeExitTriggered) {
+      _routeExitTriggered = true;
+      Navigator.of(context).pop();
+    }
+    if (!_routeExitTriggered) {
+      _backActionInProgress = false;
     }
   }
 
@@ -9201,104 +9303,74 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       });
     }
 
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (_, __) {
+    final shortcutBindings = <ShortcutActivator, VoidCallback>{
+      const SingleActivator(LogicalKeyboardKey.escape): () {
         unawaited(_handleBackIntent());
       },
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.escape): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_handleBackIntent());
-          },
-          const SingleActivator(LogicalKeyboardKey.goBack): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_handleBackIntent());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyP): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_minimizeToPipAndGoHome());
-          },
-          const SingleActivator(LogicalKeyboardKey.enter): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_togglePlayPause());
-          },
-          const SingleActivator(LogicalKeyboardKey.space): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_togglePlayPause());
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_seekByConfigured(-1));
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_seekByConfigured(1));
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowUp): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowDown): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
-          },
-          const SingleActivator(LogicalKeyboardKey.keyM): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_toggleMute());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyF): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_toggleFullscreen());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyC): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_pickSubtitle());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyA): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_pickAudioTrack());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyQ): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_pickVideoTrackQuality());
-          },
-          const SingleActivator(LogicalKeyboardKey.keyH): () {
-            if (_suppressGlobalPlayerShortcuts) {
-              return;
-            }
-            unawaited(_showRemoteControlHelp());
-          },
+      const SingleActivator(LogicalKeyboardKey.goBack): () {
+        unawaited(_handleBackIntent());
+      },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyP): () {
+          unawaited(_minimizeToPipAndGoHome());
         },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.enter): () {
+          unawaited(_togglePlayPause());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.space): () {
+          unawaited(_togglePlayPause());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+          unawaited(_seekByConfigured(-1));
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+          unawaited(_seekByConfigured(1));
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+          unawaited(_setVolume((volume + 10).clamp(0, 100).toDouble()));
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+          unawaited(_setVolume((volume - 10).clamp(0, 100).toDouble()));
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyM): () {
+          unawaited(_toggleMute());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyF): () {
+          unawaited(_toggleFullscreen());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyC): () {
+          unawaited(_pickSubtitle());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyA): () {
+          unawaited(_pickAudioTrack());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyQ): () {
+          unawaited(_pickVideoTrackQuality());
+        },
+      if (!_globalShortcutsSuppressed)
+        const SingleActivator(LogicalKeyboardKey.keyH): () {
+          unawaited(_showRemoteControlHelp());
+        },
+    };
+
+    return PopScope(
+      canPop: _canSystemPop,
+      onPopInvokedWithResult: (didPop, __) {
+        unawaited(_handleBackIntent(didPop: didPop));
+      },
+      child: CallbackShortcuts(
+        bindings: shortcutBindings,
         child: Focus(
           autofocus: true,
           child: MouseRegion(
@@ -9365,10 +9437,16 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                           onPanelChanged: (panel) {
                             unawaited(onPanelChanged(panel));
                           },
-                          queuePanel: _buildMovieQueueSidePanel(),
+                          queuePanel: FocusScope(
+                            node: _panelFocusNode,
+                            child: _buildMovieQueueSidePanel(),
+                          ),
                           episodesPanel:
                               widget.seriesEpisodePlayback && _hasSeriesEpisodes
-                              ? _buildSeriesEpisodesSidePanel()
+                              ? FocusScope(
+                                  node: _panelFocusNode,
+                                  child: _buildSeriesEpisodesSidePanel(),
+                                )
                               : null,
                           onPreviousEpisode:
                               widget.seriesEpisodePlayback &&
