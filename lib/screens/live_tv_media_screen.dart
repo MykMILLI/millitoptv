@@ -25,6 +25,7 @@ import '../services/live_tv_playlist.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
 import '../services/playlist_playback.dart';
+import '../services/sleep_mode.dart';
 import '../services/live_tv_source.dart';
 import '../services/media_catalog_cache.dart';
 import '../services/adult_content.dart';
@@ -33,6 +34,7 @@ import 'jellyfin_connect_screen.dart';
 import 'diagnostics_screen.dart';
 import 'media_home_view.dart';
 import 'playlists_screen.dart';
+import 'sleep_mode_panel.dart';
 import '../services/subtitle_provider_service.dart';
 import '../services/video_playback_memory.dart';
 import '../theme/millitop_visual_theme.dart';
@@ -2563,6 +2565,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         builder: (_) => PlaylistsScreen(profileId: widget.profileId),
       ),
     );
+  }
+
+  Future<void> _openSleepTimer() async {
+    await showSleepModeSheet(context, profileId: widget.profileId);
   }
 
   Future<void> _showMediaDetails(LiveTvMediaItem item) async {
@@ -5207,6 +5213,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     color: jellyfinAccount == null
                         ? null
                         : MediaSourceColors.jellyfin,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Sleep timer',
+                  onPressed: () => unawaited(_openSleepTimer()),
+                  icon: ListenableBuilder(
+                    listenable: SleepMode.instance,
+                    builder: (context, _) {
+                      final running = SleepMode.instance.deadline != null;
+                      return Icon(
+                        running
+                            ? Icons.timer_outlined
+                            : Icons.nightlight_round_outlined,
+                      );
+                    },
                   ),
                 ),
                 IconButton(

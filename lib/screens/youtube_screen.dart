@@ -14,12 +14,14 @@ import '../services/home_preferences.dart';
 import '../services/pip_playback.dart';
 import '../services/playlist_playback.dart';
 import '../services/profile_sync.dart';
+import '../services/sleep_mode.dart';
 import '../services/tube_downloads.dart';
 import '../services/tube_library.dart';
 import '../theme/millitop_visual_theme.dart';
 import '../widgets/mixed_playlist_picker.dart';
 import '../widgets/redesign/media_side_panels.dart';
 import 'playlists_screen.dart';
+import 'sleep_mode_panel.dart';
 
 String tubeTime(int seconds) {
   if (seconds >= 3600) {
@@ -1603,6 +1605,20 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
                         icon: const Icon(Icons.search),
                         onPressed: () => _select('Search'),
                       ),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Sleep timer',
+                  onPressed: () => unawaited(
+                    showSleepModeSheet(context, profileId: widget.profileId),
+                  ),
+                  icon: ListenableBuilder(
+                    listenable: SleepMode.instance,
+                    builder: (context, _) => Icon(
+                      SleepMode.instance.deadline == null
+                          ? Icons.nightlight_round_outlined
+                          : Icons.timer_outlined,
                     ),
                   ),
                 ),

@@ -205,6 +205,8 @@ class SleepMode extends ChangeNotifier {
     await _keepAwake();
     _generation++;
     deadline = _now().add(Duration(minutes: minutes));
+    lastTimerAction =
+        'Timer started for $minutes minute${minutes == 1 ? '' : 's'}';
     _warned = false;
     message = 'Viewing timer started. Sleep Sounds is excluded.';
     _timer?.cancel();
@@ -244,6 +246,7 @@ class SleepMode extends ChangeNotifier {
     _generation++;
     deadline = null;
     _timer?.cancel();
+    lastTimerAction = 'Timer cancelled';
     message = 'Viewing timer cancelled. Overnight audio mode is unchanged.';
     notifyListeners();
   }
@@ -252,7 +255,17 @@ class SleepMode extends ChangeNotifier {
     if (applying || deadline == null) {
       return;
     }
+    if (minutes < 1 || minutes > 720) {
+      throw ArgumentError('Choose 1 to 720 minutes.');
+    }
+    final maxDeadline = _now().add(const Duration(hours: 12));
+    final proposed = deadline!.add(Duration(minutes: minutes));
+    if (proposed.isAfter(maxDeadline)) {
+      throw ArgumentError('Viewing timer cannot exceed 12 hours from now.');
+    }
     deadline = deadline!.add(Duration(minutes: minutes));
+    lastTimerAction =
+        'Timer extended by $minutes minute${minutes == 1 ? '' : 's'}';
     _warned = false;
     notifyListeners();
   }

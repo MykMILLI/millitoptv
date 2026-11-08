@@ -472,6 +472,8 @@ class _LauncherState extends State<Launcher>
   int welcomeSayingIndex = RotatingWelcomeMessage.nextInitialIndex();
   bool showLoginActionOverlay = false;
   bool showMusicMiniQueuePanel = false;
+  int _handledSleepPromptId = 0;
+  bool _sleepPromptVisible = false;
   final TextEditingController musicMiniSearch = TextEditingController();
   DateTime? loginPromptSnoozeUntilUtc;
   bool loginOverlayDismissed = false;
@@ -537,6 +539,7 @@ class _LauncherState extends State<Launcher>
     shortcutSub = PlatformShortcutsService.instance.actions.listen(
       _handleShortcutAction,
     );
+    SleepMode.instance.addListener(_onSleepModeChanged);
     deepLinkSub = DeepLinkService.instance.actions.listen(
       _handleDeepLinkAction,
     );
@@ -589,7 +592,95 @@ class _LauncherState extends State<Launcher>
     unawaited(deepLinkSub?.cancel());
     RemoteInbox.instance.notices.removeListener(_onInboxUpdated);
     DeviceConnection.instance.status.removeListener(_onConnectionStatusChanged);
+    SleepMode.instance.removeListener(_onSleepModeChanged);
     super.dispose();
+  }
+
+  Future<void> _onSleepModeChanged() async {
+    if (!mounted || _sleepPromptVisible) {
+      return;
+    }
+    final sleep = SleepMode.instance;
+    if (sleep.countdownPromptId <= _handledSleepPromptId ||
+        sleep.deadline == null) {
+      return;
+    }
+    _handledSleepPromptId = sleep.countdownPromptId;
+    _sleepPromptVisible = true;
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Viewing timer ending soon'),
+          content: ListenableBuilder(
+            listenable: sleep,
+            builder: (_, __) {
+              final seconds = sleep.remaining.inSeconds.clamp(0, 30);
+              final end = sleep.deadline;
+              final endText = end == null
+                  ? ''
+                  : ' Ends at ${TimeOfDay.fromDateTime(end.toLocal()).format(ctx)}.';
+              return Text(
+                seconds > 0
+                    ? 'Your session ends in $seconds second${seconds == 1 ? '' : 's'}.$endText'
+                    : 'Your timer is ending now.$endText',
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                try {
+                  sleep.extend(5);
+                  Navigator.of(ctx).pop();
+                } catch (error) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(error.toString())));
+                }
+              },
+              child: const Text('+5 min'),
+            ),
+            TextButton(
+              onPressed: () {
+                try {
+                  sleep.extend(15);
+                  Navigator.of(ctx).pop();
+                } catch (error) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(error.toString())));
+                }
+              },
+              child: const Text('+15 min'),
+            ),
+            TextButton(
+              onPressed: () {
+                try {
+                  sleep.extend(30);
+                  Navigator.of(ctx).pop();
+                } catch (error) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(error.toString())));
+                }
+              },
+              child: const Text('+30 min'),
+            ),
+            FilledButton(
+              onPressed: () {
+                sleep.cancelTimer();
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Cancel timer'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _sleepPromptVisible = false;
+    }
   }
 
   void _onMusicMiniStateChanged() {
@@ -1818,25 +1909,7 @@ class _LauncherState extends State<Launcher>
   }
 
   Future<void> _openSleepModeModal() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF0E1B33),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => SafeArea(
-        child: SingleChildScrollView(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: 16 + MediaQuery.of(context).viewInsets.bottom,
-          ),
-          child: SleepModePanel(profileId: widget.profileId),
-        ),
-      ),
-    );
+    await showSleepModeSheet(context, profileId: widget.profileId);
   }
 
   Future<void> support() async {
@@ -2718,13 +2791,22 @@ class _LauncherState extends State<Launcher>
                                     ),
                                   ),
                             ),
-                            sleepChip: OutlinedButton.icon(
-                              key: const ValueKey('footer-sleep-timer'),
-                              onPressed: !canLeave()
-                                  ? null
-                                  : _openSleepModeModal,
-                              icon: const Icon(Icons.nightlight_round),
-                              label: const Text('Sleep sounds & timer'),
+                            sleepChip: ListenableBuilder(
+                              listenable: SleepMode.instance,
+                              builder: (context, _) {
+                                final sleep = SleepMode.instance;
+                                final timerText = sleep.deadline == null
+                                    ? 'Sleep sounds & timer'
+                                    : '${sleep.remaining.inMinutes}:${(sleep.remaining.inSeconds % 60).toString().padLeft(2, '0')} left';
+                                return OutlinedButton.icon(
+                                  key: const ValueKey('footer-sleep-timer'),
+                                  onPressed: !canLeave()
+                                      ? null
+                                      : _openSleepModeModal,
+                                  icon: const Icon(Icons.nightlight_round),
+                                  label: Text(timerText),
+                                );
+                              },
                             ),
                           );
                         },

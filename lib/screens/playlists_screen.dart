@@ -14,11 +14,13 @@ import '../services/playlist_hub.dart';
 import '../services/playlist_playback.dart';
 import '../services/podcast_service.dart';
 import '../services/profile_sync.dart';
+import '../services/sleep_mode.dart';
 import '../theme/millitop_visual_theme.dart';
 import 'live_tv_media_screen.dart';
 import 'live_tv_screen.dart';
 import 'music_screen.dart';
 import 'podcasts_screen.dart';
+import 'sleep_mode_panel.dart';
 import 'youtube_screen.dart';
 
 Widget hubDestination(
@@ -800,7 +802,25 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     return widget.embedded
         ? body
         : Scaffold(
-            appBar: AppBar(title: const Text('Playlists')),
+            appBar: AppBar(
+              title: const Text('Playlists'),
+              actions: [
+                IconButton(
+                  tooltip: 'Sleep timer',
+                  onPressed: () => unawaited(
+                    showSleepModeSheet(context, profileId: widget.profileId),
+                  ),
+                  icon: ListenableBuilder(
+                    listenable: SleepMode.instance,
+                    builder: (context, _) => Icon(
+                      SleepMode.instance.deadline == null
+                          ? Icons.nightlight_round_outlined
+                          : Icons.timer_outlined,
+                    ),
+                  ),
+                ),
+              ],
+            ),
             body: body,
           );
   }

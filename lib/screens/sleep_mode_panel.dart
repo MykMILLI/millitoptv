@@ -1,7 +1,34 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../services/sleep_mode.dart';
 import '../services/home_preferences.dart';
 import '../services/web_app_definition.dart';
+
+Future<void> showSleepModeSheet(
+  BuildContext context, {
+  required int profileId,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: const Color(0xFF0E1B33),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (sheetContext) => SafeArea(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+        ),
+        child: SleepModePanel(profileId: profileId),
+      ),
+    ),
+  );
+}
 
 class SleepModePanel extends StatefulWidget {
   final int profileId;
@@ -13,75 +40,15 @@ class SleepModePanel extends StatefulWidget {
 class _SleepModePanelState extends State<SleepModePanel> {
   final sleep = SleepMode.instance;
   final minutes = TextEditingController(text: '45');
+  final extensionMinutes = TextEditingController(text: '15');
   bool busy = false;
   String error = '';
-  int handledPromptId = 0;
-  bool countdownModalOpen = false;
-
-  @override
-  void initState() {
-    super.initState();
-    sleep.addListener(_onSleepChanged);
-  }
 
   @override
   void dispose() {
-    sleep.removeListener(_onSleepChanged);
     minutes.dispose();
+    extensionMinutes.dispose();
     super.dispose();
-  }
-
-  Future<void> _onSleepChanged() async {
-    if (!mounted || countdownModalOpen) {
-      return;
-    }
-    if (sleep.countdownPromptId <= handledPromptId || sleep.deadline == null) {
-      return;
-    }
-    handledPromptId = sleep.countdownPromptId;
-    countdownModalOpen = true;
-    try {
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Viewing timer ending soon'),
-          content: ListenableBuilder(
-            listenable: sleep,
-            builder: (_, __) {
-              final seconds = sleep.remaining.inSeconds.clamp(0, 30);
-              return Text(
-                seconds > 0
-                    ? 'Your session ends in $seconds second${seconds == 1 ? '' : 's'}. Add more time?'
-                    : 'Your timer is ending now.',
-              );
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                sleep.extend(5);
-                Navigator.of(ctx).pop();
-              },
-              child: const Text('+5 min'),
-            ),
-            FilledButton(
-              onPressed: () {
-                sleep.extend(15);
-                Navigator.of(ctx).pop();
-              },
-              child: const Text('+15 min'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Keep current timer'),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      countdownModalOpen = false;
-    }
   }
 
   Future<void> act(Future<void> Function() work) async {
@@ -100,6 +67,12 @@ class _SleepModePanelState extends State<SleepModePanel> {
         setState(() => busy = false);
       }
     }
+  }
+
+  Future<void> _extendTimer(int minutes) async {
+    await act(() async {
+      sleep.extend(minutes);
+    });
   }
 
   Future<void> editUrl() async {
@@ -224,8 +197,24 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 ),
                 if (sleep.deadline != null)
                   OutlinedButton(
-                    onPressed: sleep.applying ? null : () => sleep.extend(15),
-                    child: const Text('Add 15 minutes'),
+                    onPressed: sleep.applying
+                        ? null
+                        : () => unawaited(_extendTimer(5)),
+                    child: const Text('+5 min'),
+                  ),
+                if (sleep.deadline != null)
+                  OutlinedButton(
+                    onPressed: sleep.applying
+                        ? null
+                        : () => unawaited(_extendTimer(15)),
+                    child: const Text('+15 min'),
+                  ),
+                if (sleep.deadline != null)
+                  OutlinedButton(
+                    onPressed: sleep.applying
+                        ? null
+                        : () => unawaited(_extendTimer(30)),
+                    child: const Text('+30 min'),
                   ),
                 if (sleep.deadline != null)
                   TextButton(
@@ -245,8 +234,46 @@ class _SleepModePanelState extends State<SleepModePanel> {
               Padding(
                 padding: const EdgeInsets.only(top: 12),
                 child: Text(
-                  'Viewing ends in ${sleep.remaining.inMinutes}:${(sleep.remaining.inSeconds % 60).toString().padLeft(2, '0')}',
+                  'Viewing ends in ${sleep.remaining.inMinutes}:${(sleep.remaining.inSeconds % 60).toString().padLeft(2, '0')}'
+                  '  ·  End time ${TimeOfDay.fromDateTime(sleep.deadline!.toLocal()).format(context)}',
                   style: const TextStyle(fontSize: 24),
+                ),
+              ),
+            if (sleep.deadline != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 170,
+                      child: TextField(
+                        controller: extensionMinutes,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Custom add (minutes)',
+                        ),
+                      ),
+                    ),
+                    FilledButton.tonal(
+                      onPressed: busy || sleep.applying
+                          ? null
+                          : () => unawaited(
+                              act(() async {
+                                final n = int.tryParse(extensionMinutes.text);
+                                if (n == null) {
+                                  throw const FormatException(
+                                    'Enter extension minutes.',
+                                  );
+                                }
+                                sleep.extend(n);
+                              }),
+                            ),
+                      child: const Text('Add custom time'),
+                    ),
+                  ],
                 ),
               ),
             if (sleep.applying) const LinearProgressIndicator(),
@@ -266,6 +293,11 @@ class _SleepModePanelState extends State<SleepModePanel> {
             const Text(
               'Display-off is not PC sleep. Keep Millitop running overnight. Starting a timer does not start website audio. Closing Sleep Sounds does not automatically end keep-awake. Updates are blocked while overnight mode is active.',
               style: TextStyle(color: Colors.white60),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'When the timer expires, Millitop stops app-owned entertainment playback, keeps Sleep Sounds running, and then requests display-off.',
+              style: TextStyle(color: Colors.white70),
             ),
           ],
         ),
