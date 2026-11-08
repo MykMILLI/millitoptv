@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pstube_engine/pstube_engine.dart';
 
 import '../services/device_connection.dart';
@@ -158,6 +159,32 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
       shuffle: shuffle,
     );
     if (mounted) await _load();
+  }
+
+  KeyEventResult _handleDirectionalFocus(FocusNode node, KeyEvent event) {
+    if (event.runtimeType.toString() == 'KeyUpEvent') {
+      return KeyEventResult.ignored;
+    }
+    TraversalDirection? direction;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowUp) {
+      direction = TraversalDirection.up;
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      direction = TraversalDirection.down;
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      direction = TraversalDirection.left;
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      direction = TraversalDirection.right;
+    }
+    if (direction == null) {
+      return KeyEventResult.ignored;
+    }
+    final focusedWidget = FocusManager.instance.primaryFocus?.context?.widget;
+    if (focusedWidget is EditableText) {
+      return KeyEventResult.ignored;
+    }
+    node.focusInDirection(direction);
+    return KeyEventResult.handled;
   }
 
   @override
@@ -799,8 +826,13 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
         ),
       ),
     );
+    final focusableBody = Focus(
+      autofocus: true,
+      onKeyEvent: _handleDirectionalFocus,
+      child: body,
+    );
     return widget.embedded
-        ? body
+        ? focusableBody
         : Scaffold(
             appBar: AppBar(
               title: const Text('Playlists'),
@@ -821,7 +853,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                 ),
               ],
             ),
-            body: body,
+            body: focusableBody,
           );
   }
 }
