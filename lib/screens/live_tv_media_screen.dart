@@ -345,6 +345,7 @@ class LiveTvMediaScreen extends StatefulWidget {
   final JellyfinTransport? jellyfinTransport;
   final PlaylistPlaybackSession? mixedSession;
   final String? mixedSessionEntryId;
+  final PlaylistSegmentOpener? playlistSegmentOpener;
   const LiveTvMediaScreen({
     super.key,
     required this.profileId,
@@ -361,6 +362,7 @@ class LiveTvMediaScreen extends StatefulWidget {
     this.jellyfinTransport,
     this.mixedSession,
     this.mixedSessionEntryId,
+    this.playlistSegmentOpener,
   });
 
   @override
@@ -2149,22 +2151,50 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (candidates.isEmpty) {
       return;
     }
-    final movieCandidates = candidates.where((item) => !item.series).toList();
-    if (movieCandidates.length > 1) {
-      final shuffled = [...movieCandidates]..shuffle();
-      final pick = shuffled.first;
-      setState(() => focusedMediaId = pick.id);
+    final movieCandidates = candidates
+        .where((item) => !item.series)
+        .where((item) => _libraryItemFromMedia(item) != null)
+        .toList();
+    if (movieCandidates.isNotEmpty) {
+      final collectionLabel = activeCollectionId == null
+          ? null
+          : _seasonalCollections
+                .where((item) => item.id == activeCollectionId)
+                .firstOrNull
+                ?.label;
+      final scopeLabel =
+          collectionLabel ??
+          (selectedGenres.length == 1
+              ? selectedGenres.first
+              : selectedGenres.isNotEmpty
+              ? '${selectedGenres.length} genres'
+              : groupFilter != 'All'
+              ? groupFilter
+              : 'Movies');
+      final message =
+          'Shuffling $scopeLabel · '
+          '${movieCandidates.length} eligible titles.';
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              'Shuffling ${shuffled.length} movies from the current filters.',
-            ),
+            content: Text(message),
             duration: const Duration(seconds: 2),
           ),
         );
       }
-      await _openMovie(pick, queue: shuffled, queueIndex: 0);
+      await PlaylistPlayback(
+        profileId: widget.profileId,
+        open: widget.playlistSegmentOpener ?? openPlaylistSegment,
+      ).play(
+        context,
+        playlistId: 'filtered-${DateTime.now().microsecondsSinceEpoch}',
+        name: scopeLabel,
+        items: [
+          for (final item in movieCandidates)
+            vodHubItem(_libraryItemFromMedia(item)!),
+        ],
+        shuffle: true,
+      );
       return;
     }
     final pick = candidates[Random().nextInt(candidates.length)];
@@ -4926,6 +4956,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           ),
           const SizedBox(height: 12),
           FilledButton.tonalIcon(
+            key: const ValueKey('media-shuffle-filters'),
             onPressed: () => unawaited(_shuffleWithinFilters()),
             icon: const Icon(Icons.shuffle),
             label: Text(

@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/screens/live_tv_media_screen.dart';
 import 'package:millitop_tv/services/media_catalog_cache.dart';
 import 'package:millitop_tv/services/live_tv_playlist.dart';
+import 'package:millitop_tv/services/playlist_playback.dart';
 import 'package:millitop_tv/services/live_tv_source.dart';
 import 'package:millitop_tv/theme/millitop_visual_theme.dart';
 
@@ -50,6 +51,7 @@ Future<void> _open(
   WidgetTester tester, {
   required _CatalogService service,
   DateTime Function()? now,
+  PlaylistSegmentOpener? playlistSegmentOpener,
 }) => tester.pumpWidget(
   MaterialApp(
     theme: MillitopThemeController.instance.materialTheme,
@@ -61,6 +63,7 @@ Future<void> _open(
       loadConfiguredSources: (_) => Future.value([_source]),
       playlistService: service,
       now: now,
+      playlistSegmentOpener: playlistSegmentOpener,
     ),
   ),
 );
@@ -172,6 +175,119 @@ void main() {
 
     expect(find.text('Spooky Movie'), findsOneWidget);
     expect(find.text('Funny Movie'), findsNothing);
+  });
+
+  testWidgets('seasonal shuffle starts mixed queue with collection scope', (
+    tester,
+  ) async {
+    String? capturedName;
+    List<String> capturedIds = const <String>[];
+    final service = _CatalogService(
+      movies: [
+        const LiveTvMediaItem(
+          id: 'horror-1',
+          title: 'Spooky Movie',
+          streamUrl: 'https://example.invalid/spooky.mp4',
+          genres: ['Horror'],
+        ),
+        const LiveTvMediaItem(
+          id: 'horror-2',
+          title: 'Haunted Sequel',
+          streamUrl: 'https://example.invalid/haunted.mp4',
+          genres: ['Horror'],
+        ),
+        const LiveTvMediaItem(
+          id: 'comedy-1',
+          title: 'Funny Movie',
+          streamUrl: 'https://example.invalid/funny.mp4',
+          genres: ['Comedy'],
+        ),
+      ],
+    );
+    await _open(
+      tester,
+      service: service,
+      now: () => DateTime(2024, 10, 20),
+      playlistSegmentOpener: (_, session, __) async {
+        capturedName = session.playlistName;
+        capturedIds = session.entries.map((entry) => entry.item.id).toList();
+        return const PlaylistPlaybackExit.explicitStop();
+      },
+    );
+    await tester.pumpAndSettle();
+
+    final halloweenChip = find.widgetWithText(FilterChip, 'Halloween').first;
+    await tester.ensureVisible(halloweenChip);
+    await tester.pumpAndSettle();
+    await tester.tap(halloweenChip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Filters'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('media-shuffle-filters')));
+    await tester.pumpAndSettle();
+
+    expect(capturedName, 'Halloween');
+    expect(capturedIds.length, 2);
+    expect(capturedIds.toSet(), {'horror-1', 'horror-2'});
+    expect(
+      find.text('Shuffling Halloween · 2 eligible titles.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('genre shuffle uses filtered set and label', (tester) async {
+    String? capturedName;
+    List<String> capturedIds = const <String>[];
+    final service = _CatalogService(
+      movies: [
+        const LiveTvMediaItem(
+          id: 'horror-1',
+          title: 'Spooky Movie',
+          streamUrl: 'https://example.invalid/spooky.mp4',
+          genres: ['Horror'],
+        ),
+        const LiveTvMediaItem(
+          id: 'horror-2',
+          title: 'Haunted Sequel',
+          streamUrl: 'https://example.invalid/haunted.mp4',
+          genres: ['Horror'],
+        ),
+        const LiveTvMediaItem(
+          id: 'comedy-1',
+          title: 'Funny Movie',
+          streamUrl: 'https://example.invalid/funny.mp4',
+          genres: ['Comedy'],
+        ),
+      ],
+    );
+    await _open(
+      tester,
+      service: service,
+      playlistSegmentOpener: (_, session, __) async {
+        capturedName = session.playlistName;
+        capturedIds = session.entries.map((entry) => entry.item.id).toList();
+        return const PlaylistPlaybackExit.explicitStop();
+      },
+    );
+    await tester.pumpAndSettle();
+
+    final genreButton = find.text('All genres');
+    await tester.ensureVisible(genreButton.first);
+    await tester.tap(genreButton.first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Horror').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Filters'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('media-shuffle-filters')));
+    await tester.pumpAndSettle();
+
+    expect(capturedName, 'Horror');
+    expect(capturedIds.length, 2);
+    expect(capturedIds.toSet(), {'horror-1', 'horror-2'});
+    expect(find.text('Shuffling Horror · 2 eligible titles.'), findsOneWidget);
   });
 
   testWidgets('seasonal collections are not suggested outside their window', (
