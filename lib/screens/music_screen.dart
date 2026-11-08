@@ -25,8 +25,10 @@ import '../services/music_widget_service.dart';
 import '../services/music_mini_player.dart';
 import '../services/playback_destinations_service.dart';
 import '../services/speaker_discovery_service.dart';
+import '../services/sleep_mode.dart';
 import '../services/app_log.dart';
 import '../theme/millitop_visual_theme.dart';
+import 'sleep_mode_panel.dart';
 
 enum _MusicSection { home, songs, albums, artists, playlists, favorites, radio }
 
@@ -642,8 +644,6 @@ class _MusicScreenState extends State<MusicScreen>
   bool remoteControlMode = false;
   bool reducedMotionOverride = false;
   bool visualizerEnabled = true;
-  DateTime? sleepDeadline;
-  Timer? sleepTimer;
   Timer? miniSyncTimer;
   String plainLyrics = '';
   List<Map<String, dynamic>> timedLyrics = [];
@@ -824,7 +824,6 @@ class _MusicScreenState extends State<MusicScreen>
     for (final sub in sessionSubs) {
       unawaited(sub.cancel());
     }
-    sleepTimer?.cancel();
     miniSyncTimer?.cancel();
     DeviceConnection.instance.setMediaActive('music', false);
     unawaited(_savePlaybackSession());
@@ -2861,22 +2860,12 @@ class _MusicScreenState extends State<MusicScreen>
   }
 
   Future<void> _startSleepTimer(int minutes) async {
-    sleepTimer?.cancel();
-    final deadline = DateTime.now().add(Duration(minutes: minutes));
-    setState(() => sleepDeadline = deadline);
-    sleepTimer = Timer(deadline.difference(DateTime.now()), () {
-      unawaited(_clearQueueAndStop());
-    });
+    await SleepMode.instance.startTimer(minutes);
     await _announceAction('Sleep timer set for $minutes minutes.');
   }
 
   Future<void> _cancelSleepTimer() async {
-    sleepTimer?.cancel();
-    sleepTimer = null;
-    if (!mounted) {
-      return;
-    }
-    setState(() => sleepDeadline = null);
+    SleepMode.instance.cancelTimer();
     await _announceAction('Sleep timer canceled.');
   }
 
@@ -5128,6 +5117,20 @@ class _MusicScreenState extends State<MusicScreen>
               title: const Text('Immersive Listening'),
               actions: [
                 IconButton(
+                  tooltip: 'Sleep timer',
+                  onPressed: () => unawaited(
+                    showSleepModeSheet(context, profileId: widget.profileId),
+                  ),
+                  icon: ListenableBuilder(
+                    listenable: SleepMode.instance,
+                    builder: (context, _) => Icon(
+                      SleepMode.instance.deadline == null
+                          ? Icons.nightlight_round_outlined
+                          : Icons.timer_outlined,
+                    ),
+                  ),
+                ),
+                IconButton(
                   tooltip: 'Options',
                   onPressed: () => unawaited(_openNowPlayingOptionsMenu()),
                   icon: const Icon(Icons.tune),
@@ -5705,13 +5708,6 @@ class _MusicScreenState extends State<MusicScreen>
             ),
           ]
         : _panelColors(track);
-    final sleepRemaining = sleepDeadline == null
-        ? ''
-        : _clock(
-            sleepDeadline!.difference(DateTime.now()).isNegative
-                ? Duration.zero
-                : sleepDeadline!.difference(DateTime.now()),
-          );
     final titleSize = switch (nowPlayingMode) {
       _NowPlayingMode.drive => 38.0,
       _NowPlayingMode.minimal => 26.0,
@@ -6130,14 +6126,22 @@ class _MusicScreenState extends State<MusicScreen>
                                 ),
                               ),
                             ),
-                          if (sleepDeadline != null)
-                            Text(
-                              'Sleep timer: $sleepRemaining remaining',
-                              style: TextStyle(
-                                color: _MusicPaint.onSurface60,
-                                fontSize: 11,
-                              ),
-                            ),
+                          ListenableBuilder(
+                            listenable: SleepMode.instance,
+                            builder: (context, _) {
+                              final deadline = SleepMode.instance.deadline;
+                              if (deadline == null) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                'Sleep timer: ${_clock(SleepMode.instance.remaining)} remaining',
+                                style: TextStyle(
+                                  color: _MusicPaint.onSurface60,
+                                  fontSize: 11,
+                                ),
+                              );
+                            },
+                          ),
                           const SizedBox(height: 12),
                           Text(
                             'UP NEXT',
@@ -7733,6 +7737,20 @@ class _MusicScreenState extends State<MusicScreen>
           ),
           title: const Text('navidrome'),
           actions: [
+            IconButton(
+              tooltip: 'Sleep timer',
+              onPressed: () => unawaited(
+                showSleepModeSheet(context, profileId: widget.profileId),
+              ),
+              icon: ListenableBuilder(
+                listenable: SleepMode.instance,
+                builder: (context, _) => Icon(
+                  SleepMode.instance.deadline == null
+                      ? Icons.nightlight_round_outlined
+                      : Icons.timer_outlined,
+                ),
+              ),
+            ),
             IconButton(
               tooltip: 'Social center',
               onPressed: config == null

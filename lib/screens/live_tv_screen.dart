@@ -16,9 +16,11 @@ import '../services/live_tv_sync.dart';
 import '../services/live_tv_control.dart';
 import '../services/playback_performance.dart';
 import '../services/pip_playback.dart';
+import '../services/sleep_mode.dart';
 import '../services/viewing_sessions.dart';
 import '../theme/millitop_visual_theme.dart';
 import '../widgets/live_tv_osd.dart';
+import 'sleep_mode_panel.dart';
 
 enum _ChannelFilterMode { all, favorites, recent }
 
@@ -3031,6 +3033,23 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                         icon: const Icon(Icons.arrow_back),
                       ),
                       actions: [
+                        IconButton(
+                          tooltip: 'Sleep timer',
+                          onPressed: () => unawaited(
+                            showSleepModeSheet(
+                              context,
+                              profileId: widget.profileId,
+                            ),
+                          ),
+                          icon: ListenableBuilder(
+                            listenable: SleepMode.instance,
+                            builder: (context, _) => Icon(
+                              SleepMode.instance.deadline == null
+                                  ? Icons.nightlight_round_outlined
+                                  : Icons.timer_outlined,
+                            ),
+                          ),
+                        ),
                         if (compact)
                           PopupMenuButton<String>(
                             tooltip: 'Live TV options',

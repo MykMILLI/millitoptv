@@ -41,6 +41,7 @@ import '../theme/millitop_visual_theme.dart';
 import '../widgets/redesign/media_library_shell.dart';
 import '../widgets/redesign/media_player_chrome.dart';
 import '../widgets/redesign/media_side_panels.dart';
+import '../profiles/profile_gate.dart';
 
 enum _MediaTab { movies, series, adult }
 
@@ -5747,6 +5748,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           creditsVisible) ||
       (_hasNextMovieQueueItem && playNextPromptVisible);
 
+  int get _resolvedProfileId {
+    final scoped = SelectedProfileScope.maybeOf(context)?.profile.id;
+    if (scoped != null) {
+      return scoped;
+    }
+    final raw = widget.profileKey.replaceFirst('profile-', '');
+    return int.tryParse(raw) ?? 1;
+  }
+
   void _exitMixed(PlaylistPlaybackExit exit) {
     if (!mounted || _mixedExitSent) {
       return;
@@ -9687,6 +9697,13 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                           onSettings: () => unawaited(_openPlaybackSettings()),
                           onFullscreen: () => unawaited(_toggleFullscreen()),
                           onBack: () => unawaited(_handleBackIntent()),
+                          onSleepTimer: () => unawaited(
+                            showSleepModeSheet(
+                              context,
+                              profileId: _resolvedProfileId,
+                            ),
+                          ),
+                          sleepTimerActive: SleepMode.instance.deadline != null,
                           onPipHome: () => unawaited(_minimizeToPipAndGoHome()),
                           panel: playerPanel,
                           onPanelChanged: (panel) {

@@ -29,6 +29,8 @@ class MediaPlayerChrome extends StatefulWidget {
     required this.onSettings,
     required this.onFullscreen,
     required this.onBack,
+    this.onSleepTimer,
+    this.sleepTimerActive = false,
     this.onPipHome,
     required this.panel,
     required this.onPanelChanged,
@@ -55,6 +57,8 @@ class MediaPlayerChrome extends StatefulWidget {
       onSettings,
       onFullscreen,
       onBack;
+  final VoidCallback? onSleepTimer;
+  final bool sleepTimerActive;
   final VoidCallback? onPipHome;
   final VoidCallback? onPreviousEpisode, onNextEpisode, onReveal;
   final ValueChanged<Duration> onSeek;
@@ -309,6 +313,16 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           _button('Back', Icons.arrow_back, widget.onBack),
+                          if (widget.onSleepTimer != null)
+                            _button(
+                              widget.sleepTimerActive
+                                  ? 'Sleep timer running'
+                                  : 'Sleep timer',
+                              widget.sleepTimerActive
+                                  ? Icons.timer_outlined
+                                  : Icons.nightlight_round_outlined,
+                              widget.onSleepTimer,
+                            ),
                           if (widget.onPipHome != null)
                             _button(
                               'PiP and Home',

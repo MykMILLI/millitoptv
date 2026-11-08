@@ -5,6 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:window_manager/window_manager.dart';
 import 'device_connection.dart';
+import 'music_mini_player.dart';
+import 'playlist_playback.dart';
+import 'podcast_playback.dart';
 import 'viewing_sessions.dart';
 
 class SleepMode extends ChangeNotifier {
@@ -280,6 +283,13 @@ class SleepMode extends ChangeNotifier {
     Object? closeFailure;
     Object? displayFailure;
     try {
+      if (closeOverride == null) {
+        try {
+          await _stopEntertainmentNow();
+        } catch (error) {
+          closeFailure = error;
+        }
+      }
       try {
         await (closeOverride?.call() ?? ViewingSessions.instance.closeAll());
       } catch (error) {
@@ -335,5 +345,35 @@ class SleepMode extends ChangeNotifier {
     message =
         'Overnight keep-awake ended. The Sleep Sounds browser was not closed.';
     notifyListeners();
+  }
+
+  Future<void> _stopEntertainmentNow() async {
+    Object? failure;
+    final mixed = PlaylistPlaybackRegistry.instance.active;
+    if (mixed != null) {
+      try {
+        mixed.stop();
+        PlaylistPlaybackRegistry.instance.clear(mixed);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    try {
+      await MusicMiniPlayerService.instance.closeMini().timeout(
+        const Duration(seconds: 2),
+      );
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      await PodcastPlayback.instance.stop().timeout(
+        const Duration(seconds: 2),
+      );
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure != null) {
+      throw failure;
+    }
   }
 }
