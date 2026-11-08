@@ -1912,6 +1912,36 @@ class _LauncherState extends State<Launcher>
     await showSleepModeSheet(context, profileId: widget.profileId);
   }
 
+  Widget _buildDarkScreenOverlay() {
+    return ListenableBuilder(
+      listenable: SleepMode.instance,
+      builder: (context, _) {
+        if (!SleepMode.instance.darkScreenModeEnabled) {
+          return const SizedBox.shrink();
+        }
+        return Positioned.fill(
+          child: ColoredBox(
+            color: Colors.black,
+            child: SafeArea(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: FilledButton.tonalIcon(
+                    onPressed: () =>
+                        SleepMode.instance.setDarkScreenMode(false),
+                    icon: const Icon(Icons.visibility_outlined),
+                    label: const Text('Exit dark-screen mode'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> support() async {
     try {
       await SleepMode.instance.openSupport(widget.profileId);
@@ -2847,6 +2877,7 @@ class _LauncherState extends State<Launcher>
                 );
               },
             ),
+            _buildDarkScreenOverlay(),
           ],
         ),
       ),

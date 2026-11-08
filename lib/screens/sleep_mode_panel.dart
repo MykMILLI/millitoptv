@@ -282,6 +282,39 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 padding: const EdgeInsets.only(top: 10),
                 child: Text(sleep.message),
               ),
+            if (sleep.darkScreenModeAvailable)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () => act(() async {
+                              sleep.setDarkScreenMode(
+                                !sleep.darkScreenModeEnabled,
+                              );
+                            }),
+                      icon: Icon(
+                        sleep.darkScreenModeEnabled
+                            ? Icons.visibility_outlined
+                            : Icons.brightness_2_outlined,
+                      ),
+                      label: Text(
+                        sleep.darkScreenModeEnabled
+                            ? 'Disable dark-screen mode'
+                            : 'Enable dark-screen mode',
+                      ),
+                    ),
+                    const Text(
+                      'Use this only when Windows display-off is unavailable.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: 6),
             Text(
               'Last timer action: ${sleep.lastTimerAction}',

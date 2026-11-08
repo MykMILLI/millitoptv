@@ -311,6 +311,80 @@ file://local-path
     await tester.pump();
     expect(off, true);
     expect(sleep.message, contains('did not close'));
+    expect(sleep.darkScreenModeAvailable, false);
+    await sleep.endOvernight();
+    sleep.dispose();
+  });
+
+  testWidgets('display-off failure offers dark-screen fallback', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 10, 24, 21);
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+      closeOverride: () async {},
+      displayOverride: () async {
+        throw StateError('unsupported');
+      },
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(sleep.darkScreenModeAvailable, true);
+    sleep.setDarkScreenMode(true);
+    expect(sleep.darkScreenModeEnabled, true);
+    await sleep.endOvernight();
+    sleep.dispose();
+  });
+
+  testWidgets('expiry runs once even with repeated timer ticks', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 10, 24, 21);
+    var closes = 0;
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+      closeOverride: () async {
+        closes++;
+      },
+      displayOverride: () async {},
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+    expect(closes, 1);
+    await sleep.endOvernight();
+    sleep.dispose();
+  });
+
+  testWidgets('extending near expiry prevents immediate shutdown', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 10, 24, 21);
+    var closes = 0;
+    final sleep = SleepMode(
+      clock: () => now,
+      prepareOverride: () async {},
+      closeOverride: () async {
+        closes++;
+      },
+      displayOverride: () async {},
+    );
+    await sleep.startTimer(1);
+    now = now.add(const Duration(seconds: 40));
+    sleep.extend(1);
+    await tester.pump(const Duration(seconds: 1));
+    expect(closes, 0);
+    now = now.add(const Duration(minutes: 2));
+    await tester.pump(const Duration(seconds: 2));
+    expect(closes, 1);
+    await tester.pump(const Duration(seconds: 2));
     await sleep.endOvernight();
     sleep.dispose();
   });

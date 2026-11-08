@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:local_notifier/local_notifier.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import 'device_connection.dart';
 import 'music_mini_player.dart';
@@ -29,6 +30,8 @@ class SleepMode extends ChangeNotifier {
   Future<void>? _startingGuard;
   File? _guardFile;
   bool overnight = false, applying = false, _opening = false;
+  bool darkScreenModeAvailable = false;
+  bool darkScreenModeEnabled = false;
   bool _warned = false;
   int _generation = 0;
   String message = '';
@@ -208,6 +211,8 @@ class SleepMode extends ChangeNotifier {
     await _keepAwake();
     _generation++;
     deadline = _now().add(Duration(minutes: minutes));
+    darkScreenModeAvailable = false;
+    darkScreenModeEnabled = false;
     lastTimerAction =
         'Timer started for $minutes minute${minutes == 1 ? '' : 's'}';
     _warned = false;
@@ -291,9 +296,11 @@ class SleepMode extends ChangeNotifier {
         }
       }
       try {
-        await (closeOverride?.call() ?? ViewingSessions.instance.closeAll());
+        final closeTask =
+            closeOverride?.call() ?? ViewingSessions.instance.closeAll();
+        await closeTask.timeout(const Duration(seconds: 45));
       } catch (error) {
-        closeFailure = error;
+        closeFailure ??= error;
       }
       if (generation != _generation) {
         return;
@@ -306,21 +313,29 @@ class SleepMode extends ChangeNotifier {
         displayFailure = error;
       }
       if (closeFailure == null && displayFailure == null) {
+        darkScreenModeAvailable = false;
+        darkScreenModeEnabled = false;
         lastTimerAction = 'DisplayOff success';
         message =
             'Viewing finished. App-owned playback windows were closed and displays-off was requested. Sleep Sounds was left running.';
       } else if (closeFailure != null && displayFailure == null) {
+        darkScreenModeAvailable = false;
+        darkScreenModeEnabled = false;
         lastTimerAction = 'DisplayOff success + close partial';
         message =
             'Viewing timer ended and displays-off was requested, but one or more app-owned playback windows did not close. Close the media window and try again.';
       } else if (closeFailure == null && displayFailure != null) {
+        darkScreenModeAvailable = true;
+        darkScreenModeEnabled = false;
         lastTimerAction = 'DisplayOff failed';
         message =
-            'App-owned playback windows were closed, but Windows did not confirm displays-off. Check power/display settings and try again.';
+            'App-owned playback windows were closed, but Windows did not confirm displays-off. Use dark-screen mode if needed, then check power/display settings.';
       } else {
+        darkScreenModeAvailable = true;
+        darkScreenModeEnabled = false;
         lastTimerAction = 'DisplayOff failed + close failed';
         message =
-            'Could not safely finish viewing or turn the displays off. Check the media window and Windows display settings, then try again.';
+            'Could not safely finish viewing or turn the displays off. Use dark-screen mode if needed, then check media windows and display settings.';
       }
     } finally {
       deadline = null;
@@ -341,6 +356,7 @@ class SleepMode extends ChangeNotifier {
       await flag.delete();
     }
     overnight = false;
+    darkScreenModeEnabled = false;
     DeviceConnection.instance.setMediaActive('overnight', false);
     message =
         'Overnight keep-awake ended. The Sleep Sounds browser was not closed.';
@@ -359,6 +375,11 @@ class SleepMode extends ChangeNotifier {
       }
     }
     try {
+      await WakelockPlus.disable().timeout(const Duration(seconds: 2));
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
       await MusicMiniPlayerService.instance.closeMini().timeout(
         const Duration(seconds: 2),
       );
@@ -366,14 +387,25 @@ class SleepMode extends ChangeNotifier {
       failure ??= error;
     }
     try {
-      await PodcastPlayback.instance.stop().timeout(
-        const Duration(seconds: 2),
-      );
+      await PodcastPlayback.instance.stop().timeout(const Duration(seconds: 2));
     } catch (error) {
       failure ??= error;
     }
     if (failure != null) {
       throw failure;
     }
+  }
+
+  void setDarkScreenMode(bool enabled) {
+    if (enabled && !darkScreenModeAvailable) {
+      throw StateError(
+        'Dark-screen mode is only available after display-off fails.',
+      );
+    }
+    if (darkScreenModeEnabled == enabled) {
+      return;
+    }
+    darkScreenModeEnabled = enabled;
+    notifyListeners();
   }
 }
