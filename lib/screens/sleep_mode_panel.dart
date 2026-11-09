@@ -121,6 +121,50 @@ class _SleepModePanelState extends State<SleepModePanel> {
     }
   }
 
+  TimeOfDay? _fromMinutes(int? minutes) {
+    if (minutes == null || minutes < 0 || minutes > 1439) {
+      return null;
+    }
+    return TimeOfDay(hour: minutes ~/ 60, minute: minutes % 60);
+  }
+
+  int _toMinutes(TimeOfDay value) => value.hour * 60 + value.minute;
+
+  Future<void> _pickScheduledStop({required bool weekend}) async {
+    final initial = _fromMinutes(
+      weekend ? sounds.stopAtWeekendMinutes : sounds.stopAtWeekdayMinutes,
+    );
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: initial ?? const TimeOfDay(hour: 8, minute: 0),
+      helpText: weekend ? 'Weekend stop time' : 'Weekday stop time',
+    );
+    if (picked == null) {
+      return;
+    }
+    await _act(() async {
+      await sounds.setScheduledStopMinutes(
+        profileId: widget.profileId,
+        weekdayMinutes: weekend
+            ? sounds.stopAtWeekdayMinutes
+            : _toMinutes(picked),
+        weekendMinutes: weekend
+            ? _toMinutes(picked)
+            : sounds.stopAtWeekendMinutes,
+      );
+    });
+  }
+
+  Future<void> _clearScheduledStop({required bool weekend}) async {
+    await _act(() async {
+      await sounds.setScheduledStopMinutes(
+        profileId: widget.profileId,
+        weekdayMinutes: weekend ? sounds.stopAtWeekdayMinutes : null,
+        weekendMinutes: weekend ? null : sounds.stopAtWeekendMinutes,
+      );
+    });
+  }
+
   IconData _iconFor(String soundId) {
     switch (soundId) {
       case 'heavy-rain':
@@ -258,6 +302,48 @@ class _SleepModePanelState extends State<SleepModePanel> {
                             ? 'Pause sounds'
                             : 'Start sounds',
                       ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF152645),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Auto-stop Sleep Sounds',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _AutoStopRow(
+                    label: 'Weekdays',
+                    value: _fromMinutes(sounds.stopAtWeekdayMinutes),
+                    onSet: disabled
+                        ? null
+                        : () => _pickScheduledStop(weekend: false),
+                    onClear: disabled || sounds.stopAtWeekdayMinutes == null
+                        ? null
+                        : () => _clearScheduledStop(weekend: false),
+                  ),
+                  const SizedBox(height: 8),
+                  _AutoStopRow(
+                    label: 'Weekends',
+                    value: _fromMinutes(sounds.stopAtWeekendMinutes),
+                    onSet: disabled
+                        ? null
+                        : () => _pickScheduledStop(weekend: true),
+                    onClear: disabled || sounds.stopAtWeekendMinutes == null
+                        ? null
+                        : () => _clearScheduledStop(weekend: true),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 14),
@@ -445,6 +531,37 @@ class _SoundRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AutoStopRow extends StatelessWidget {
+  const _AutoStopRow({
+    required this.label,
+    required this.value,
+    required this.onSet,
+    required this.onClear,
+  });
+
+  final String label;
+  final TimeOfDay? value;
+  final VoidCallback? onSet;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = value == null ? 'Off' : value!.format(context);
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            '$label: $text',
+            style: const TextStyle(color: Colors.white70),
+          ),
+        ),
+        TextButton(onPressed: onSet, child: const Text('Set time')),
+        TextButton(onPressed: onClear, child: const Text('Off')),
+      ],
     );
   }
 }

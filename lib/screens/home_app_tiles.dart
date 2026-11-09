@@ -1410,28 +1410,8 @@ class _HomeAppTilesState extends State<HomeAppTiles>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextButton.icon(
-            onPressed: savingOrder
-                ? null
-                : () => setState(() => arranging = !arranging),
-            icon: Icon(arranging ? Icons.check : Icons.swap_horiz),
-            label: Text(arranging ? 'Done arranging' : 'Arrange apps'),
-          ),
-        ),
-        if (arranging)
-          const Text(
-            'Drag tiles into order, or use Move left / Move right. Changes are saved for this profile.',
-          ),
-        if (error.isNotEmpty)
-          Text(error, style: const TextStyle(color: Colors.orangeAccent)),
-        if (podcastError.isNotEmpty)
-          Text(
-            podcastError,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
         if (recentLiveTv.isNotEmpty ||
+            recentMedia.isNotEmpty ||
             recentMusicAvailable ||
             recentPodcasts.isNotEmpty) ...[
           const SizedBox(height: 8),
@@ -1440,20 +1420,30 @@ class _HomeAppTilesState extends State<HomeAppTiles>
             runSpacing: 8,
             children: [
               if (recentLiveTv.isNotEmpty) _continueWatchingPanel(),
+              if (recentMedia.isNotEmpty) _continueWatchingMediaPanel(),
               if (recentMusicAvailable) _continueListeningMusicPanel(),
               if (recentPodcasts.isNotEmpty) _continueListeningPodcastsPanel(),
             ],
           ),
           const SizedBox(height: 8),
         ],
-        if (recentMedia.isNotEmpty) ...[
-          _continueWatchingMediaPanel(),
-          const SizedBox(height: 10),
-        ],
         Wrap(
           spacing: 14,
           runSpacing: 14,
           children: [
+            SizedBox(
+              width: tileWidth,
+              child: OutlinedButton.icon(
+                onPressed: savingOrder
+                    ? null
+                    : () => setState(() => arranging = !arranging),
+                icon: Icon(arranging ? Icons.check : Icons.swap_horiz),
+                label: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(arranging ? 'Done arranging' : 'Arrange apps'),
+                ),
+              ),
+            ),
             for (var i = 0; i < order.length; i++)
               KeyedSubtree(
                 key: ValueKey(order[i]),
@@ -1478,6 +1468,19 @@ class _HomeAppTilesState extends State<HomeAppTiles>
               ),
           ],
         ),
+        if (arranging) ...[
+          const SizedBox(height: 8),
+          const Text(
+            'Drag tiles into order, or use Move left / Move right. Changes are saved for this profile.',
+          ),
+        ],
+        if (error.isNotEmpty)
+          Text(error, style: const TextStyle(color: Colors.orangeAccent)),
+        if (podcastError.isNotEmpty)
+          Text(
+            podcastError,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
       ],
     );
   }

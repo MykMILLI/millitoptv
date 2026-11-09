@@ -237,11 +237,17 @@ void main() {
     await prefs.setSleepSoundsVolume(1, 42);
     await prefs.setSleepSoundsBackend(1, 'embedded');
     await prefs.setSleepSoundsPerSoundVolumes(1, const {'thunder': 33.0});
+    await prefs.setSleepSoundsStopAtWeekdayMinutes(1, 8 * 60);
+    await prefs.setSleepSoundsStopAtWeekendMinutes(1, 9 * 60);
     expect(await prefs.sleepSoundsPreset(1), 'ocean');
     expect(await prefs.sleepSoundsVolume(1), 42);
     expect(await prefs.sleepSoundsBackend(1), 'embedded');
     final savedMap = await prefs.sleepSoundsPerSoundVolumes(1);
     expect(savedMap['thunder'], 33);
+    expect(await prefs.sleepSoundsStopAtWeekdayMinutes(1), 8 * 60);
+    expect(await prefs.sleepSoundsStopAtWeekendMinutes(1), 9 * 60);
+    await prefs.setSleepSoundsStopAtWeekendMinutes(1, null);
+    expect(await prefs.sleepSoundsStopAtWeekendMinutes(1), isNull);
     expect(await prefs.sleepSoundsPreset(2), 'overnight-storm');
   });
   test(

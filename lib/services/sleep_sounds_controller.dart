@@ -273,6 +273,8 @@ class SleepSoundsController extends ChangeNotifier {
   );
   Map<String, bool> soundEnabled = Map<String, bool>.from(defaultEnabledMap);
   List<String> activeLayers = const <String>[];
+  int? stopAtWeekdayMinutes;
+  int? stopAtWeekendMinutes;
 
   bool get running =>
       state == SleepSoundsState.loading ||
@@ -288,6 +290,8 @@ class SleepSoundsController extends ChangeNotifier {
   Future<void>? _activeCommand;
   SleepSoundsPlaybackBackend Function()? _embeddedFactoryOverride;
   final Map<String, Timer> _volumeDebounceBySound = <String, Timer>{};
+  Timer? _autoStopTicker;
+  DateTime? _lastAutoStopLocalDate;
 
   Future<void> loadPreferences(int profileId) async {
     if (running && activeProfileId == profileId) {
@@ -340,10 +344,17 @@ class SleepSoundsController extends ChangeNotifier {
         id: mergedEnabled[id] ?? defaultEnabledMap[id]!,
     };
     final storedBackend = await prefs.sleepSoundsBackend(profileId);
+    stopAtWeekdayMinutes = await prefs.sleepSoundsStopAtWeekdayMinutes(
+      profileId,
+    );
+    stopAtWeekendMinutes = await prefs.sleepSoundsStopAtWeekendMinutes(
+      profileId,
+    );
     backend = switch (storedBackend) {
       'browser' => SleepSoundsBackend.browserFallback,
       _ => SleepSoundsBackend.embeddedWebView,
     };
+    _refreshAutoStopTicker();
     notifyListeners();
   }
 
@@ -353,10 +364,30 @@ class SleepSoundsController extends ChangeNotifier {
     await prefs.setSleepSoundsVolume(profileId, volume);
     await prefs.setSleepSoundsPerSoundVolumes(profileId, perSoundVolume);
     await prefs.setSleepSoundsEnabledMap(profileId, soundEnabled);
+    await prefs.setSleepSoundsStopAtWeekdayMinutes(
+      profileId,
+      stopAtWeekdayMinutes,
+    );
+    await prefs.setSleepSoundsStopAtWeekendMinutes(
+      profileId,
+      stopAtWeekendMinutes,
+    );
     await prefs.setSleepSoundsBackend(
       profileId,
       backend == SleepSoundsBackend.embeddedWebView ? 'embedded' : 'browser',
     );
+  }
+
+  Future<void> setScheduledStopMinutes({
+    required int profileId,
+    int? weekdayMinutes,
+    int? weekendMinutes,
+  }) async {
+    stopAtWeekdayMinutes = weekdayMinutes;
+    stopAtWeekendMinutes = weekendMinutes;
+    await savePreferences(profileId);
+    _refreshAutoStopTicker();
+    notifyListeners();
   }
 
   void setPreset(String value) {
@@ -568,6 +599,7 @@ class SleepSoundsController extends ChangeNotifier {
       message = backend == SleepSoundsBackend.embeddedWebView
           ? 'Sleep sounds are playing.'
           : 'Sleep Sounds browser fallback opened.';
+      _refreshAutoStopTicker();
       notifyListeners();
     } catch (e, stackTrace) {
       await _detachBackend();
@@ -601,6 +633,7 @@ class SleepSoundsController extends ChangeNotifier {
       await backend.pause();
       state = SleepSoundsState.paused;
       message = 'Sleep Sounds paused.';
+      _refreshAutoStopTicker();
       notifyListeners();
     });
   }
@@ -633,6 +666,7 @@ class SleepSoundsController extends ChangeNotifier {
       await backend.resume();
       state = SleepSoundsState.playing;
       message = 'Sleep Sounds resumed.';
+      _refreshAutoStopTicker();
       notifyListeners();
     });
   }
@@ -656,6 +690,7 @@ class SleepSoundsController extends ChangeNotifier {
       message = 'Sleep Sounds stopped.';
       error = '';
       activeLayers = const <String>[];
+      _refreshAutoStopTicker();
       notifyListeners();
     } catch (e, stackTrace) {
       state = SleepSoundsState.error;
@@ -701,9 +736,73 @@ class SleepSoundsController extends ChangeNotifier {
     if (backend != null) {
       unawaited(backend.dispose());
     }
+    _refreshAutoStopTicker();
     capabilities = this.backend == SleepSoundsBackend.embeddedWebView
         ? SleepSoundsCapabilities.embeddedDefault
         : SleepSoundsCapabilities.browserFallback;
+  }
+
+  void _refreshAutoStopTicker() {
+    final hasSchedule =
+        stopAtWeekdayMinutes != null || stopAtWeekendMinutes != null;
+    if (!hasSchedule || !running) {
+      _autoStopTicker?.cancel();
+      _autoStopTicker = null;
+      return;
+    }
+    _autoStopTicker ??= Timer.periodic(const Duration(seconds: 20), (_) {
+      _checkScheduledStop();
+    });
+  }
+
+  void _checkScheduledStop() {
+    if (!running) {
+      _refreshAutoStopTicker();
+      return;
+    }
+    final now = DateTime.now();
+    final isWeekend =
+        now.weekday == DateTime.saturday || now.weekday == DateTime.sunday;
+    final targetMinutes = isWeekend
+        ? stopAtWeekendMinutes
+        : stopAtWeekdayMinutes;
+    if (targetMinutes == null) {
+      return;
+    }
+    final nowMinutes = now.hour * 60 + now.minute;
+    final day = DateTime(now.year, now.month, now.day);
+    if (_lastAutoStopLocalDate == day) {
+      return;
+    }
+    if (nowMinutes < targetMinutes) {
+      return;
+    }
+    _lastAutoStopLocalDate = day;
+    unawaited(
+      _enqueue(() async {
+        if (!running) {
+          return;
+        }
+        await _stopInternal();
+        message = 'Sleep sounds stopped on schedule.';
+        AppLog.info(
+          LogCategory.playback,
+          'Sleep Sounds auto-stop reached.',
+          details: {
+            'weekdayMinutes': stopAtWeekdayMinutes,
+            'weekendMinutes': stopAtWeekendMinutes,
+          },
+        );
+        notifyListeners();
+      }).catchError((error, stackTrace) {
+        AppLog.error(
+          LogCategory.playback,
+          'Sleep Sounds auto-stop failed.',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }),
+    );
   }
 
   SleepSoundsPlaybackBackend _createBackend() {
@@ -779,6 +878,8 @@ class SleepSoundsController extends ChangeNotifier {
     for (final timer in _volumeDebounceBySound.values) {
       timer.cancel();
     }
+    _autoStopTicker?.cancel();
+    _autoStopTicker = null;
     _volumeDebounceBySound.clear();
     _embeddedFactoryOverride = null;
     _launcher = null;
@@ -795,6 +896,9 @@ class SleepSoundsController extends ChangeNotifier {
     perSoundVolume = Map<String, double>.from(defaultPerSoundVolume);
     soundEnabled = Map<String, bool>.from(defaultEnabledMap);
     activeLayers = const <String>[];
+    stopAtWeekdayMinutes = null;
+    stopAtWeekendMinutes = null;
+    _lastAutoStopLocalDate = null;
     _activeCommand = null;
     notifyListeners();
   }

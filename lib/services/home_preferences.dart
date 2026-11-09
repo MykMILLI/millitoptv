@@ -631,6 +631,62 @@ class HomePreferences {
     }
   }
 
+  Future<int?> sleepSoundsStopAtWeekdayMinutes(int profile) async {
+    final value = (await SharedPreferences.getInstance()).getInt(
+      'home.sleepSoundsStopAtWeekdayMinutes.v1.$profile',
+    );
+    if (value == null || value < 0 || value > 1439) {
+      return null;
+    }
+    return value;
+  }
+
+  Future<void> setSleepSoundsStopAtWeekdayMinutes(
+    int profile,
+    int? value,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'home.sleepSoundsStopAtWeekdayMinutes.v1.$profile';
+    if (value == null) {
+      if (!await prefs.remove(key)) {
+        throw StateError('Could not clear Sleep Sounds weekday stop time.');
+      }
+      return;
+    }
+    final normalized = value.clamp(0, 1439);
+    if (!await prefs.setInt(key, normalized)) {
+      throw StateError('Could not save Sleep Sounds weekday stop time.');
+    }
+  }
+
+  Future<int?> sleepSoundsStopAtWeekendMinutes(int profile) async {
+    final value = (await SharedPreferences.getInstance()).getInt(
+      'home.sleepSoundsStopAtWeekendMinutes.v1.$profile',
+    );
+    if (value == null || value < 0 || value > 1439) {
+      return null;
+    }
+    return value;
+  }
+
+  Future<void> setSleepSoundsStopAtWeekendMinutes(
+    int profile,
+    int? value,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'home.sleepSoundsStopAtWeekendMinutes.v1.$profile';
+    if (value == null) {
+      if (!await prefs.remove(key)) {
+        throw StateError('Could not clear Sleep Sounds weekend stop time.');
+      }
+      return;
+    }
+    final normalized = value.clamp(0, 1439);
+    if (!await prefs.setInt(key, normalized)) {
+      throw StateError('Could not save Sleep Sounds weekend stop time.');
+    }
+  }
+
   Future<String> liveTvPlaylistUrl(int profile) async =>
       (await SharedPreferences.getInstance()).getString(
         'home.liveTvPlaylistUrl.v1.$profile',
