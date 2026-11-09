@@ -36,10 +36,13 @@ class _FakeSleepSoundsBackend implements SleepSoundsPlaybackBackend {
     required int profileId,
     required String preset,
     required double masterVolume,
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
   }) async {
     calls.add('initialize:$profileId');
     _preset = preset;
     _masterVolume = masterVolume;
+    calls.add('applyMix:${enabled.length}:${volumes.length}');
     _emit();
   }
 
@@ -60,6 +63,19 @@ class _FakeSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   @override
   Future<void> setPerSoundVolume(String soundId, double volume) async {
     calls.add('setPerSoundVolume:$soundId:${volume.round()}');
+  }
+
+  @override
+  Future<void> applyMix({
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  }) async {
+    calls.add('applyMix:${enabled.length}:${volumes.length}');
+  }
+
+  @override
+  Future<void> setLayerEnabled(String soundId, bool enabled) async {
+    calls.add('setLayerEnabled:$soundId:$enabled');
   }
 
   @override
@@ -108,7 +124,9 @@ class _FakeSleepSoundsBackend implements SleepSoundsPlaybackBackend {
         preset: _preset,
         masterVolume: _masterVolume,
         perSoundVolume: const {'rain': 80},
-        activeLayers: _playing ? const ['rain'] : const <String>[],
+        activeLayers: _playing
+            ? const ['heavy-rain', 'thunder', 'white-noise', 'pink-noise']
+            : const <String>[],
         capabilities: SleepSoundsCapabilities.embeddedDefault,
       ),
     );
@@ -151,7 +169,7 @@ void main() {
     expect(await prefs.sleepSoundsVolume(1), 70);
     expect(await prefs.sleepSoundsBackend(1), 'embedded');
     final defaults = await prefs.sleepSoundsPerSoundVolumes(1);
-    expect(defaults['thunder'], 58);
+    expect(defaults['thunder'], 35);
     await prefs.setSleepSoundsPreset(1, 'ocean');
     await prefs.setSleepSoundsVolume(1, 42);
     await prefs.setSleepSoundsBackend(1, 'embedded');
@@ -209,12 +227,8 @@ void main() {
     await controller.play(profileId: 3, url: 'https://sleep.millitop.net');
     expect(controller.state, SleepSoundsState.playing);
     expect(backend.calls, contains('initialize:3'));
-    expect(backend.calls, contains('applyPreset:overnight-storm'));
+    expect(backend.calls, contains('applyMix:4:4'));
     expect(backend.calls, contains('setMasterVolume:70'));
-    expect(
-      backend.calls.any((entry) => entry.startsWith('setPerSoundVolume:')),
-      isTrue,
-    );
     expect(backend.calls.last, 'play');
     await controller.pause();
     await controller.resume();

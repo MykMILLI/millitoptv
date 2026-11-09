@@ -175,19 +175,21 @@ const String _embeddedSleepSoundsHtml = '''
     context: null,
     master: null,
     active: new Map(),
-    preset: 'rain',
+    preset: 'overnight-storm',
     playing: false,
     paused: false,
     masterVolume: 0.7,
     volumes: {
-      'heavy-rain': 0.82,
-      'thunder': 0.58,
-      'white-noise': 0.64,
-      'pink-noise': 0.60,
-      'rain': 0.78,
-      'ocean': 0.75,
-      'forest': 0.72,
-      'brown-noise': 0.7
+      'heavy-rain': 0.70,
+      'thunder': 0.35,
+      'white-noise': 0.25,
+      'pink-noise': 0.40
+    },
+    enabled: {
+      'heavy-rain': true,
+      'thunder': true,
+      'white-noise': true,
+      'pink-noise': true
     },
     capabilities: {
       supportsPerSoundVolume: true,
@@ -211,6 +213,13 @@ const String _embeddedSleepSoundsHtml = '''
     engine.master = engine.context.createGain();
     engine.master.gain.value = engine.masterVolume;
     engine.master.connect(engine.context.destination);
+  }
+
+  function withTimeout(promise, ms, label) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms))
+    ]);
   }
 
   function makeNoiseNode(kind) {
@@ -294,11 +303,38 @@ const String _embeddedSleepSoundsHtml = '''
     }
   }
 
+  function layerEnabled(id) {
+    return engine.enabled[id] === true;
+  }
+
+  function layerVolume(id) {
+    const raw = engine.volumes[id];
+    if (typeof raw !== 'number' || Number.isNaN(raw)) {
+      return 0.7;
+    }
+    return Math.max(0, Math.min(1, raw));
+  }
+
+  function applyLayerOutput(id) {
+    const layer = engine.active.get(id);
+    if (!layer || !layer.outputGain) return;
+    const now = engine.context.currentTime;
+    const target = layerEnabled(id) ? layerVolume(id) : 0;
+    layer.outputGain.gain.cancelScheduledValues(now);
+    layer.outputGain.gain.setValueAtTime(layer.outputGain.gain.value, now);
+    layer.outputGain.gain.linearRampToValueAtTime(target, now + 0.08);
+  }
+
   function startLayer(id) {
+    if (engine.active.has(id)) {
+      applyLayerOutput(id);
+      return;
+    }
     ensureAudio();
     const node = makeNoiseNode(id);
     const filter = engine.context.createBiquadFilter();
     const gain = engine.context.createGain();
+    const outputGain = engine.context.createGain();
     const lfo = engine.context.createOscillator();
     const lfoGain = engine.context.createGain();
     let thunder = null;
@@ -356,21 +392,26 @@ const String _embeddedSleepSoundsHtml = '''
       lfoGain.gain.value = 0.05;
     }
 
-    gain.gain.value *= (engine.volumes[id] || 0.7);
+    gain.gain.value *= layerVolume(id);
+    outputGain.gain.value = 0;
     lfo.connect(lfoGain);
     lfoGain.connect(gain.gain);
     node.connect(filter);
     filter.connect(gain);
-    gain.connect(engine.master);
+    gain.connect(outputGain);
+    outputGain.connect(engine.master);
     lfo.start();
-    engine.active.set(id, { node, filter, gain, lfo, lfoGain, thunder });
+    engine.active.set(id, { node, filter, gain, outputGain, lfo, lfoGain, thunder });
+    applyLayerOutput(id);
   }
 
-  function stopAllLayers() {
-    engine.active.forEach((entry) => {
+  function stopLayer(id) {
+    const entry = engine.active.get(id);
+    if (!entry) return;
       try { entry.node.disconnect(); } catch (_) {}
       try { entry.filter.disconnect(); } catch (_) {}
       try { entry.gain.disconnect(); } catch (_) {}
+      try { entry.outputGain.disconnect(); } catch (_) {}
       try { entry.lfo.stop(); } catch (_) {}
       try { entry.lfo.disconnect(); } catch (_) {}
       try { entry.lfoGain.disconnect(); } catch (_) {}
@@ -380,7 +421,11 @@ const String _embeddedSleepSoundsHtml = '''
         try { entry.thunder.osc.disconnect(); } catch (_) {}
         try { entry.thunder.rumble.disconnect(); } catch (_) {}
       }
-    });
+    engine.active.delete(id);
+  }
+
+  function stopAllLayers() {
+    Array.from(engine.active.keys()).forEach((id) => stopLayer(id));
     engine.active.clear();
   }
 
@@ -396,15 +441,24 @@ const String _embeddedSleepSoundsHtml = '''
         return ['white-noise'];
       case 'pink-noise':
         return ['pink-noise'];
-      case 'ocean':
-        return ['ocean', 'brown-noise'];
-      case 'forest':
-        return ['forest', 'rain'];
-      case 'brown-noise':
-        return ['brown-noise'];
-      case 'rain':
       default:
-        return ['rain', 'brown-noise'];
+        return ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
+    }
+  }
+
+  function syncLayers() {
+    const ids = ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
+    ids.forEach((id) => {
+      if (!layerEnabled(id)) {
+        stopLayer(id);
+        return;
+      }
+      startLayer(id);
+      applyLayerOutput(id);
+    });
+    if (engine.active.size === 0) {
+      engine.playing = false;
+      engine.paused = false;
     }
   }
 
@@ -421,7 +475,7 @@ const String _embeddedSleepSoundsHtml = '''
       preset: engine.preset,
       masterVolume: engine.masterVolume,
       perSoundVolume: engine.volumes,
-      activeLayers: Array.from(engine.active.keys()),
+      activeLayers: Array.from(engine.active.keys()).filter((id) => layerEnabled(id)),
       capabilities: engine.capabilities
     });
   }
@@ -441,6 +495,19 @@ const String _embeddedSleepSoundsHtml = '''
           engine.masterVolume = Math.max(0, Math.min(1, cmd.masterVolume));
           applyMasterVolume();
         }
+        if (cmd.enabled && typeof cmd.enabled === 'object') {
+          Object.keys(cmd.enabled).forEach((id) => {
+            engine.enabled[id] = cmd.enabled[id] === true;
+          });
+        }
+        if (cmd.volumes && typeof cmd.volumes === 'object') {
+          Object.keys(cmd.volumes).forEach((id) => {
+            const next = Number(cmd.volumes[id]);
+            if (!Number.isNaN(next)) {
+              engine.volumes[id] = Math.max(0, Math.min(1, next));
+            }
+          });
+        }
         sendStatus(commandId);
         emit('ack', { commandId, action });
         return;
@@ -448,9 +515,45 @@ const String _embeddedSleepSoundsHtml = '''
       if (action === 'applyPreset') {
         const preset = String(cmd.preset || '').trim();
         if (preset) engine.preset = preset;
+        const nextLayers = mixForPreset(engine.preset);
+        Object.keys(engine.enabled).forEach((id) => {
+          engine.enabled[id] = nextLayers.includes(id);
+        });
         if (engine.playing && !engine.paused) {
-          stopAllLayers();
-          mixForPreset(engine.preset).forEach(startLayer);
+          syncLayers();
+        }
+        sendStatus(commandId);
+        emit('ack', { commandId, action });
+        return;
+      }
+      if (action === 'applyMix') {
+        if (cmd.enabled && typeof cmd.enabled === 'object') {
+          Object.keys(cmd.enabled).forEach((id) => {
+            engine.enabled[id] = cmd.enabled[id] === true;
+          });
+        }
+        if (cmd.volumes && typeof cmd.volumes === 'object') {
+          Object.keys(cmd.volumes).forEach((id) => {
+            const next = Number(cmd.volumes[id]);
+            if (!Number.isNaN(next)) {
+              engine.volumes[id] = Math.max(0, Math.min(1, next));
+            }
+          });
+        }
+        if (engine.playing && !engine.paused) {
+          syncLayers();
+        }
+        sendStatus(commandId);
+        emit('ack', { commandId, action });
+        return;
+      }
+      if (action === 'setLayerEnabled') {
+        const id = String(cmd.soundId || '').trim();
+        if (id) {
+          engine.enabled[id] = cmd.enabled === true;
+          if (engine.playing && !engine.paused) {
+            syncLayers();
+          }
         }
         sendStatus(commandId);
         emit('ack', { commandId, action });
@@ -471,10 +574,7 @@ const String _embeddedSleepSoundsHtml = '''
         const next = Number(cmd.volume);
         if (id && !Number.isNaN(next)) {
           engine.volumes[id] = Math.max(0, Math.min(1, next));
-          const layer = engine.active.get(id);
-          if (layer && layer.gain) {
-            layer.gain.gain.value = baseGainFor(id) * engine.volumes[id];
-          }
+          applyLayerOutput(id);
         }
         sendStatus(commandId);
         emit('ack', { commandId, action });
@@ -482,48 +582,20 @@ const String _embeddedSleepSoundsHtml = '''
       }
       if (action === 'play') {
         ensureAudio();
-        stopAllLayers();
-        mixForPreset(engine.preset).forEach(startLayer);
+        syncLayers();
+        if (engine.active.size == 0) {
+          throw new Error('Enable at least one Sleep Sound to start playback.');
+        }
+        await withTimeout(engine.context.resume(), 3000, 'Audio resume');
         engine.playing = true;
         engine.paused = false;
-        try {
-          const resumeResult = engine.context.resume();
-          if (resumeResult && typeof resumeResult.then === 'function') {
-            resumeResult.then(() => sendStatus(commandId)).catch((err) => {
-              emit('error', {
-                commandId,
-                message: 'Embedded audio could not be resumed: ' + String(err),
-              });
-            });
-          }
-        } catch (err) {
-          emit('error', {
-            commandId,
-            message: 'Embedded audio could not be resumed: ' + String(err),
-          });
-        }
         sendStatus(commandId);
         emit('ack', { commandId, action });
         return;
       }
       if (action === 'pause') {
         ensureAudio();
-        try {
-          const suspendResult = engine.context.suspend();
-          if (suspendResult && typeof suspendResult.catch === 'function') {
-            suspendResult.catch((err) => {
-              emit('error', {
-                commandId,
-                message: 'Embedded audio could not be paused: ' + String(err),
-              });
-            });
-          }
-        } catch (err) {
-          emit('error', {
-            commandId,
-            message: 'Embedded audio could not be paused: ' + String(err),
-          });
-        }
+        await withTimeout(engine.context.suspend(), 3000, 'Audio pause');
         engine.paused = true;
         engine.playing = true;
         sendStatus(commandId);
@@ -532,27 +604,15 @@ const String _embeddedSleepSoundsHtml = '''
       }
       if (action === 'resume') {
         ensureAudio();
+        if (engine.active.size === 0) {
+          syncLayers();
+        }
+        if (engine.active.size == 0) {
+          throw new Error('Enable at least one Sleep Sound to resume playback.');
+        }
+        await withTimeout(engine.context.resume(), 3000, 'Audio resume');
         engine.paused = false;
         engine.playing = true;
-        if (engine.active.size === 0) {
-          mixForPreset(engine.preset).forEach(startLayer);
-        }
-        try {
-          const resumeResult = engine.context.resume();
-          if (resumeResult && typeof resumeResult.then === 'function') {
-            resumeResult.then(() => sendStatus(commandId)).catch((err) => {
-              emit('error', {
-                commandId,
-                message: 'Embedded audio could not be resumed: ' + String(err),
-              });
-            });
-          }
-        } catch (err) {
-          emit('error', {
-            commandId,
-            message: 'Embedded audio could not be resumed: ' + String(err),
-          });
-        }
         sendStatus(commandId);
         emit('ack', { commandId, action });
         return;

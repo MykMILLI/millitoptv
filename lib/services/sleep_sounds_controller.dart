@@ -72,9 +72,16 @@ abstract class SleepSoundsPlaybackBackend {
     required int profileId,
     required String preset,
     required double masterVolume,
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
   });
   Future<void> applyPreset(String preset);
   Future<void> setMasterVolume(double masterVolume);
+  Future<void> applyMix({
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  });
+  Future<void> setLayerEnabled(String soundId, bool enabled);
   Future<void> setPerSoundVolume(String soundId, double volume);
   Future<void> play();
   Future<void> pause();
@@ -118,6 +125,8 @@ class BrowserSleepSoundsBackend implements SleepSoundsPlaybackBackend {
     required int profileId,
     required String preset,
     required double masterVolume,
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
   }) async {
     _profileId = profileId;
     _preset = preset;
@@ -136,6 +145,23 @@ class BrowserSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   Future<void> setMasterVolume(double masterVolume) async {
     throw UnsupportedError(
       'In-app volume control is only available in embedded Sleep Sounds mode.',
+    );
+  }
+
+  @override
+  Future<void> applyMix({
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  }) async {
+    throw UnsupportedError(
+      'In-app layer mixing is only available in embedded Sleep Sounds mode.',
+    );
+  }
+
+  @override
+  Future<void> setLayerEnabled(String soundId, bool enabled) async {
+    throw UnsupportedError(
+      'In-app layer mixing is only available in embedded Sleep Sounds mode.',
     );
   }
 
@@ -240,6 +266,8 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
     required int profileId,
     required String preset,
     required double masterVolume,
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
   }) async {
     await _host.ensureReady(profileId);
     await _send(
@@ -247,6 +275,10 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
       payload: {
         'preset': preset,
         'masterVolume': (masterVolume / 100).clamp(0, 1),
+        'enabled': enabled,
+        'volumes': volumes.map(
+          (key, value) => MapEntry(key, (value / 100).clamp(0, 1)),
+        ),
       },
     );
     await _send('status');
@@ -260,6 +292,26 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   Future<void> setMasterVolume(double masterVolume) => _send(
     'setMasterVolume',
     payload: {'masterVolume': (masterVolume / 100).clamp(0, 1)},
+  );
+
+  @override
+  Future<void> applyMix({
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  }) => _send(
+    'applyMix',
+    payload: {
+      'enabled': enabled,
+      'volumes': volumes.map(
+        (key, value) => MapEntry(key, (value / 100).clamp(0, 1)),
+      ),
+    },
+  );
+
+  @override
+  Future<void> setLayerEnabled(String soundId, bool enabled) => _send(
+    'setLayerEnabled',
+    payload: {'soundId': soundId, 'enabled': enabled},
   );
 
   @override
@@ -390,15 +442,23 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
 class SleepSoundsController extends ChangeNotifier {
   SleepSoundsController._();
   static final instance = SleepSoundsController._();
+  static const List<String> simpleSoundIds = <String>[
+    'heavy-rain',
+    'thunder',
+    'white-noise',
+    'pink-noise',
+  ];
   static const Map<String, double> defaultPerSoundVolume = <String, double>{
-    'heavy-rain': 82,
-    'thunder': 58,
-    'white-noise': 64,
-    'pink-noise': 60,
-    'rain': 78,
-    'ocean': 75,
-    'forest': 72,
-    'brown-noise': 70,
+    'heavy-rain': 70,
+    'thunder': 35,
+    'white-noise': 25,
+    'pink-noise': 40,
+  };
+  static const Map<String, bool> defaultEnabledMap = <String, bool>{
+    'heavy-rain': true,
+    'thunder': true,
+    'white-noise': true,
+    'pink-noise': true,
   };
 
   SleepSoundsBackend backend = SleepSoundsBackend.embeddedWebView;
@@ -413,6 +473,7 @@ class SleepSoundsController extends ChangeNotifier {
   Map<String, double> perSoundVolume = Map<String, double>.from(
     defaultPerSoundVolume,
   );
+  Map<String, bool> soundEnabled = Map<String, bool>.from(defaultEnabledMap);
   List<String> activeLayers = const <String>[];
 
   bool get running =>
@@ -428,14 +489,58 @@ class SleepSoundsController extends ChangeNotifier {
   StreamSubscription<String>? _backendErrorSub;
   Future<void>? _activeCommand;
   SleepSoundsPlaybackBackend Function()? _embeddedFactoryOverride;
+  final Map<String, Timer> _volumeDebounceBySound = <String, Timer>{};
 
   Future<void> loadPreferences(int profileId) async {
+    if (running && activeProfileId == profileId) {
+      return;
+    }
     final prefs = HomePreferences();
     selectedPreset = await prefs.sleepSoundsPreset(profileId);
     volume = await prefs.sleepSoundsVolume(profileId);
     final storedPerSound = await prefs.sleepSoundsPerSoundVolumes(profileId);
-    perSoundVolume = Map<String, double>.from(defaultPerSoundVolume)
+    final mergedPerSound = Map<String, double>.from(defaultPerSoundVolume)
       ..addAll(storedPerSound);
+    final storedEnabled = await prefs.sleepSoundsEnabledMap(profileId);
+    final mergedEnabled = Map<String, bool>.from(defaultEnabledMap)
+      ..addAll(storedEnabled);
+    // One-time migration from legacy presets to the simplified 4-layer mix.
+    if (!storedEnabled.keys.any((key) => simpleSoundIds.contains(key))) {
+      final preset = selectedPreset.trim().toLowerCase();
+      if (preset == 'heavy-rain') {
+        mergedEnabled
+          ..['heavy-rain'] = true
+          ..['thunder'] = false
+          ..['white-noise'] = false
+          ..['pink-noise'] = false;
+      } else if (preset == 'thunder') {
+        mergedEnabled
+          ..['heavy-rain'] = true
+          ..['thunder'] = true
+          ..['white-noise'] = false
+          ..['pink-noise'] = false;
+      } else if (preset == 'white-noise') {
+        mergedEnabled
+          ..['heavy-rain'] = false
+          ..['thunder'] = false
+          ..['white-noise'] = true
+          ..['pink-noise'] = false;
+      } else if (preset == 'pink-noise') {
+        mergedEnabled
+          ..['heavy-rain'] = false
+          ..['thunder'] = false
+          ..['white-noise'] = false
+          ..['pink-noise'] = true;
+      }
+    }
+    perSoundVolume = {
+      for (final id in simpleSoundIds)
+        id: mergedPerSound[id] ?? defaultPerSoundVolume[id]!,
+    };
+    soundEnabled = {
+      for (final id in simpleSoundIds)
+        id: mergedEnabled[id] ?? defaultEnabledMap[id]!,
+    };
     final storedBackend = await prefs.sleepSoundsBackend(profileId);
     backend = switch (storedBackend) {
       'browser' => SleepSoundsBackend.browserFallback,
@@ -449,6 +554,7 @@ class SleepSoundsController extends ChangeNotifier {
     await prefs.setSleepSoundsPreset(profileId, selectedPreset);
     await prefs.setSleepSoundsVolume(profileId, volume);
     await prefs.setSleepSoundsPerSoundVolumes(profileId, perSoundVolume);
+    await prefs.setSleepSoundsEnabledMap(profileId, soundEnabled);
     await prefs.setSleepSoundsBackend(
       profileId,
       backend == SleepSoundsBackend.embeddedWebView ? 'embedded' : 'browser',
@@ -528,8 +634,45 @@ class SleepSoundsController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    _volumeDebounceBySound[normalizedSoundId]?.cancel();
+    _volumeDebounceBySound[normalizedSoundId] = Timer(
+      const Duration(milliseconds: 120),
+      () {
+        unawaited(
+          _enqueue(() async {
+            await backend.setPerSoundVolume(normalizedSoundId, normalized);
+          }).catchError((error) {
+            state = SleepSoundsState.error;
+            this.error = error.toString();
+            message = 'Could not update $normalizedSoundId volume.';
+            notifyListeners();
+          }),
+        );
+      },
+    );
+  }
+
+  Future<void> setSoundEnabled(String soundId, bool enabled) async {
+    final normalizedSoundId = soundId.trim().toLowerCase();
+    if (!simpleSoundIds.contains(normalizedSoundId)) {
+      throw FormatException('Unsupported Sleep Sound: $soundId');
+    }
+    soundEnabled = Map<String, bool>.from(soundEnabled)
+      ..[normalizedSoundId] = enabled;
+    error = '';
+    notifyListeners();
+    final backend = _activeBackend;
+    if (backend == null || !running) {
+      message = 'Mix updated. Press Start sounds to apply.';
+      notifyListeners();
+      return;
+    }
     await _enqueue(() async {
-      await backend.setPerSoundVolume(normalizedSoundId, normalized);
+      await backend.setLayerEnabled(normalizedSoundId, enabled);
+      await backend.setPerSoundVolume(
+        normalizedSoundId,
+        perSoundVolume[normalizedSoundId] ?? 0,
+      );
     });
   }
 
@@ -549,52 +692,82 @@ class SleepSoundsController extends ChangeNotifier {
     required String url,
     Future<void> Function(int profileId, String url)? launcher,
     Future<void> Function(int profileId)? stopper,
-  }) {
-    return _enqueue(() async {
-      if (state == SleepSoundsState.loading) {
-        throw StateError('Sleep Sounds is already processing a command.');
-      }
-      if (running && activeProfileId != null && activeProfileId != profileId) {
-        await _stopInternal();
-      }
-      _launcher = launcher ?? _launcher;
-      _stopper = stopper ?? _stopper;
-      _activeUrl = url;
-      activeProfileId = profileId;
-      state = SleepSoundsState.loading;
-      error = '';
-      message = backend == SleepSoundsBackend.embeddedWebView
-          ? 'Preparing embedded Sleep Sounds...'
-          : 'Opening Sleep Sounds browser fallback...';
+  }) => _enqueue(() async {
+    await _startOrReconfigure(
+      profileId: profileId,
+      url: url,
+      launcher: launcher,
+      stopper: stopper,
+    );
+  });
+
+  Future<void> _startOrReconfigure({
+    required int profileId,
+    required String url,
+    Future<void> Function(int profileId, String url)? launcher,
+    Future<void> Function(int profileId)? stopper,
+  }) async {
+    if (state == SleepSoundsState.loading) {
+      throw StateError('Sleep Sounds is already processing a command.');
+    }
+    if (running && activeProfileId != null && activeProfileId != profileId) {
+      await _stopInternal();
+    }
+    _launcher = launcher ?? _launcher;
+    _stopper = stopper ?? _stopper;
+    _activeUrl = url;
+    activeProfileId = profileId;
+    state = SleepSoundsState.loading;
+    error = '';
+    final anyEnabled = soundEnabled.values.any((enabled) => enabled);
+    if (!anyEnabled) {
+      state = SleepSoundsState.stopped;
+      message = 'Enable at least one sound to start Sleep Sounds.';
       notifyListeners();
-      final selectedBackend = _createBackend();
-      await _attachBackend(selectedBackend);
-      await selectedBackend.initialize(
-        profileId: profileId,
-        preset: selectedPreset,
-        masterVolume: volume,
+      return;
+    }
+    message = backend == SleepSoundsBackend.embeddedWebView
+        ? 'Preparing embedded Sleep Sounds...'
+        : 'Opening Sleep Sounds browser fallback...';
+    notifyListeners();
+    final selectedBackend = _createBackend();
+    await _attachBackend(selectedBackend);
+    await selectedBackend.initialize(
+      profileId: profileId,
+      preset: selectedPreset,
+      masterVolume: volume,
+      enabled: {for (final id in simpleSoundIds) id: soundEnabled[id] ?? false},
+      volumes: {
+        for (final id in simpleSoundIds)
+          id: perSoundVolume[id] ?? defaultPerSoundVolume[id]!,
+      },
+    );
+    if (capabilities.supportsMasterVolume) {
+      await selectedBackend.setMasterVolume(volume);
+    }
+    if (capabilities.supportsPerSoundVolume) {
+      await selectedBackend.applyMix(
+        enabled: {
+          for (final id in simpleSoundIds) id: soundEnabled[id] ?? false,
+        },
+        volumes: {
+          for (final id in simpleSoundIds)
+            id: perSoundVolume[id] ?? defaultPerSoundVolume[id]!,
+        },
       );
-      if (capabilities.supportsPresets) {
-        await selectedBackend.applyPreset(selectedPreset);
-      }
-      if (capabilities.supportsMasterVolume) {
-        await selectedBackend.setMasterVolume(volume);
-      }
-      if (capabilities.supportsPerSoundVolume) {
-        for (final entry in perSoundVolume.entries) {
-          await selectedBackend.setPerSoundVolume(entry.key, entry.value);
-        }
-      }
-      await selectedBackend.play();
-      state = SleepSoundsState.playing;
-      if (activeLayers.isEmpty) {
-        activeLayers = _expectedLayersForPreset(selectedPreset);
-      }
-      message = backend == SleepSoundsBackend.embeddedWebView
-          ? 'Sleep Sounds is running in-app.'
-          : 'Sleep Sounds browser fallback opened.';
-      notifyListeners();
-    });
+    }
+    await selectedBackend.play();
+    state = SleepSoundsState.playing;
+    if (activeLayers.isEmpty) {
+      activeLayers = [
+        for (final id in simpleSoundIds)
+          if (soundEnabled[id] ?? false) id,
+      ];
+    }
+    message = backend == SleepSoundsBackend.embeddedWebView
+        ? 'Sleep Sounds is running in-app.'
+        : 'Sleep Sounds browser fallback opened.';
+    notifyListeners();
   }
 
   Future<void> pause() {
@@ -627,7 +800,7 @@ class SleepSoundsController extends ChangeNotifier {
         if (profile == null || launch == null || url == null) {
           throw StateError('Sleep Sounds is not configured for resume.');
         }
-        await play(
+        await _startOrReconfigure(
           profileId: profile,
           url: url,
           launcher: launch,
@@ -752,30 +925,6 @@ class SleepSoundsController extends ChangeNotifier {
     notifyListeners();
   }
 
-  List<String> _expectedLayersForPreset(String preset) {
-    switch (preset) {
-      case 'overnight-storm':
-        return const ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
-      case 'heavy-rain':
-        return const ['heavy-rain', 'white-noise'];
-      case 'thunder':
-        return const ['thunder', 'heavy-rain'];
-      case 'white-noise':
-        return const ['white-noise'];
-      case 'pink-noise':
-        return const ['pink-noise'];
-      case 'ocean':
-        return const ['ocean', 'brown-noise'];
-      case 'forest':
-        return const ['forest', 'rain'];
-      case 'brown-noise':
-        return const ['brown-noise'];
-      case 'rain':
-      default:
-        return const ['rain', 'brown-noise'];
-    }
-  }
-
   Future<T> _enqueue<T>(Future<T> Function() task) {
     return () async {
       while (_activeCommand != null) {
@@ -806,6 +955,10 @@ class SleepSoundsController extends ChangeNotifier {
   @visibleForTesting
   Future<void> resetForTesting() async {
     await _detachBackend();
+    for (final timer in _volumeDebounceBySound.values) {
+      timer.cancel();
+    }
+    _volumeDebounceBySound.clear();
     _embeddedFactoryOverride = null;
     _launcher = null;
     _stopper = null;
@@ -819,6 +972,7 @@ class SleepSoundsController extends ChangeNotifier {
     backend = SleepSoundsBackend.embeddedWebView;
     capabilities = SleepSoundsCapabilities.embeddedDefault;
     perSoundVolume = Map<String, double>.from(defaultPerSoundVolume);
+    soundEnabled = Map<String, bool>.from(defaultEnabledMap);
     activeLayers = const <String>[];
     _activeCommand = null;
     notifyListeners();

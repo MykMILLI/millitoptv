@@ -512,14 +512,10 @@ class HomePreferences {
     );
     if (raw == null || raw.trim().isEmpty) {
       return const <String, double>{
-        'heavy-rain': 82,
-        'thunder': 58,
-        'white-noise': 64,
-        'pink-noise': 60,
-        'rain': 78,
-        'ocean': 75,
-        'forest': 72,
-        'brown-noise': 70,
+        'heavy-rain': 70,
+        'thunder': 35,
+        'white-noise': 25,
+        'pink-noise': 40,
       };
     }
     try {
@@ -546,14 +542,10 @@ class HomePreferences {
       return result;
     } catch (_) {
       return const <String, double>{
-        'heavy-rain': 82,
-        'thunder': 58,
-        'white-noise': 64,
-        'pink-noise': 60,
-        'rain': 78,
-        'ocean': 75,
-        'forest': 72,
-        'brown-noise': 70,
+        'heavy-rain': 70,
+        'thunder': 35,
+        'white-noise': 25,
+        'pink-noise': 40,
       };
     }
   }
@@ -580,6 +572,62 @@ class HomePreferences {
       jsonEncode(normalized),
     )) {
       throw StateError('Could not save Sleep Sounds per-sound volumes.');
+    }
+  }
+
+  Future<Map<String, bool>> sleepSoundsEnabledMap(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.sleepSoundsEnabled.v1.$profile',
+    );
+    const defaults = <String, bool>{
+      'heavy-rain': true,
+      'thunder': true,
+      'white-noise': true,
+      'pink-noise': true,
+    };
+    if (raw == null || raw.trim().isEmpty) {
+      return defaults;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return defaults;
+      }
+      final next = <String, bool>{};
+      for (final entry in decoded.entries) {
+        final key = entry.key.toString().trim().toLowerCase();
+        final value = entry.value;
+        if (key.isEmpty || value is! bool) {
+          continue;
+        }
+        next[key] = value;
+      }
+      if (next.isEmpty) {
+        return defaults;
+      }
+      return next;
+    } catch (_) {
+      return defaults;
+    }
+  }
+
+  Future<void> setSleepSoundsEnabledMap(
+    int profile,
+    Map<String, bool> values,
+  ) async {
+    final normalized = <String, bool>{};
+    for (final entry in values.entries) {
+      final key = entry.key.trim().toLowerCase();
+      if (key.isEmpty) {
+        continue;
+      }
+      normalized[key] = entry.value;
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.sleepSoundsEnabled.v1.$profile',
+      jsonEncode(normalized),
+    )) {
+      throw StateError('Could not save Sleep Sounds enabled map.');
     }
   }
 
@@ -1752,6 +1800,7 @@ class HomePreferences {
       'home.sleepSoundsVolume.v1.$profile',
       'home.sleepSoundsBackend.v1.$profile',
       'home.sleepSoundsPerSoundVolumes.v1.$profile',
+      'home.sleepSoundsEnabled.v1.$profile',
       'home.liveTvPlaylistUrl.v1.$profile',
       'home.tmdbApiKey.v1.$profile',
       'home.sharedFamilyAlbum.v1.$profile',
