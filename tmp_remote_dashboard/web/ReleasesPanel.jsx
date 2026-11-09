@@ -20,6 +20,7 @@ const releasePlatforms = [
 ];
 
 const releaseStatesPending = new Set(['offered', 'deferred', 'downloading', 'downloaded', 'installing', 'awaiting_confirmation']);
+const cancelableOfferStates = new Set(['assigned', 'offered', 'deferred', 'downloading', 'downloaded', 'installing', 'awaiting_confirmation']);
 
 function packageType(platform) {
   if (/^windows/i.test(platform)) return 'Windows installer';
@@ -108,6 +109,19 @@ function androidOtaSignal(report) {
     };
   }
   return null;
+}
+
+function cancelledByAdmin(report) {
+  return String(report.status ?? '') === 'failed'
+    && /^Cancelled by admin from Release Center\./i.test(String(report.last_error ?? ''));
+}
+
+function assignmentStatusLabel(report) {
+  return cancelledByAdmin(report) ? 'cancelled' : String(report.status ?? 'unknown');
+}
+
+function canCancelOffer(report) {
+  return cancelableOfferStates.has(String(report.status ?? ''));
 }
 
 export default function ReleasesPanel({ request, token }) {
@@ -283,8 +297,11 @@ export default function ReleasesPanel({ request, token }) {
 
   const deploymentAttention = useMemo(() => {
     const pending = reports.filter(report => releaseStatesPending.has(String(report.status ?? ''))).length;
-    const historicalFailures = reports.filter(report => String(report.status ?? '') === 'failed').length;
-    return { pending, historicalFailures };
+    const historicalFailures = reports
+      .filter(report => String(report.status ?? '') === 'failed' && !cancelledByAdmin(report))
+      .length;
+    const cancelled = reports.filter(report => cancelledByAdmin(report)).length;
+    return { pending, historicalFailures, cancelled };
   }, [reports]);
 
   async function toggleReleaseEnabled(release) {
@@ -326,6 +343,16 @@ export default function ReleasesPanel({ request, token }) {
       });
       setTargets([]);
     }, 'Device assignments saved.');
+  }
+
+  async function cancelOffer(assignment) {
+    if (!assignment?.id || !canCancelOffer(assignment)) return;
+    const target = `${assignment.device_name ?? 'device'} → ${assignment.version}+${assignment.build}`;
+    if (!window.confirm(`Cancel the offered release assignment for ${target}?`)) return;
+    await act(
+      () => request(`/api/admin/update-status/${assignment.id}/cancel`, { method: 'POST' }),
+      'Offered release assignment cancelled.',
+    );
   }
 
   return (
@@ -403,6 +430,7 @@ export default function ReleasesPanel({ request, token }) {
           <h3>Deployment attention</h3>
           <p className="release-card-version">{deploymentAttention.pending} pending</p>
           <p>{deploymentAttention.historicalFailures} historical failures</p>
+          <p>{deploymentAttention.cancelled} cancelled offers</p>
           <div className="release-actions">
             <button type="button" className="secondary" onClick={() => setTab('devices')}>Review device status</button>
           </div>
@@ -605,7 +633,16 @@ export default function ReleasesPanel({ request, token }) {
                       <td>{current.device_name}</td>
                       <td>{current.reported_version || 'Not reported'}</td>
                       <td>{current.version}+{current.build}</td>
-                      <td>{current.status}</td>
+                      <td>
+                        <span>{assignmentStatusLabel(current)}</span>
+                        {canCancelOffer(current) && (
+                          <div className="release-history-actions">
+                            <button type="button" className="secondary" disabled={busy} onClick={() => cancelOffer(current)}>
+                              Cancel offer
+                            </button>
+                          </div>
+                        )}
+                      </td>
                       <td>
                         {signal
                           ? (
@@ -636,9 +673,16 @@ export default function ReleasesPanel({ request, token }) {
                             {history.map(item => (
                               <div key={item.id} className="release-history-row">
                                 <strong>{item.version}+{item.build}</strong>
-                                <span>{item.status}</span>
+                                <span>{assignmentStatusLabel(item)}</span>
                                 <span>{formatStamp(item.updated_at ?? item.assigned_at)}</span>
                                 <span>{item.last_error || 'No error details.'}</span>
+                                <div className="release-history-actions">
+                                  {canCancelOffer(item) && (
+                                    <button type="button" className="secondary" disabled={busy} onClick={() => cancelOffer(item)}>
+                                      Cancel offer
+                                    </button>
+                                  )}
+                                </div>
                               </div>
                             ))}
                           </div>

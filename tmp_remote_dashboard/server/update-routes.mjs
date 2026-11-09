@@ -3,6 +3,7 @@ import { rateLimit } from 'express-rate-limit';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isId = value => typeof value === 'string' && uuid.test(value);
 const states = new Set(['assigned','offered','deferred','downloading','downloaded','installing','awaiting_confirmation','failed']);
+const cancellableAssignmentStates = new Set(['assigned','offered','deferred','downloading','downloaded','installing','awaiting_confirmation']);
 const platform = /^[a-z0-9]+(?:-[a-z0-9._]+)*$/;
 const semver = /^\d+\.\d+\.\d+$/;
 
@@ -118,6 +119,26 @@ export function registerUpdateRoutes(app, pool) {
         VALUES($1,$2,$3,'offered') ON CONFLICT(release_id,device_id)
         DO UPDATE SET assigned_at=now(),updated_at=now(),verified_at=NULL,status='offered',last_error=NULL`,[randomUUID(),req.params.id,id]);
       res.json({assignedDeviceIds:unique});
+    });
+  });
+  app.post('/api/admin/update-status/:id/cancel',async(req,res,next)=>{
+    if(!isId(req.params.id))return res.status(400).json({error:'Invalid assignment ID.'});
+    return transaction(res,next,async(c,res)=>{
+      const assignment=await c.query(`SELECT a.id,a.status,a.last_error,d.revoked_at
+        FROM millitop_tv.app_update_assignments a
+        JOIN millitop_tv.devices d ON d.id=a.device_id
+        WHERE a.id=$1
+        FOR UPDATE OF a`,[req.params.id]);
+      const row=assignment.rows[0];
+      if(!row||row.revoked_at)return res.status(404).json({error:'Assignment not found.'});
+      if(!cancellableAssignmentStates.has(row.status))
+        return res.status(409).json({error:'Only offered or in-progress assignments can be cancelled.'});
+      await c.query(`UPDATE millitop_tv.app_update_assignments
+        SET status='failed',last_error='Cancelled by admin from Release Center.',verified_at=NULL,updated_at=now()
+        WHERE id=$1`,[row.id]);
+      await c.query(`INSERT INTO millitop_tv.app_update_events(id,assignment_id,status)
+        VALUES($1,$2,'failed')`,[randomUUID(),row.id]);
+      res.json({cancelled:true,assignmentId:row.id});
     });
   });
   app.get('/api/admin/update-status',async(req,res,next)=>{

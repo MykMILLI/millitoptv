@@ -13,7 +13,26 @@ Future<HubPlaylist?> addToMixedPlaylist(
   required int profileId,
   required HubItem item,
   GlobalPlaylistStore? store,
+}) => addToMixedPlaylistItems(
+  context,
+  profileId: profileId,
+  items: [item],
+  store: store,
+);
+
+Future<HubPlaylist?> addToMixedPlaylistItems(
+  BuildContext context, {
+  required int profileId,
+  required List<HubItem> items,
+  GlobalPlaylistStore? store,
+  String? promptTitle,
 }) async {
+  if (items.isEmpty) {
+    return null;
+  }
+  final uniqueItems = <String, HubItem>{
+    for (final item in items) item.key: item,
+  }.values.toList();
   final playlists = store ?? GlobalPlaylistStore();
   final library = await playlists.load(profileId);
   final lists = library.playlists.values.where((p) => !p.deleted).toList()
@@ -36,7 +55,10 @@ Future<HubPlaylist?> addToMixedPlaylist(
           children: [
             ListTile(
               title: Text(
-                'Add "${item.title}" to a playlist',
+                promptTitle ??
+                    (uniqueItems.length == 1
+                        ? 'Add "${uniqueItems.first.title}" to a playlist'
+                        : 'Add ${uniqueItems.length} items to a playlist'),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w700),
@@ -56,7 +78,9 @@ Future<HubPlaylist?> addToMixedPlaylist(
               ListTile(
                 key: ValueKey('mixed-playlist-${list.id}'),
                 leading: Icon(
-                  list.items.any((v) => v.key == item.key)
+                  uniqueItems.any(
+                    (candidate) => list.items.any((v) => v.key == candidate.key),
+                  )
                       ? Icons.playlist_add_check
                       : Icons.playlist_play,
                 ),
@@ -86,14 +110,17 @@ Future<HubPlaylist?> addToMixedPlaylist(
       saved = await playlists.savePlaylist(
         profileId,
         name: name,
-        items: [item],
+        items: uniqueItems,
       );
     } else {
       final list = (await playlists.load(profileId)).playlists[choice];
       if (list == null || list.deleted) {
         throw StateError('That playlist no longer exists.');
       }
-      if (list.items.any((v) => v.key == item.key)) {
+      final additions = uniqueItems
+          .where((candidate) => !list.items.any((value) => value.key == candidate.key))
+          .toList();
+      if (additions.isEmpty) {
         if (context.mounted) _toast(context, 'Already in ${list.name}');
         return list;
       }
@@ -101,7 +128,7 @@ Future<HubPlaylist?> addToMixedPlaylist(
         profileId,
         id: list.id,
         name: list.name,
-        items: [...list.items, item],
+        items: [...list.items, ...additions],
       );
     }
   } catch (error, stack) {
@@ -110,17 +137,30 @@ Future<HubPlaylist?> addToMixedPlaylist(
       'Could not add to playlist',
       error: error,
       stackTrace: stack,
-      details: {'type': item.type.name},
+      details: {
+        'types': uniqueItems.map((entry) => entry.type.name).toSet().toList(),
+      },
     );
     if (context.mounted) {
       _toast(context, 'Could not add to the playlist. $error');
     }
     return null;
   }
-  AppLog.event('playlist.add', props: {'type': item.type.name});
+  AppLog.event(
+    'playlist.add',
+    props: {
+      'count': uniqueItems.length,
+      'types': uniqueItems.map((entry) => entry.type.name).toSet().toList(),
+    },
+  );
   ProfileSync.schedulePush(profileId);
   if (context.mounted) {
-    _toast(context, 'Added to ${saved.name}');
+    _toast(
+      context,
+      uniqueItems.length == 1
+          ? 'Added to ${saved.name}'
+          : 'Added ${uniqueItems.length} items to ${saved.name}',
+    );
   }
   return saved;
 }

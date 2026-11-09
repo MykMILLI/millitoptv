@@ -32,6 +32,12 @@ class MediaPlayerChrome extends StatefulWidget {
     this.onSleepTimer,
     this.sleepTimerActive = false,
     this.onPipHome,
+    this.onToggleFavorite,
+    this.favoriteActive = false,
+    this.onAddToPlaylist,
+    this.onPreviousQueueItem,
+    this.onNextQueueItem,
+    this.queuePositionLabel,
     required this.panel,
     required this.onPanelChanged,
     required this.queuePanel,
@@ -60,6 +66,12 @@ class MediaPlayerChrome extends StatefulWidget {
   final VoidCallback? onSleepTimer;
   final bool sleepTimerActive;
   final VoidCallback? onPipHome;
+  final VoidCallback? onToggleFavorite;
+  final bool favoriteActive;
+  final VoidCallback? onAddToPlaylist;
+  final VoidCallback? onPreviousQueueItem;
+  final VoidCallback? onNextQueueItem;
+  final String? queuePositionLabel;
   final VoidCallback? onPreviousEpisode, onNextEpisode, onReveal;
   final ValueChanged<Duration> onSeek;
   final ValueChanged<double> onVolumeChanged;
@@ -111,6 +123,19 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
       final playback = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (widget.onPreviousQueueItem != null)
+            _button(
+              'Previous queue item',
+              Icons.skip_previous,
+              widget.onPreviousQueueItem,
+            ),
+          if (widget.queuePositionLabel?.trim().isNotEmpty == true)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(widget.queuePositionLabel!.trim()),
+            ),
+          if (widget.onNextQueueItem != null)
+            _button('Next queue item', Icons.skip_next, widget.onNextQueueItem),
           if (widget.episodesPanel != null)
             _button(
               'Previous episode',
@@ -188,6 +213,18 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
             icon: const Icon(Icons.playlist_play),
             label: const Text('Queue'),
           ),
+          if (widget.onToggleFavorite != null)
+            _button(
+              widget.favoriteActive ? 'Remove favorite' : 'Add favorite',
+              widget.favoriteActive ? Icons.favorite : Icons.favorite_border,
+              widget.onToggleFavorite,
+            ),
+          if (widget.onAddToPlaylist != null)
+            _button(
+              'Add to playlist',
+              Icons.playlist_add,
+              widget.onAddToPlaylist,
+            ),
           _button(
             'Subtitles',
             Icons.closed_caption_outlined,
@@ -333,8 +370,8 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                             Padding(
                               padding: const EdgeInsets.only(right: 12),
                               child: SizedBox(
-                                width: 44,
-                                height: 66,
+                                width: compact ? 60 : 84,
+                                height: compact ? 90 : 126,
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(6),
                                   child: widget.poster!,
@@ -356,16 +393,6 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                if (widget.description?.trim().isNotEmpty ==
-                                    true)
-                                  Text(
-                                    widget.description!.trim(),
-                                    maxLines: compact ? 2 : 3,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
                               ],
                             ),
                           ),

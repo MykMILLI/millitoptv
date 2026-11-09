@@ -4,10 +4,12 @@ import 'diagnostics_screen.dart';
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../services/firefox_browser.dart';
 import '../services/web_app_catalog.dart';
 import '../services/web_app_definition.dart';
 import '../services/device_connection.dart';
+import '../services/app_updates.dart';
 import '../services/live_tv_control.dart';
 import '../services/live_tv_source.dart';
 import '../services/playback_performance.dart';
@@ -41,6 +43,7 @@ Future<void> editWebApp(
     );
     return;
   }
+
   final name = TextEditingController(text: app?.title ?? ''),
       url = TextEditingController(text: app?.url ?? 'https://');
   final form = GlobalKey<FormState>();
@@ -183,7 +186,7 @@ class AppSettingsScreen extends StatefulWidget {
   State<AppSettingsScreen> createState() => _AppSettingsScreenState();
 }
 
-enum _SettingsSection { general, tvMovies, music, websites }
+enum _SettingsSection { general, tvMovies, music, websites, about }
 
 class _AppSettingsScreenState extends State<AppSettingsScreen> {
   static const bool _sharedFamilyAlbumEnabled = false;
@@ -202,10 +205,17 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   Map<String, dynamic> liveTvPlayerDefaults = const {};
   PlaybackPerformanceSettings playbackPerformance =
       const PlaybackPerformanceSettings();
+  String appVersion = 'Unknown';
+  String appBuild = 'Unknown';
+  String appPackage = 'Unknown';
+  Map<String, dynamic>? aboutOfferedUpdate;
+  String aboutUpdateMessage = '';
+  bool aboutUpdateWorking = false;
   @override
   void initState() {
     super.initState();
     catalog.addListener(_changed);
+    AppUpdates.instance.view.addListener(_syncAboutUpdateView);
     unawaited(_load());
   }
 
@@ -270,6 +280,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       );
       final sharedFamilyAlbum = await HomePreferences()
           .sharedFamilyAlbumSettings(widget.profileId);
+      final packageInfo = await PackageInfo.fromPlatform();
+      final offered = await AppUpdates.instance
+          .availableForAccount()
+          .catchError((_) => null);
       if (mounted) {
         setState(() {
           apps = values;
@@ -279,6 +293,16 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
           subtitleProviderSettings = subtitleProviders;
           liveTvPlayerDefaults = playerDefaults;
           playbackPerformance = performance;
+          appVersion = packageInfo.version.isEmpty
+              ? 'Unknown'
+              : packageInfo.version;
+          appBuild = packageInfo.buildNumber.isEmpty
+              ? 'Unknown'
+              : packageInfo.buildNumber;
+          appPackage = packageInfo.packageName.isEmpty
+              ? 'Unknown'
+              : packageInfo.packageName;
+          aboutOfferedUpdate = offered is Map<String, dynamic> ? offered : null;
         });
       }
     } catch (_) {
@@ -1465,7 +1489,98 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
   @override
   void dispose() {
     catalog.removeListener(_changed);
+    AppUpdates.instance.view.removeListener(_syncAboutUpdateView);
     super.dispose();
+  }
+
+  void _syncAboutUpdateView() {
+    if (!mounted) {
+      return;
+    }
+    final current = AppUpdates.instance.view.value;
+    setState(() {
+      aboutOfferedUpdate = current.release ?? aboutOfferedUpdate;
+      if (current.message.isNotEmpty) {
+        aboutUpdateMessage = current.message;
+      }
+    });
+  }
+
+  Future<void> _checkAboutUpdates() async {
+    if (aboutUpdateWorking) {
+      return;
+    }
+    setState(() {
+      aboutUpdateWorking = true;
+      aboutUpdateMessage = '';
+    });
+    try {
+      final offered = await AppUpdates.instance.availableForAccount();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        aboutOfferedUpdate = offered;
+        aboutUpdateMessage = offered == null
+            ? 'No newer enabled update is currently offered to this device.'
+            : 'Offered update found: ${offered['version']}+${offered['build']}.';
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        aboutUpdateMessage =
+            'Update availability could not be confirmed. ${e.toString().replaceFirst('Bad state: ', '')}';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => aboutUpdateWorking = false);
+      }
+    }
+  }
+
+  Future<void> _installAboutUpdate() async {
+    if (aboutUpdateWorking) {
+      return;
+    }
+    setState(() {
+      aboutUpdateWorking = true;
+      aboutUpdateMessage = '';
+    });
+    try {
+      var offered = aboutOfferedUpdate;
+      offered ??= await AppUpdates.instance.availableForAccount();
+      if (offered == null) {
+        if (mounted) {
+          setState(() {
+            aboutUpdateMessage =
+                'No offered update was found for this device. Check again after syncing with the dashboard.';
+          });
+        }
+        return;
+      }
+      final confirmed = offered;
+      await AppUpdates.instance.installFromAccount(offered);
+      if (mounted) {
+        setState(() {
+          aboutOfferedUpdate = confirmed;
+          aboutUpdateMessage =
+              'Starting install for ${confirmed['version']}+${confirmed['build']}.';
+        });
+      }
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        aboutUpdateMessage = e.toString().replaceFirst('Bad state: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => aboutUpdateWorking = false);
+      }
+    }
   }
 
   Future<void> _detect() async {
@@ -1942,6 +2057,85 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
     ),
   );
 
+  Widget _aboutSection() => _settingsCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'About',
+          style: TextStyle(fontSize: 32, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Current app build running on this device.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        const SizedBox(height: 14),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.info_outline),
+          title: const Text('Version'),
+          subtitle: Text('$appVersion+$appBuild'),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.tag_outlined),
+          title: const Text('Package'),
+          subtitle: Text(appPackage),
+        ),
+        const Divider(height: 24),
+        const Text(
+          'Updates',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 6),
+        if (aboutOfferedUpdate != null) ...[
+          Text(
+            'Offered version: ${aboutOfferedUpdate!['version']}+${aboutOfferedUpdate!['build']}',
+          ),
+          if ((aboutOfferedUpdate!['notes']?.toString().trim() ?? '')
+              .isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                aboutOfferedUpdate!['notes'].toString(),
+                maxLines: 5,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70),
+              ),
+            ),
+          const SizedBox(height: 10),
+        ],
+        if (aboutUpdateMessage.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(aboutUpdateMessage),
+          ),
+        if (aboutUpdateWorking) const LinearProgressIndicator(),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            OutlinedButton.icon(
+              onPressed: aboutUpdateWorking ? null : _checkAboutUpdates,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Check for updates'),
+            ),
+            FilledButton.icon(
+              onPressed: aboutUpdateWorking ? null : _installAboutUpdate,
+              icon: const Icon(Icons.system_update_alt),
+              label: Text(
+                aboutOfferedUpdate == null
+                    ? 'Install offered update'
+                    : 'Install ${aboutOfferedUpdate!['version']}+${aboutOfferedUpdate!['build']}',
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+
   Widget _sectionContent() {
     switch (section) {
       case _SettingsSection.general:
@@ -1952,6 +2146,8 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         return _musicSection();
       case _SettingsSection.websites:
         return _websitesSection();
+      case _SettingsSection.about:
+        return _aboutSection();
     }
   }
 
@@ -1990,6 +2186,10 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                         DropdownMenuItem(
                           value: _SettingsSection.websites,
                           child: Text('Websites'),
+                        ),
+                        DropdownMenuItem(
+                          value: _SettingsSection.about,
+                          child: Text('About'),
                         ),
                       ],
                       onChanged: (value) {
@@ -2048,6 +2248,11 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                       value: _SettingsSection.websites,
                       label: 'Websites',
                       icon: Icons.public_outlined,
+                    ),
+                    _sectionButton(
+                      value: _SettingsSection.about,
+                      label: 'About',
+                      icon: Icons.info_outline,
                     ),
                   ],
                 ),

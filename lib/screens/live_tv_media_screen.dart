@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/playlist_hub.dart';
+import '../services/global_playlists.dart';
 import '../widgets/mixed_playlist_picker.dart';
 import '../services/device_connection.dart';
 import '../services/firefox_browser.dart';
@@ -43,7 +44,18 @@ import '../widgets/redesign/media_player_chrome.dart';
 import '../widgets/redesign/media_side_panels.dart';
 import '../profiles/profile_gate.dart';
 
-enum _MediaTab { movies, series, adult }
+enum _MediaTab { movies, series, collections, adult }
+
+class _MovieCollectionCluster {
+  final String id;
+  final String title;
+  final List<LiveTvMediaItem> items;
+  const _MovieCollectionCluster({
+    required this.id,
+    required this.title,
+    required this.items,
+  });
+}
 
 enum _MediaSortMode { relevance, title, source, inTheaters, recentlyAdded }
 
@@ -416,6 +428,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvRecentMedia> history = [];
   List<LiveTvLibraryItem> favorites = [];
   List<LiveTvUserPlaylist> playlists = [];
+  final Map<String, LiveTvTmdbOverride> _tmdbOverridesByKey = {};
   _MediaTab tab = _MediaTab.movies;
 
   /// Home hub (rows) vs. the poster grid. Home is the default landing page.
@@ -1208,11 +1221,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         final nextPlaylists = await HomePreferences().liveTvPlaylists(
           widget.profileId,
         );
+        final nextTmdbOverrides = await HomePreferences().liveTvTmdbOverrides(
+          widget.profileId,
+        );
         if (mounted) {
           setState(() {
             history = nextHistory;
             favorites = nextFavorites;
             playlists = nextPlaylists;
+            _tmdbOverridesByKey
+              ..clear()
+              ..addEntries(
+                nextTmdbOverrides.map((entry) => MapEntry(entry.key, entry)),
+              );
           });
         }
       });
@@ -1232,6 +1253,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       history = await HomePreferences().liveTvRecentMedia(widget.profileId);
       favorites = await HomePreferences().liveTvFavorites(widget.profileId);
       playlists = await HomePreferences().liveTvPlaylists(widget.profileId);
+      final tmdbOverrides = await HomePreferences().liveTvTmdbOverrides(
+        widget.profileId,
+      );
+      _tmdbOverridesByKey
+        ..clear()
+        ..addEntries(tmdbOverrides.map((entry) => MapEntry(entry.key, entry)));
       if (!mounted) {
         return;
       }
@@ -1316,6 +1343,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     movies = mergedMovies;
     series = mergedSeries;
+    _applyTmdbOverridesToCatalog();
     adultIds = {
       ...adultIds,
       for (final item in nextAdultMovies) item.id,
@@ -1368,6 +1396,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   List<LiveTvMediaItem> get _tabItems => switch (tab) {
     _MediaTab.movies => movies,
     _MediaTab.series => series,
+    _MediaTab.collections => movies,
     _MediaTab.adult => showAdult ? adultItems : const [],
   };
 
@@ -1681,6 +1710,93 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     for (final item in entry.movies) item.id,
     for (final item in entry.series) item.id,
   };
+
+  void _applyTmdbOverridesToCatalog() {
+    if (_tmdbOverridesByKey.isEmpty) {
+      return;
+    }
+    movies = _applyTmdbOverridesToList(movies, mediaType: 'movie');
+    series = _applyTmdbOverridesToList(series, mediaType: 'series');
+  }
+
+  List<LiveTvMediaItem> _applyTmdbOverridesToList(
+    List<LiveTvMediaItem> items, {
+    required String mediaType,
+  }) {
+    if (items.isEmpty) {
+      return items;
+    }
+    final updated = <LiveTvMediaItem>[];
+    var changed = false;
+    for (final item in items) {
+      final origin = mediaItemOrigins[item];
+      if (origin == null) {
+        updated.add(item);
+        continue;
+      }
+      final key = LiveTvTmdbOverride.tmdbOverrideKey(
+        origin.sourceId,
+        mediaType,
+        item.id,
+      );
+      final override = _tmdbOverridesByKey[key];
+      if (override == null) {
+        updated.add(item);
+        continue;
+      }
+      final patched = _itemWithTmdbOverride(item, override);
+      updated.add(patched);
+      if (!identical(patched, item)) {
+        mediaItemOrigins.remove(item);
+        mediaItemOrigins[patched] = origin;
+        changed = true;
+      }
+    }
+    return changed ? updated : items;
+  }
+
+  LiveTvTmdbOverride? _tmdbOverrideForItem(
+    LiveTvMediaItem item, {
+    String? mediaType,
+  }) {
+    final origin = mediaItemOrigins[item];
+    if (origin == null) {
+      return null;
+    }
+    final type = mediaType ?? (item.series ? 'series' : 'movie');
+    final key = LiveTvTmdbOverride.tmdbOverrideKey(origin.sourceId, type, item.id);
+    return _tmdbOverridesByKey[key];
+  }
+
+  LiveTvMediaItem _itemWithTmdbOverride(
+    LiveTvMediaItem item,
+    LiveTvTmdbOverride override,
+  ) {
+    final title = override.title?.trim();
+    final poster = override.posterUrl?.trim();
+    final backdrop = override.backdropUrl?.trim();
+    final overview = override.overview?.trim();
+    final genres = override.genres;
+    return LiveTvMediaItem(
+      id: item.id,
+      title: title == null || title.isEmpty ? item.title : title,
+      streamUrl: item.streamUrl,
+      posterUrl: poster == null || poster.isEmpty ? item.posterUrl : poster,
+      description: overview == null || overview.isEmpty
+          ? item.description
+          : overview,
+      backdropUrl: backdrop == null || backdrop.isEmpty
+          ? item.backdropUrl
+          : backdrop,
+      group: item.group,
+      series: item.series,
+      seriesId: item.seriesId,
+      year: override.year ?? item.year,
+      genres: genres.isEmpty ? item.genres : genres,
+      releaseDate: override.releaseDate ?? item.releaseDate,
+      addedAt: item.addedAt,
+    );
+  }
 
   /// Background pass after the catalog is on screen:
   /// 1. asks the dashboard whether its SMB catalog changed (version check),
@@ -2149,16 +2265,106 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     return filtered;
   }
 
+  String _collectionBaseTitle(String title) {
+    var value = title.trim().toLowerCase();
+    value = value.replaceAll(RegExp(r'\([^)]*\)'), '');
+    value = value.replaceAll(RegExp(r'[\[\{][^\]\}]*[\]\}]'), '');
+    final split = value.split(RegExp(r'\s[:\-]\s'));
+    if (split.isNotEmpty) {
+      value = split.first;
+    }
+    value = value.replaceAll(RegExp(r'\b(part|chapter|episode)\s+\d+\b'), '');
+    value = value.replaceAll(RegExp(r'\b[ivxlcdm]+\b$'), '');
+    value = value.replaceAll(RegExp(r'\b\d+\b$'), '');
+    value = value.replaceAll(RegExp(r'[^a-z0-9 ]+'), ' ');
+    value = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (value.length < 3) {
+      return title.toLowerCase().trim();
+    }
+    return value;
+  }
+
+  String _collectionMemberKey(String title) => title
+      .toLowerCase()
+      .replaceAll(RegExp(r'\([^)]*\)'), '')
+      .replaceAll(RegExp(r'[^a-z0-9 ]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  String _titleCase(String value) => value
+      .split(' ')
+      .where((part) => part.trim().isNotEmpty)
+      .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+      .join(' ');
+
+  List<_MovieCollectionCluster> get _movieCollections {
+    final filteredMovies = visibleItems.where((item) => !item.series).toList();
+    final buckets = <String, List<LiveTvMediaItem>>{};
+    for (final movie in filteredMovies) {
+      final key = _collectionBaseTitle(movie.title);
+      buckets.putIfAbsent(key, () => <LiveTvMediaItem>[]).add(movie);
+    }
+    final clusters = <_MovieCollectionCluster>[];
+    for (final entry in buckets.entries) {
+      final uniqueMembers = entry.value
+          .map((item) => _collectionMemberKey(item.title))
+          .toSet();
+      if (entry.value.length < 2 || uniqueMembers.length < 2) {
+        continue;
+      }
+      final ordered = [...entry.value]
+        ..sort((a, b) {
+          final yearCompare = (a.year ?? 0).compareTo(b.year ?? 0);
+          if (yearCompare != 0) {
+            return yearCompare;
+          }
+          return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+        });
+      clusters.add(
+        _MovieCollectionCluster(
+          id: entry.key,
+          title: _titleCase(entry.key),
+          items: ordered,
+        ),
+      );
+    }
+    clusters.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+    return clusters;
+  }
+
+  Future<void> _shuffleCollectionItems(
+    List<LiveTvMediaItem> collectionItems, {
+    required String name,
+  }) async {
+    final playable = collectionItems
+        .map(_libraryItemFromMedia)
+        .whereType<LiveTvLibraryItem>()
+        .toList();
+    if (playable.isEmpty) {
+      return;
+    }
+    await PlaylistPlayback(
+      profileId: widget.profileId,
+      open: widget.playlistSegmentOpener ?? openPlaylistSegment,
+    ).play(
+      context,
+      playlistId: 'collection-${DateTime.now().microsecondsSinceEpoch}',
+      name: name,
+      items: [for (final item in playable) vodHubItem(item)],
+      shuffle: true,
+    );
+  }
+
   Future<void> _shuffleWithinFilters() async {
     final candidates = visibleItems;
     if (candidates.isEmpty) {
       return;
     }
-    final movieCandidates = candidates
-        .where((item) => !item.series)
-        .where((item) => _libraryItemFromMedia(item) != null)
+    final playableCandidates = candidates
+        .map(_libraryItemFromMedia)
+        .whereType<LiveTvLibraryItem>()
         .toList();
-    if (movieCandidates.isNotEmpty) {
+    if (playableCandidates.isNotEmpty) {
       final collectionLabel = activeCollectionId == null
           ? null
           : _seasonalCollections
@@ -2173,10 +2379,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               ? '${selectedGenres.length} genres'
               : groupFilter != 'All'
               ? groupFilter
+              : tab == _MediaTab.series
+              ? 'Series'
+              : tab == _MediaTab.collections
+              ? 'Collections'
               : 'Movies');
       final message =
           'Shuffling $scopeLabel · '
-          '${movieCandidates.length} eligible titles.';
+          '${playableCandidates.length} eligible titles.';
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -2192,10 +2402,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         context,
         playlistId: 'filtered-${DateTime.now().microsecondsSinceEpoch}',
         name: scopeLabel,
-        items: [
-          for (final item in movieCandidates)
-            vodHubItem(_libraryItemFromMedia(item)!),
-        ],
+        items: [for (final item in playableCandidates) vodHubItem(item)],
         shuffle: true,
       );
       return;
@@ -2385,6 +2592,246 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
   }
 
+  LiveTvMediaItem? _mediaItemForLibraryItem(LiveTvLibraryItem item) {
+    for (final candidate in [...movies, ...series, ...adultMovies, ...adultSeries]) {
+      if (candidate.id != item.mediaId) {
+        continue;
+      }
+      final origin = mediaItemOrigins[candidate];
+      if (origin?.sourceId == item.sourceId) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _identifyLibraryItemWithTmdb(
+    LiveTvLibraryItem item, {
+    LiveTvMediaItem? reference,
+  }) async {
+    final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
+    if (tmdbApiKey.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Set a TMDB API key in settings first.')),
+        );
+      }
+      return;
+    }
+    final target = reference ?? _mediaItemForLibraryItem(item);
+    final mediaType = item.mediaType == 'movie' ? 'movie' : 'series';
+    final query = (target?.title ?? item.title).trim();
+    final candidate = await _showTmdbIdentifyPicker(
+      initialQuery: query,
+      series: mediaType != 'movie',
+      tmdbApiKey: tmdbApiKey,
+    );
+    if (candidate == null) {
+      return;
+    }
+    final metadata = await service.loadTmdbMetadataDetailsById(
+      mediaId: candidate.mediaId,
+      series: mediaType != 'movie',
+      tmdbApiKey: tmdbApiKey,
+    );
+    if (metadata == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('TMDB details could not be loaded.')),
+        );
+      }
+      return;
+    }
+    final override = LiveTvTmdbOverride(
+      sourceId: item.sourceId,
+      mediaType: mediaType,
+      mediaId: item.mediaId,
+      tmdbId: candidate.mediaId,
+      series: mediaType != 'movie',
+      title: candidate.title,
+      posterUrl: metadata.posterUrl ?? candidate.posterUrl,
+      backdropUrl: metadata.backdropUrl ?? candidate.backdropUrl,
+      overview: metadata.overview ?? candidate.overview,
+      year: metadata.year ?? candidate.year,
+      genres: metadata.genres,
+      releaseDate: candidate.releaseDate,
+      updatedAtUtc: DateTime.now().toUtc(),
+    );
+    await HomePreferences().upsertLiveTvTmdbOverride(widget.profileId, override);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _tmdbOverridesByKey[override.key] = override;
+      _applyTmdbOverridesToCatalog();
+    });
+    unawaited(_scheduleProfileSync());
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Updated metadata to "${candidate.title}".')),
+      );
+    }
+  }
+
+  Future<LiveTvTmdbSearchCandidate?> _showTmdbIdentifyPicker({
+    required String initialQuery,
+    required bool series,
+    required String tmdbApiKey,
+  }) async {
+    final queryController = TextEditingController(text: initialQuery);
+    try {
+      var pending = false;
+      var seeded = false;
+      var errorText = '';
+      var results = const <LiveTvTmdbSearchCandidate>[];
+      return await showDialog<LiveTvTmdbSearchCandidate>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            Future<void> searchNow() async {
+              final query = queryController.text.trim();
+              if (query.isEmpty || pending) {
+                return;
+              }
+              setDialogState(() {
+                pending = true;
+                errorText = '';
+              });
+              try {
+                final found = await service.searchTmdbTitles(
+                  query: query,
+                  series: series,
+                  tmdbApiKey: tmdbApiKey,
+                );
+                if (!ctx.mounted) {
+                  return;
+                }
+                setDialogState(() {
+                  results = found;
+                });
+              } catch (error, stackTrace) {
+                AppLog.warn(
+                  LogCategory.catalog,
+                  'TMDB identify search failed',
+                  error: error,
+                  stackTrace: stackTrace,
+                  details: {'query': query, 'series': series},
+                );
+                if (!ctx.mounted) {
+                  return;
+                }
+                setDialogState(() {
+                  errorText = 'Could not search TMDB right now.';
+                });
+              } finally {
+                if (ctx.mounted) {
+                  setDialogState(() => pending = false);
+                }
+              }
+            }
+
+            if (!seeded && initialQuery.trim().isNotEmpty) {
+              seeded = true;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (ctx.mounted) {
+                  unawaited(searchNow());
+                }
+              });
+            }
+            return AlertDialog(
+              title: Text(series ? 'Identify series' : 'Identify movie'),
+              content: SizedBox(
+                width: 680,
+                height: 520,
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: queryController,
+                            autofocus: true,
+                            textInputAction: TextInputAction.search,
+                            onSubmitted: (_) => unawaited(searchNow()),
+                            decoration: const InputDecoration(
+                              labelText: 'Search TMDB',
+                              hintText: 'Type a title',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton.icon(
+                          onPressed: pending ? null : () => unawaited(searchNow()),
+                          icon: const Icon(Icons.search),
+                          label: const Text('Search'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (pending) const LinearProgressIndicator(),
+                    if (errorText.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(errorText, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+                    ],
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: results.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'No matches yet. Search for the correct title.',
+                                textAlign: TextAlign.center,
+                              ),
+                            )
+                          : ListView.separated(
+                              itemCount: results.length,
+                              separatorBuilder: (_, __) => const Divider(height: 1),
+                              itemBuilder: (_, index) {
+                                final result = results[index];
+                                return ListTile(
+                                  leading: result.posterUrl?.trim().isNotEmpty == true
+                                      ? Image.network(
+                                          result.posterUrl!,
+                                          width: 40,
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) =>
+                                              const Icon(Icons.movie),
+                                        )
+                                      : const Icon(Icons.movie),
+                                  title: Text(
+                                    result.year == null
+                                        ? result.title
+                                        : '${result.title} (${result.year})',
+                                  ),
+                                  subtitle: Text(
+                                    result.overview?.trim().isNotEmpty == true
+                                        ? result.overview!
+                                        : 'No summary available.',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  onTap: () => Navigator.pop(ctx, result),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      queryController.dispose();
+    }
+  }
+
   Future<void> _toggleFavorite(LiveTvLibraryItem item) async {
     final active = favorites.any((entry) => entry.key == item.key);
     try {
@@ -2462,11 +2909,252 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (!mounted) {
       return;
     }
-    await addToMixedPlaylist(
+    final playlistItems = await _playlistItemsForLibraryItem(item);
+    if (!mounted || playlistItems.isEmpty) {
+      return;
+    }
+    final promptTitle =
+        item.mediaType == 'series' && playlistItems.length > 1
+        ? 'Add "${item.title}" (${playlistItems.length} episodes) to a playlist'
+        : null;
+    await addToMixedPlaylistItems(
       context,
       profileId: widget.profileId,
-      item: vodHubItem(item),
+      items: playlistItems,
+      promptTitle: promptTitle,
     );
+  }
+
+  Future<List<HubItem>> _playlistItemsForLibraryItem(
+    LiveTvLibraryItem item,
+  ) async {
+    if (item.mediaType != 'series') {
+      return [vodHubItem(item)];
+    }
+    final foundSource = sources.where((entry) => entry.id == item.sourceId);
+    if (foundSource.isEmpty) {
+      return [vodHubItem(item)];
+    }
+    final selectedSource = foundSource.first;
+    var candidates = series;
+    if (candidates.isEmpty || source?.id != selectedSource.id) {
+      if (_isManagedSource(selectedSource)) {
+        final managed = managedCatalogBySourceId[selectedSource.id];
+        candidates = managed == null
+            ? const <LiveTvMediaItem>[]
+            : List<LiveTvMediaItem>.from(managed.series);
+      } else {
+        candidates = await _loadSeriesFor(selectedSource);
+      }
+    }
+    LiveTvMediaItem? seriesItem;
+    for (final candidate in candidates) {
+      if (candidate.id == item.mediaId ||
+          candidate.seriesId == item.mediaId ||
+          candidate.title.toLowerCase() == item.title.toLowerCase()) {
+        seriesItem = candidate;
+        break;
+      }
+    }
+    if (seriesItem == null) {
+      return [vodHubItem(item)];
+    }
+    final details = _isManagedSourceId(selectedSource.id)
+        ? _managedSeriesDetails(
+            sourceId: selectedSource.id,
+            seriesId: seriesItem.seriesId ?? seriesItem.id,
+          )
+        : isJellyfinSourceId(selectedSource.id)
+        ? await _jellyfinSeriesDetails(seriesItem)
+        : await service.loadSeriesDetails(
+            selectedSource,
+            seriesItem.seriesId ?? seriesItem.id,
+            seriesItem.title,
+          );
+    final episodes = details?.episodes ?? const <LiveTvSeriesEpisode>[];
+    if (episodes.isEmpty) {
+      return [vodHubItem(item)];
+    }
+    final orderedEpisodes = [...episodes]..sort((a, b) {
+      final bySeason = a.season.compareTo(b.season);
+      if (bySeason != 0) {
+        return bySeason;
+      }
+      return a.episode.compareTo(b.episode);
+    });
+    final groupId = 'series:${item.sourceId}:${item.mediaId}';
+    final groupTitle = details?.title ?? item.title;
+    return [
+      for (final episode in orderedEpisodes)
+        (() {
+          final episodeLibrary = _libraryItemFromEpisode(
+            episode,
+            seriesTitle: groupTitle,
+            seriesPosterUrl:
+                details?.posterUrl ?? item.posterUrl ?? seriesItem?.posterUrl ?? '',
+            sourceId: item.sourceId,
+            sourceName: item.sourceName,
+          );
+          final base = vodHubItem(episodeLibrary);
+          return HubItem(
+            type: base.type,
+            sourceId: base.sourceId,
+            id: base.id,
+            title: base.title,
+            sourceName: base.sourceName,
+            subtitle: base.subtitle,
+            artwork: base.artwork,
+            payload: {
+              ...base.payload,
+              'playlistGroup': {
+                'type': 'series',
+                'id': groupId,
+                'title': groupTitle,
+              },
+            },
+          );
+        })(),
+    ];
+  }
+
+  Future<void> _showLibraryItemActions(LiveTvLibraryItem item) async {
+    if (!mounted) {
+      return;
+    }
+    await _showAnchoredItemMenu(
+      item: item,
+      onIdentify: () => unawaited(
+        _identifyLibraryItemWithTmdb(
+          item,
+          reference: _mediaItemForLibraryItem(item),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAnchoredItemMenu({
+    required LiveTvLibraryItem item,
+    Offset? anchor,
+    VoidCallback? onGoToMovieDetails,
+    VoidCallback? onGoToShow,
+    VoidCallback? onGoToSeason,
+    VoidCallback? onGoToEpisode,
+    VoidCallback? onIdentify,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+    final watchlisted = _isFavorite(
+      item.sourceId,
+      item.mediaType,
+      item.mediaId,
+    );
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) {
+      return;
+    }
+    final probe =
+        anchor ?? overlay.localToGlobal(overlay.size.center(Offset.zero));
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        probe.dx,
+        probe.dy,
+        overlay.size.width - probe.dx,
+        overlay.size.height - probe.dy,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'favorite',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(watchlisted ? Icons.favorite : Icons.favorite_border),
+            title: Text(
+              watchlisted ? 'Remove from favorites' : 'Add to favorites',
+            ),
+          ),
+        ),
+        const PopupMenuItem<String>(
+          value: 'playlist',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.playlist_add),
+            title: Text('Add to playlist'),
+          ),
+        ),
+        if (onGoToMovieDetails != null)
+          const PopupMenuItem<String>(
+            value: 'movie-details',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.info_outline),
+              title: Text('Go to movie details'),
+            ),
+          ),
+        if (onGoToShow != null)
+          const PopupMenuItem<String>(
+            value: 'show',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.tv),
+              title: Text('Go to show'),
+            ),
+          ),
+        if (onGoToSeason != null)
+          const PopupMenuItem<String>(
+            value: 'season',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.view_agenda_outlined),
+              title: Text('Go to season'),
+            ),
+          ),
+        if (onGoToEpisode != null)
+          const PopupMenuItem<String>(
+            value: 'episode',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.movie_outlined),
+              title: Text('Go to episode'),
+            ),
+          ),
+        if (onIdentify != null)
+          const PopupMenuItem<String>(
+            value: 'identify',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.manage_search_outlined),
+              title: Text('Identify with TMDB'),
+            ),
+          ),
+      ],
+    );
+    switch (selected) {
+      case 'favorite':
+        await _toggleFavorite(item);
+        break;
+      case 'playlist':
+        await _addToPlaylist(item);
+        break;
+      case 'movie-details':
+        onGoToMovieDetails?.call();
+        break;
+      case 'show':
+        onGoToShow?.call();
+        break;
+      case 'season':
+        onGoToSeason?.call();
+        break;
+      case 'episode':
+        onGoToEpisode?.call();
+        break;
+      case 'identify':
+        onIdentify?.call();
+        break;
+      default:
+        break;
+    }
   }
 
   Future<void> _playLibraryItem(LiveTvLibraryItem item) async {
@@ -2492,12 +3180,56 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             streamUrlCandidates: _playbackUrlCandidates(stream),
             posterUrl: item.posterUrl,
             playbackPerformance: playbackPerformance,
+            mixedSession: widget.mixedSession,
+            mixedSessionEntryId: widget.mixedSessionEntryId,
+            onShowDetailsForStream: (_) async =>
+                _showDetailsForLibraryItem(item),
+            onAddToPlaylist: (_) async => _addToPlaylist(item),
+            onToggleFavorite: (_) async => _toggleFavorite(item),
+            isFavoriteForStream: (_) =>
+                _isFavorite(item.sourceId, item.mediaType, item.mediaId),
           ),
         ),
       );
     } finally {
       unawaited(_reportMediaPlayback(item, active: false));
     }
+  }
+
+  Future<void> _showDetailsForLibraryItem(LiveTvLibraryItem item) async {
+    if (item.mediaType == 'series') {
+      await _openSeriesFromLibrary(item);
+      return;
+    }
+    if (item.mediaType == 'movie') {
+      final movieMatch = [
+        ...movies,
+        ...adultMovies,
+      ].where((entry) => entry.id == item.mediaId).firstOrNull;
+      if (movieMatch != null) {
+        await _showMediaDetails(movieMatch);
+        return;
+      }
+    }
+    final description = item.subtitle?.trim().isNotEmpty == true
+        ? '${item.title}\n\n${item.subtitle!.trim()}'
+        : item.title;
+    if (!mounted) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(item.title),
+        content: SizedBox(width: 560, child: Text(description)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _reportMediaPlayback(
@@ -2578,8 +3310,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return;
     }
     final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
+    final tmdbOverride = _tmdbOverrideForItem(item);
     final metadata = tmdbApiKey.trim().isEmpty
         ? null
+        : tmdbOverride != null
+        ? await service.loadTmdbMetadataDetailsById(
+            mediaId: tmdbOverride.tmdbId,
+            series: tmdbOverride.series,
+            tmdbApiKey: tmdbApiKey,
+          )
         : await service.loadTmdbMetadataDetails(
             title: item.title,
             series: item.series,
@@ -2597,10 +3336,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               : 'No synopsis available for this item.');
     final trailerUrl = metadata?.trailerUrl;
     final cast = metadata?.cast ?? const <String>[];
+    final castCredits = metadata?.castCredits ?? const <LiveTvPersonCredit>[];
     final crew = metadata?.crew ?? const <String>[];
+    final crewCredits = metadata?.crewCredits ?? const <LiveTvPersonCredit>[];
     final genres = metadata?.genres ?? const <String>[];
     final advisories = metadata?.advisories ?? const <String>[];
     final relatedTmdb = metadata?.relatedTitles ?? const <String>[];
+    final relatedItems = metadata?.relatedItems ?? const <LiveTvRelatedTitle>[];
     final extras = metadata?.extras ?? const <LiveTvMediaExtraLink>[];
     final year = metadata?.year ?? _yearFromTitle(item.title);
     final runtime = metadata?.runtimeMinutes;
@@ -2765,6 +3507,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                   icon: const Icon(Icons.playlist_add),
                                   label: const Text('Add to Playlist'),
                                 ),
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    Navigator.pop(ctx);
+                                    unawaited(
+                                      _identifyLibraryItemWithTmdb(
+                                        libraryItem,
+                                        reference: item,
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(Icons.manage_search_outlined),
+                                  label: const Text('Identify'),
+                                ),
                                 if (!item.series && resumeMs > 15000)
                                   OutlinedButton.icon(
                                     onPressed: () {
@@ -2904,11 +3659,54 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                   if (cast.isNotEmpty) ...[
                     section('Cast', [
                       Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: cast
-                            .map((name) => Chip(label: Text(name)))
-                            .toList(),
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: (castCredits.isNotEmpty
+                                ? castCredits
+                                      .map(
+                                        (entry) => SizedBox(
+                                          width: 128,
+                                          child: Column(
+                                            children: [
+                                              CircleAvatar(
+                                                radius: 28,
+                                                backgroundImage:
+                                                    entry.photoUrl?.trim().isNotEmpty ==
+                                                        true
+                                                    ? NetworkImage(entry.photoUrl!)
+                                                    : null,
+                                                child:
+                                                    entry.photoUrl?.trim().isNotEmpty ==
+                                                        true
+                                                    ? null
+                                                    : const Icon(Icons.person),
+                                              ),
+                                              const SizedBox(height: 6),
+                                              Text(
+                                                entry.name,
+                                                textAlign: TextAlign.center,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              if (entry.role?.trim().isNotEmpty ==
+                                                  true)
+                                                Text(
+                                                  entry.role!,
+                                                  textAlign: TextAlign.center,
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: Theme.of(ctx)
+                                                      .textTheme
+                                                      .bodySmall,
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                      )
+                                      .toList()
+                                : cast
+                                      .map((name) => Chip(label: Text(name)))
+                                      .toList()),
                       ),
                     ]),
                   ],
@@ -2917,9 +3715,30 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       Wrap(
                         spacing: 8,
                         runSpacing: 8,
-                        children: crew
-                            .map((name) => Chip(label: Text(name)))
-                            .toList(),
+                        children: crewCredits.isNotEmpty
+                            ? crewCredits
+                                  .map(
+                                    (entry) => Chip(
+                                      label: Text(
+                                        entry.role?.trim().isNotEmpty == true
+                                            ? '${entry.name} (${entry.role})'
+                                            : entry.name,
+                                      ),
+                                      avatar:
+                                          entry.photoUrl?.trim().isNotEmpty ==
+                                              true
+                                          ? CircleAvatar(
+                                              backgroundImage: NetworkImage(
+                                                entry.photoUrl!,
+                                              ),
+                                            )
+                                          : null,
+                                    ),
+                                  )
+                                  .toList()
+                            : crew
+                                  .map((name) => Chip(label: Text(name)))
+                                  .toList(),
                       ),
                     ]),
                   ],
@@ -2991,6 +3810,29 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               },
                             ),
                           ),
+                          ...relatedItems
+                              .where(
+                                (entry) => !relatedLocal
+                                    .map((entry) => entry.title.toLowerCase())
+                                    .contains(entry.title.toLowerCase()),
+                              )
+                              .map(
+                                (entry) => Chip(
+                                  avatar: entry.posterUrl?.trim().isNotEmpty ==
+                                          true
+                                      ? CircleAvatar(
+                                          backgroundImage: NetworkImage(
+                                            entry.posterUrl!,
+                                          ),
+                                        )
+                                      : null,
+                                  label: Text(
+                                    entry.year == null
+                                        ? entry.title
+                                        : '${entry.title} (${entry.year})',
+                                  ),
+                                ),
+                              ),
                           ...relatedTmdb
                               .where(
                                 (title) => !relatedLocal
@@ -3017,6 +3859,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     required String seriesPoster,
     required String sourceId,
     required String sourceName,
+    String? seriesDescription,
+    Future<void> Function()? onGoToSeries,
   }) async {
     final item = _libraryItemFromEpisode(
       episode,
@@ -3025,68 +3869,192 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       sourceId: sourceId,
       sourceName: sourceName,
     );
-    await showModalBottomSheet<void>(
+    await showDialog<void>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                item.subtitle ?? episode.title,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                episode.description?.trim().isNotEmpty == true
-                    ? episode.description!
-                    : 'No episode synopsis available from source.',
-                style: TextStyle(color: _LiveTvMediaPaint.onSurface70),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
+      builder: (ctx) {
+        final episodeSynopsis = episode.description?.trim().isNotEmpty == true
+            ? episode.description!.trim()
+            : 'No episode synopsis available from source.';
+        final showSynopsis = seriesDescription?.trim().isNotEmpty == true
+            ? seriesDescription!.trim()
+            : 'No series synopsis available.';
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 24,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 980, maxHeight: 760),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  FilledButton.icon(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      unawaited(_playLibraryItem(item));
-                    },
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Play Episode'),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: seriesPoster.trim().isEmpty
+                            ? Container(
+                                width: 140,
+                                height: 200,
+                                color: context.millitopTheme.panelColor,
+                                alignment: Alignment.center,
+                                child: const Icon(Icons.tv, size: 44),
+                              )
+                            : Image.network(
+                                seriesPoster,
+                                width: 140,
+                                height: 200,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Container(
+                                  width: 140,
+                                  height: 200,
+                                  color: context.millitopTheme.panelColor,
+                                  alignment: Alignment.center,
+                                  child: const Icon(Icons.tv, size: 44),
+                                ),
+                              ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              seriesTitle,
+                              style: const TextStyle(
+                                fontSize: 28,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'S${episode.season}E${episode.episode} · ${episode.title}',
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                Chip(label: Text('Source: $sourceName')),
+                                Chip(label: Text('Season ${episode.season}')),
+                                Chip(label: Text('Episode ${episode.episode}')),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      unawaited(_toggleFavorite(item));
-                    },
-                    icon: Icon(
-                      _isFavorite(item.sourceId, item.mediaType, item.mediaId)
-                          ? Icons.favorite
-                          : Icons.favorite_border,
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: ListView(
+                      children: [
+                        Text(
+                          episodeSynopsis,
+                          style: TextStyle(
+                            color: _LiveTvMediaPaint.onSurface70,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: context.millitopTheme.panelColor.withAlpha(
+                              120,
+                            ),
+                            borderRadius: BorderRadius.circular(
+                              context.millitopTheme.cardRadius,
+                            ),
+                            border: Border.all(
+                              color: context.millitopTheme.panelBorder,
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'About this series',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                showSynopsis,
+                                style: TextStyle(
+                                  color: _LiveTvMediaPaint.onSurface70,
+                                  height: 1.35,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                    label: const Text('Favorite'),
                   ),
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      unawaited(_addToPlaylist(item));
-                    },
-                    icon: const Icon(Icons.playlist_add),
-                    label: const Text('Add to Playlist'),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          unawaited(_playLibraryItem(item));
+                        },
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Play Episode'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          unawaited(_toggleFavorite(item));
+                        },
+                        icon: Icon(
+                          _isFavorite(
+                                item.sourceId,
+                                item.mediaType,
+                                item.mediaId,
+                              )
+                              ? Icons.favorite
+                              : Icons.favorite_border,
+                        ),
+                        label: const Text('Favorite'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          unawaited(_addToPlaylist(item));
+                        },
+                        icon: const Icon(Icons.playlist_add),
+                        label: const Text('Add to Playlist'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          if (onGoToSeries != null) {
+                            unawaited(onGoToSeries());
+                          }
+                        },
+                        icon: const Icon(Icons.tv),
+                        label: const Text('Go to series'),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -3157,6 +4125,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       final normalizedQueueIndex = movieQueue.isEmpty
           ? 0
           : queueIndex.clamp(0, movieQueue.length - 1).toInt();
+      final streamLibraryItems = <String, LiveTvLibraryItem>{};
+      if (libraryItem?.streamUrl?.trim().isNotEmpty == true) {
+        streamLibraryItems[libraryItem!.streamUrl!.trim()] = libraryItem;
+      }
+      if (queue != null) {
+        for (final entry in queue) {
+          final candidate = _libraryItemFromMedia(entry);
+          final stream = candidate?.streamUrl?.trim() ?? '';
+          if (candidate != null && stream.isNotEmpty) {
+            streamLibraryItems[stream] = candidate;
+          }
+        }
+      }
       final result = await Navigator.of(context).push<Object?>(
         MaterialPageRoute<Object?>(
           builder: (_) => _MediaPlayerScreen(
@@ -3174,6 +4155,31 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             movieQueueIndex: normalizedQueueIndex,
             mixedSession: widget.mixedSession,
             mixedSessionEntryId: widget.mixedSessionEntryId,
+            onShowDetailsForStream: (streamUrl) async {
+              final item = streamLibraryItems[streamUrl.trim()];
+              if (item != null) {
+                await _showDetailsForLibraryItem(item);
+              }
+            },
+            onAddToPlaylist: (streamUrl) async {
+              final item = streamLibraryItems[streamUrl.trim()];
+              if (item != null) {
+                await _addToPlaylist(item);
+              }
+            },
+            onToggleFavorite: (streamUrl) async {
+              final item = streamLibraryItems[streamUrl.trim()];
+              if (item != null) {
+                await _toggleFavorite(item);
+              }
+            },
+            isFavoriteForStream: (streamUrl) {
+              final item = streamLibraryItems[streamUrl.trim()];
+              if (item == null) {
+                return false;
+              }
+              return _isFavorite(item.sourceId, item.mediaType, item.mediaId);
+            },
           ),
         ),
       );
@@ -3221,6 +4227,32 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             playbackPerformance: playbackPerformance,
             mixedSession: widget.mixedSession,
             mixedSessionEntryId: widget.mixedSessionEntryId,
+            onShowDetailsForStream: (_) async {
+              await _showMediaDetails(item);
+            },
+            onAddToPlaylist: (_) async {
+              final libraryItem = _libraryItemFromMedia(item);
+              if (libraryItem != null) {
+                await _addToPlaylist(libraryItem);
+              }
+            },
+            onToggleFavorite: (_) async {
+              final libraryItem = _libraryItemFromMedia(item);
+              if (libraryItem != null) {
+                await _toggleFavorite(libraryItem);
+              }
+            },
+            isFavoriteForStream: (_) {
+              final libraryItem = _libraryItemFromMedia(item);
+              if (libraryItem == null) {
+                return false;
+              }
+              return _isFavorite(
+                libraryItem.sourceId,
+                libraryItem.mediaType,
+                libraryItem.mediaId,
+              );
+            },
           ),
         ),
       );
@@ -3265,6 +4297,32 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 ),
               ],
               seriesEpisodeIndex: 0,
+              onShowDetailsForStream: (_) async {
+                await _showMediaDetails(item);
+              },
+              onAddToPlaylist: (_) async {
+                final libraryItem = _libraryItemFromMedia(item);
+                if (libraryItem != null) {
+                  await _addToPlaylist(libraryItem);
+                }
+              },
+              onToggleFavorite: (_) async {
+                final libraryItem = _libraryItemFromMedia(item);
+                if (libraryItem != null) {
+                  await _toggleFavorite(libraryItem);
+                }
+              },
+              isFavoriteForStream: (_) {
+                final libraryItem = _libraryItemFromMedia(item);
+                if (libraryItem == null) {
+                  return false;
+                }
+                return _isFavorite(
+                  libraryItem.sourceId,
+                  libraryItem.mediaType,
+                  libraryItem.mediaId,
+                );
+              },
             ),
           ),
         );
@@ -3288,8 +4346,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             item.title,
           );
     final tmdbApiKey = await HomePreferences().tmdbApiKey(widget.profileId);
+    final tmdbOverride = _tmdbOverrideForItem(item, mediaType: 'series');
     final metadata = tmdbApiKey.trim().isEmpty
         ? null
+        : tmdbOverride != null
+        ? await service.loadTmdbMetadataDetailsById(
+            mediaId: tmdbOverride.tmdbId,
+            series: true,
+            tmdbApiKey: tmdbApiKey,
+          )
         : await service.loadTmdbMetadataDetails(
             title: item.title,
             series: true,
@@ -3393,6 +4458,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           status: metadata?.status,
           contentRating: metadata?.contentRating,
           genres: metadata?.genres ?? const [],
+          castCredits: metadata?.castCredits ?? const [],
+          relatedItems: metadata?.relatedItems ?? const [],
           followed: followed,
           nextUpLabel: nextUpLabel,
           seriesProgress: progress,
@@ -3403,6 +4470,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             seriesPoster: seriesDetails.posterUrl ?? item.posterUrl ?? '',
             sourceId: origin.sourceId,
             sourceName: origin.sourceName,
+            seriesDescription: seriesDetails.description ?? item.description,
+            onGoToSeries: () async {},
           ),
           onToggleFollow: () async {
             final seriesLibrary = _libraryItemFromMedia(item);
@@ -3410,6 +4479,13 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               return;
             }
             await _toggleFavorite(seriesLibrary);
+          },
+          onAddToPlaylist: () async {
+            final seriesLibrary = _libraryItemFromMedia(item);
+            if (seriesLibrary == null) {
+              return;
+            }
+            await _addToPlaylist(seriesLibrary);
           },
           onPlay: (episode) async {
             await _saveHistory(
@@ -3429,6 +4505,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               return;
             }
             try {
+              final episodeLibraryItems = <String, LiveTvLibraryItem>{};
+              for (final seriesEpisode in seriesDetails.episodes) {
+                final streamLibraryItem = _libraryItemFromEpisode(
+                  seriesEpisode,
+                  seriesTitle: seriesDetails.title,
+                  seriesPosterUrl:
+                      seriesDetails.posterUrl ?? item.posterUrl ?? '',
+                  sourceId: origin.sourceId,
+                  sourceName: origin.sourceName,
+                );
+                final stream = streamLibraryItem.streamUrl?.trim() ?? '';
+                if (stream.isNotEmpty) {
+                  episodeLibraryItems[stream] = streamLibraryItem;
+                }
+              }
               await Navigator.of(context).push<void>(
                 MaterialPageRoute<void>(
                   builder: (_) => _MediaPlayerScreen(
@@ -3526,6 +4617,50 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                       final next = episodes[index + 1];
                       return 'S${next.season}E${next.episode} · ${next.title}';
                     }(),
+                    onAddToPlaylist: (streamUrl) async {
+                      final libraryItem = episodeLibraryItems[streamUrl.trim()];
+                      if (libraryItem != null) {
+                        await _addToPlaylist(libraryItem);
+                      }
+                    },
+                    onShowDetailsForStream: (streamUrl) async {
+                      final libraryItem = episodeLibraryItems[streamUrl.trim()];
+                      if (libraryItem == null) {
+                        return;
+                      }
+                      final match = seriesDetails.episodes.firstWhere(
+                        (entry) => libraryItem.streamUrl?.trim() == entry.streamUrl.trim(),
+                        orElse: () => episode,
+                      );
+                      await _showEpisodeDetails(
+                        match,
+                        seriesTitle: seriesDetails.title,
+                        seriesPoster:
+                            seriesDetails.posterUrl ?? item.posterUrl ?? '',
+                        sourceId: origin.sourceId,
+                        sourceName: origin.sourceName,
+                        seriesDescription:
+                            seriesDetails.description ?? item.description,
+                        onGoToSeries: () async {},
+                      );
+                    },
+                    onToggleFavorite: (streamUrl) async {
+                      final libraryItem = episodeLibraryItems[streamUrl.trim()];
+                      if (libraryItem != null) {
+                        await _toggleFavorite(libraryItem);
+                      }
+                    },
+                    isFavoriteForStream: (streamUrl) {
+                      final libraryItem = episodeLibraryItems[streamUrl.trim()];
+                      if (libraryItem == null) {
+                        return false;
+                      }
+                      return _isFavorite(
+                        libraryItem.sourceId,
+                        libraryItem.mediaType,
+                        libraryItem.mediaId,
+                      );
+                    },
                   ),
                 ),
               );
@@ -3628,6 +4763,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     return switch (tab) {
       _MediaTab.adult => showAdult,
       _MediaTab.movies => item.mediaType == 'movie',
+      _MediaTab.collections => item.mediaType == 'movie',
       _MediaTab.series => _isSeriesRecent(item),
     };
   }
@@ -3638,6 +4774,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     return switch (tab) {
       _MediaTab.movies => 'Search movies',
+      _MediaTab.collections => 'Search movie collections',
       _MediaTab.series => 'Search series',
       _MediaTab.adult => 'Search adult titles',
     };
@@ -3649,6 +4786,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     return switch (tab) {
       _MediaTab.movies => 'Continue watching movies',
+      _MediaTab.collections => 'Continue watching collections',
       _MediaTab.series => 'Continue watching series',
       _MediaTab.adult => 'Continue watching',
     };
@@ -3656,6 +4794,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   String get _browseContextTitle => switch (tab) {
     _MediaTab.movies => 'Movies library',
+    _MediaTab.collections => 'Collections library',
     _MediaTab.series => 'Series library',
     _MediaTab.adult => 'Adult library',
   };
@@ -3734,6 +4873,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           (item) => switch (tab) {
             _MediaTab.adult => showAdult,
             _MediaTab.movies => item.mediaType == 'movie',
+            _MediaTab.collections => item.mediaType == 'movie',
             _MediaTab.series =>
               item.mediaType == 'series' || item.mediaType == 'episode',
           },
@@ -3998,6 +5138,21 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         });
       },
     ),
+    ChoiceChip(
+      key: const ValueKey('media-tab-collections'),
+      label: const Text('Collections'),
+      selected: !homeView && tab == _MediaTab.collections,
+      onSelected: (selected) {
+        if (!selected) {
+          return;
+        }
+        setState(() {
+          homeView = false;
+          tab = _MediaTab.collections;
+          groupFilter = 'All';
+        });
+      },
+    ),
     if (showAdult)
       ChoiceChip(
         key: const ValueKey('media-tab-adult'),
@@ -4095,6 +5250,31 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       icon: item.series ? Icons.tv : Icons.movie_outlined,
       onTap: () =>
           unawaited(item.series ? _openSeries(item) : _showMediaDetails(item)),
+      onMoreAt: (anchor) {
+        final libraryItem = _libraryItemFromMedia(item);
+        if (libraryItem == null) {
+          return;
+        }
+        unawaited(
+          _showAnchoredItemMenu(
+            item: libraryItem,
+            anchor: anchor,
+            onGoToMovieDetails: item.series
+                ? null
+                : () => unawaited(_showMediaDetails(item)),
+            onGoToShow: item.series ? () => unawaited(_openSeries(item)) : null,
+            onGoToSeason: item.series
+                ? () => unawaited(_openSeries(item))
+                : null,
+            onGoToEpisode: item.series
+                ? () => unawaited(_openSeries(item))
+                : null,
+            onIdentify: () => unawaited(
+              _identifyLibraryItemWithTmdb(libraryItem, reference: item),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -4125,6 +5305,105 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       badgeColor: MediaSourceColors.jellyfin,
       icon: entry.isSeries || entry.isEpisode ? Icons.tv : Icons.movie_outlined,
       onTap: () => unawaited(_openJellyfinEntry(entry, play: play)),
+      onMoreAt: (anchor) =>
+          unawaited(_showJellyfinEntryActions(entry, anchor: anchor)),
+    );
+  }
+
+  bool _ensureMediaOrigin(LiveTvMediaItem item) {
+    if (mediaItemOrigins.containsKey(item)) {
+      return true;
+    }
+    final jellyfinSources = jellyfinAccount?.sources ?? const [];
+    if (jellyfinSources.isEmpty) {
+      return false;
+    }
+    final first = jellyfinSources.first;
+    mediaItemOrigins[item] = _MediaItemSourceOrigin(
+      sourceId: first.id,
+      sourceName: first.name,
+      source: first,
+    );
+    return true;
+  }
+
+  Future<void> _showJellyfinEntryActions(
+    JellyfinEntry entry, {
+    Offset? anchor,
+  }) async {
+    final list = entry.isSeries ? series : movies;
+    final item = list.firstWhere(
+      (candidate) => candidate.id == entry.media.id,
+      orElse: () => entry.media,
+    );
+    if (!_ensureMediaOrigin(item)) {
+      return;
+    }
+    final libraryItem = _libraryItemFromMedia(item);
+    if (libraryItem == null) {
+      return;
+    }
+    VoidCallback? goToShow;
+    VoidCallback? goToSeason;
+    VoidCallback? goToEpisode;
+    VoidCallback? goToMovieDetails;
+    if (entry.isEpisode) {
+      final seriesItem = _jellyfinSeriesItemForEpisode(entry, item);
+      goToShow = () => unawaited(_openSeries(seriesItem));
+      goToSeason = () => unawaited(_openSeries(seriesItem));
+      goToEpisode = () => unawaited(_openJellyfinEntry(entry));
+    } else if (entry.isSeries || item.series) {
+      goToShow = () => unawaited(_openSeries(item));
+      goToSeason = () => unawaited(_openSeries(item));
+    } else {
+      goToMovieDetails = () => unawaited(_showMediaDetails(item));
+    }
+    await _showAnchoredItemMenu(
+      item: libraryItem,
+      anchor: anchor,
+      onGoToMovieDetails: goToMovieDetails,
+      onGoToShow: goToShow,
+      onGoToSeason: goToSeason,
+      onGoToEpisode: goToEpisode,
+      onIdentify: () => unawaited(
+        _identifyLibraryItemWithTmdb(libraryItem, reference: item),
+      ),
+    );
+  }
+
+  LiveTvMediaItem _jellyfinSeriesItemForEpisode(
+    JellyfinEntry entry,
+    LiveTvMediaItem fallback,
+  ) {
+    final rawSeriesId = entry.seriesId?.trim() ?? '';
+    if (rawSeriesId.isNotEmpty) {
+      final match = series.firstWhere(
+        (candidate) =>
+            candidate.id == 'jf:$rawSeriesId' ||
+            candidate.id == rawSeriesId ||
+            candidate.seriesId == rawSeriesId,
+        orElse: () => LiveTvMediaItem(
+          id: 'jf:$rawSeriesId',
+          title: entry.seriesName ?? fallback.title,
+          streamUrl: fallback.streamUrl,
+          posterUrl: fallback.posterUrl ?? entry.media.posterUrl,
+          description: fallback.description ?? entry.media.description,
+          backdropUrl: fallback.backdropUrl ?? entry.media.backdropUrl,
+          series: true,
+          seriesId: rawSeriesId,
+        ),
+      );
+      return match;
+    }
+    return LiveTvMediaItem(
+      id: fallback.id,
+      title: entry.seriesName ?? fallback.title,
+      streamUrl: fallback.streamUrl,
+      posterUrl: fallback.posterUrl ?? entry.media.posterUrl,
+      description: fallback.description ?? entry.media.description,
+      backdropUrl: fallback.backdropUrl ?? entry.media.backdropUrl,
+      series: true,
+      seriesId: fallback.seriesId ?? fallback.id,
     );
   }
 
@@ -4134,26 +5413,67 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     JellyfinEntry entry, {
     bool play = false,
   }) async {
-    if (entry.isEpisode) {
-      await _playJellyfinEpisode(entry);
-      return;
-    }
     final list = entry.isSeries ? series : movies;
     final item = list.firstWhere(
       (candidate) => candidate.id == entry.media.id,
       orElse: () => entry.media,
     );
-    if (!mediaItemOrigins.containsKey(item)) {
-      final jellyfinSources = jellyfinAccount?.sources ?? const [];
-      if (jellyfinSources.isEmpty) {
-        return;
-      }
-      final first = jellyfinSources.first;
-      mediaItemOrigins[item] = _MediaItemSourceOrigin(
-        sourceId: first.id,
-        sourceName: first.name,
-        source: first,
+    if (!_ensureMediaOrigin(item)) {
+      return;
+    }
+    if (entry.isEpisode) {
+      final origin = mediaItemOrigins[item]!;
+      final details = await _jellyfinSeriesDetails(
+        LiveTvMediaItem(
+          id: 'jf:${entry.seriesId ?? item.seriesId ?? item.id}',
+          title: entry.seriesName ?? item.title,
+          streamUrl: item.streamUrl,
+          posterUrl: item.posterUrl,
+          description: item.description,
+          backdropUrl: item.backdropUrl,
+          series: true,
+          seriesId: entry.seriesId ?? item.seriesId ?? item.id,
+        ),
       );
+      final match =
+          details?.episodes.firstWhere(
+            (episode) =>
+                episode.id == entry.media.id ||
+                (entry.season != null &&
+                    entry.episode != null &&
+                    episode.season == entry.season &&
+                    episode.episode == entry.episode),
+            orElse: () => LiveTvSeriesEpisode(
+              id: entry.media.id,
+              title: entry.media.title,
+              streamUrl: entry.media.streamUrl,
+              season: entry.season ?? 1,
+              episode: entry.episode ?? 1,
+              posterUrl: entry.media.posterUrl,
+              description: entry.media.description,
+            ),
+          ) ??
+          LiveTvSeriesEpisode(
+            id: entry.media.id,
+            title: entry.media.title,
+            streamUrl: entry.media.streamUrl,
+            season: entry.season ?? 1,
+            episode: entry.episode ?? 1,
+            posterUrl: entry.media.posterUrl,
+            description: entry.media.description,
+          );
+      await _showEpisodeDetails(
+        match,
+        seriesTitle: details?.title ?? (entry.seriesName ?? item.title),
+        seriesPoster: details?.posterUrl ?? item.posterUrl ?? '',
+        sourceId: origin.sourceId,
+        sourceName: origin.sourceName,
+        seriesDescription: details?.description ?? item.description,
+        onGoToSeries: () async {
+          await _openSeries(_jellyfinSeriesItemForEpisode(entry, item));
+        },
+      );
+      return;
     }
     if (entry.isSeries) {
       await _openSeries(item);
@@ -4211,6 +5531,33 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
               item.season == entry.season &&
               item.episode == entry.episode),
     );
+    final jellyfinSources = jellyfinAccount?.sources ?? const <LiveTvSource>[];
+    final source = jellyfinSources.isEmpty ? null : jellyfinSources.first;
+    final episodeLibraryItems = <String, LiveTvLibraryItem>{};
+    if (source != null) {
+      for (final episode in episodeEntries) {
+        final libraryItem = _libraryItemFromEpisode(
+          LiveTvSeriesEpisode(
+            id: episode.id,
+            title: episode.title,
+            streamUrl: episode.streamUrl,
+            season: episode.season,
+            episode: episode.episode,
+            posterUrl: episode.posterUrl,
+            description: episode.description,
+          ),
+          seriesTitle:
+              details?.title ?? (entry.seriesName ?? entry.media.title),
+          seriesPosterUrl: details?.posterUrl ?? entry.media.posterUrl ?? '',
+          sourceId: source.id,
+          sourceName: source.name,
+        );
+        final stream = libraryItem.streamUrl?.trim() ?? '';
+        if (stream.isNotEmpty) {
+          episodeLibraryItems[stream] = libraryItem;
+        }
+      }
+    }
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => _MediaPlayerScreen(
@@ -4227,6 +5574,57 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           seriesEpisodePlayback: episodeEntries.isNotEmpty,
           seriesEpisodes: episodeEntries,
           seriesEpisodeIndex: currentEpisodeIndex < 0 ? 0 : currentEpisodeIndex,
+          onShowDetailsForStream: (streamUrl) async {
+            final item = episodeLibraryItems[streamUrl.trim()];
+            if (item == null) {
+              return;
+            }
+            final match = details?.episodes.firstWhere(
+              (entry) => item.streamUrl?.trim() == entry.streamUrl.trim(),
+              orElse: () => LiveTvSeriesEpisode(
+                id: item.mediaId,
+                title: item.subtitle ?? item.title,
+                streamUrl: item.streamUrl ?? '',
+                season: entry.season ?? 1,
+                episode: entry.episode ?? 1,
+                posterUrl: item.posterUrl,
+                description: item.subtitle,
+              ),
+            );
+            if (match != null) {
+              await _showEpisodeDetails(
+                match,
+                seriesTitle:
+                    details?.title ?? (entry.seriesName ?? entry.media.title),
+                seriesPoster:
+                    details?.posterUrl ?? entry.media.posterUrl ?? '',
+                sourceId: source?.id ?? item.sourceId,
+                sourceName: source?.name ?? item.sourceName,
+                seriesDescription:
+                    details?.description ?? entry.media.description,
+                onGoToSeries: () async {},
+              );
+            }
+          },
+          onAddToPlaylist: (streamUrl) async {
+            final item = episodeLibraryItems[streamUrl.trim()];
+            if (item != null) {
+              await _addToPlaylist(item);
+            }
+          },
+          onToggleFavorite: (streamUrl) async {
+            final item = episodeLibraryItems[streamUrl.trim()];
+            if (item != null) {
+              await _toggleFavorite(item);
+            }
+          },
+          isFavoriteForStream: (streamUrl) {
+            final item = episodeLibraryItems[streamUrl.trim()];
+            if (item == null) {
+              return false;
+            }
+            return _isFavorite(item.sourceId, item.mediaType, item.mediaId);
+          },
         ),
       ),
     );
@@ -4327,7 +5725,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     );
     final continueMovieCards = <MediaHomeCard>[
       for (final entry in jellyfinMovieResume)
-        _cardForJellyfin(entry, landscape: true, play: true),
+        _cardForJellyfin(entry, landscape: true),
       for (final entry in localMovieRecent) recentCard(entry),
     ];
     if (continueMovieCards.isNotEmpty) {
@@ -4341,7 +5739,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     }
     final continueSeriesCards = <MediaHomeCard>[
       for (final entry in jellyfinSeriesResume)
-        _cardForJellyfin(entry, landscape: true, play: true),
+        _cardForJellyfin(entry, landscape: true),
       for (final entry in localSeriesRecent) recentCard(entry),
     ];
     if (continueSeriesCards.isNotEmpty) {
@@ -4359,7 +5757,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         shape: MediaHomeCardShape.landscape,
         cards: [
           for (final entry in jellyfinNextUp)
-            _cardForJellyfin(entry, landscape: true, play: true),
+            _cardForJellyfin(entry, landscape: true),
         ],
       ),
     );
@@ -4484,8 +5882,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
           actionLabel: 'See all',
           onAction: () => seeAll(_MediaTab.adult),
           cards: [
-            for (final entry in jellyfinAdultResume)
-              _cardForJellyfin(entry, play: true),
+            for (final entry in jellyfinAdultResume) _cardForJellyfin(entry),
             for (final entry in adultRecentLocal) recentCard(entry),
             for (final entry in jellyfinAdultLatest) _cardForJellyfin(entry),
             for (final item in adultItems.take(24)) _cardForItem(item),
@@ -4666,9 +6063,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
 
   LibrarySection get _librarySection => homeView
       ? LibrarySection.home
-      : (tab == _MediaTab.series
-            ? LibrarySection.series
-            : LibrarySection.movies);
+      : switch (tab) {
+          _MediaTab.series => LibrarySection.series,
+          _MediaTab.collections => LibrarySection.collections,
+          _ => LibrarySection.movies,
+        };
 
   String get _sortLabel => switch (sortMode) {
     _MediaSortMode.relevance => 'Relevance',
@@ -4690,11 +6089,15 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (loading) {
       return 'Loading your movies and series libraries...';
     }
+    if (tab == _MediaTab.collections) {
+      return '$_libraryScopeLabel · ${_movieCollections.length} collections in view';
+    }
     return '$_libraryScopeLabel · ${visibleItems.length} titles in view';
   }
 
   bool get _showAlphabetRail =>
       !homeView &&
+      tab != _MediaTab.collections &&
       tab != _MediaTab.adult &&
       sortMode == _MediaSortMode.title &&
       visibleItems.isNotEmpty;
@@ -4949,15 +6352,25 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             onTap: () => _showCategoryPicker(groupOptions),
             child: InputDecorator(
               decoration: const InputDecoration(
-                labelText: 'Category',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.filter_alt_outlined),
                 suffixIcon: Icon(Icons.arrow_drop_down),
               ),
-              child: Text(
-                groupOptions.contains(groupFilter)
-                    ? groupFilter
-                    : groupOptions.first,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Category',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    groupOptions.contains(groupFilter)
+                        ? groupFilter
+                        : groupOptions.first,
+                  ),
+                ],
               ),
             ),
           ),
@@ -4968,7 +6381,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             icon: const Icon(Icons.shuffle),
             label: Text(
               selectedGenres.isEmpty
-                  ? 'Shuffle all movies'
+                  ? 'Shuffle titles in view'
                   : 'Shuffle selected genres',
             ),
           ),
@@ -5000,27 +6413,142 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       );
     }
 
+    Widget buildCollectionsCatalog() {
+      final collections = _movieCollections;
+      if (collections.isEmpty) {
+        return Center(
+          child: Text(
+            selectedGenres.isEmpty
+                ? 'No sequel collections found in this view yet.'
+                : 'No sequel collections match your filters.',
+          ),
+        );
+      }
+      return ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+        itemCount: collections.length,
+        itemBuilder: (context, index) {
+          final collection = collections[index];
+          return Card(
+            margin: const EdgeInsets.only(bottom: 12),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          collection.title,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                      Text(
+                        '${collection.items.length} films',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final item in collection.items.take(4))
+                        Chip(
+                          label: Text(
+                            item.year == null
+                                ? item.title
+                                : '${item.title} (${item.year})',
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.tonalIcon(
+                        onPressed: () => unawaited(
+                          _shuffleCollectionItems(
+                            collection.items,
+                            name: collection.title,
+                          ),
+                        ),
+                        icon: const Icon(Icons.shuffle),
+                        label: const Text('Shuffle collection'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => showDialog<void>(
+                          context: context,
+                          builder: (dialogContext) => AlertDialog(
+                            title: Text(collection.title),
+                            content: SizedBox(
+                              width: 520,
+                              child: ListView(
+                                shrinkWrap: true,
+                                children: [
+                                  for (final item in collection.items)
+                                    ListTile(
+                                      leading: const Icon(Icons.movie_outlined),
+                                      title: Text(item.title),
+                                      subtitle: Text(
+                                        item.year?.toString() ??
+                                            mediaItemOrigins[item]?.sourceName ??
+                                            'Unknown year',
+                                      ),
+                                      onTap: () {
+                                        Navigator.pop(dialogContext);
+                                        unawaited(_openMovie(item));
+                                      },
+                                    ),
+                                ],
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(dialogContext),
+                                child: const Text('Close'),
+                              ),
+                            ],
+                          ),
+                        ),
+                        icon: const Icon(Icons.list_alt_outlined),
+                        label: const Text('Open collection'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     Widget buildCatalogGrid() {
       return LayoutBuilder(
         builder: (context, box) {
           final width = box.maxWidth;
-          final scaledWidth = width / posterCardScale.clamp(0.75, 1.4);
-          final crossAxisCount = scaledWidth >= 1480
-              ? 6
-              : scaledWidth >= 1180
-              ? 5
-              : scaledWidth >= 900
-              ? 4
-              : scaledWidth >= 620
-              ? 3
-              : 2;
-          _alphabetCrossAxisCount = crossAxisCount;
+          final scale = posterCardScale.clamp(0.75, 1.4);
           const horizontalPadding = 16.0 * 2;
           const crossSpacing = 12.0;
           const mainSpacing = 12.0;
+          const minimumColumns = 2;
+          const baseTileWidth = 240.0;
+          final availableWidth = max(1.0, width - horizontalPadding);
+          final desiredTileWidth = baseTileWidth * scale;
+          final computedColumns =
+              ((availableWidth + crossSpacing) /
+                      (desiredTileWidth + crossSpacing))
+                  .floor();
+          final crossAxisCount = max(minimumColumns, computedColumns);
+          _alphabetCrossAxisCount = crossAxisCount;
           const cardAspectRatio = 10 / 16;
           final gridWidth =
-              width - horizontalPadding - ((crossAxisCount - 1) * crossSpacing);
+              availableWidth - ((crossAxisCount - 1) * crossSpacing);
           final tileWidth = max(1.0, gridWidth / crossAxisCount);
           final tileHeight = tileWidth / cardAspectRatio;
           _alphabetTileStride = tileHeight + mainSpacing;
@@ -5042,6 +6570,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             ),
             itemBuilder: (context, index) {
               final item = items[index];
+              final libraryItem = _libraryItemFromMedia(item);
               final selected = focusedMediaId == item.id;
               final posterUrl = item.posterUrl?.trim();
               return Card(
@@ -5103,6 +6632,62 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
+                            if (libraryItem != null)
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  Builder(
+                                    builder: (buttonContext) => IconButton(
+                                      tooltip: 'More actions',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () {
+                                        final render =
+                                            buttonContext.findRenderObject()
+                                                as RenderBox?;
+                                        final anchor = switch (render) {
+                                          RenderBox box => box.localToGlobal(
+                                            box.size.center(Offset.zero),
+                                          ),
+                                          _ => null,
+                                        };
+                                        unawaited(
+                                          _showAnchoredItemMenu(
+                                            item: libraryItem,
+                                            anchor: anchor,
+                                            onGoToMovieDetails: item.series
+                                                ? null
+                                                : () => unawaited(
+                                                    _showMediaDetails(item),
+                                                  ),
+                                            onGoToShow: item.series
+                                                ? () => unawaited(
+                                                    _openSeries(item),
+                                                  )
+                                                : null,
+                                            onGoToSeason: item.series
+                                                ? () => unawaited(
+                                                    _openSeries(item),
+                                                  )
+                                                : null,
+                                            onGoToEpisode: item.series
+                                                ? () => unawaited(
+                                                    _openSeries(item),
+                                                  )
+                                                : null,
+                                            onIdentify: () => unawaited(
+                                              _identifyLibraryItemWithTmdb(
+                                                libraryItem,
+                                                reference: item,
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(Icons.more_horiz),
+                                    ),
+                                  ),
+                                ],
+                              ),
                           ],
                         ),
                       ),
@@ -5123,9 +6708,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       }
       setState(() {
         homeView = false;
-        tab = section == LibrarySection.series
-            ? _MediaTab.series
-            : _MediaTab.movies;
+        tab = switch (section) {
+          LibrarySection.series => _MediaTab.series,
+          LibrarySection.collections => _MediaTab.collections,
+          _ => _MediaTab.movies,
+        };
         groupFilter = 'All';
         _selectedAlphabetLetter = null;
       });
@@ -5334,6 +6921,19 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                             onChooseGenre: () => unawaited(_chooseGenre()),
                             sortLabel: _sortLabel,
                             onChooseSort: () => unawaited(_chooseSort()),
+                            onShuffle: () => unawaited(
+                              tab == _MediaTab.collections
+                                  ? _shuffleCollectionItems(
+                                      _movieCollections
+                                          .expand((collection) => collection.items)
+                                          .toList(),
+                                      name: 'Collections',
+                                    )
+                                  : _shuffleWithinFilters(),
+                            ),
+                            shuffleLabel: tab == _MediaTab.collections
+                                ? 'Shuffle collections'
+                                : 'Shuffle all',
                             filtersOpen: filtersOpen,
                             onToggleFilters: () {
                               setState(() => filtersOpen = !filtersOpen);
@@ -5357,7 +6957,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                             content: Column(
                               children: [
                                 _continueWatchingCard(),
-                                Expanded(child: buildCatalogGrid()),
+                                Expanded(
+                                  child: tab == _MediaTab.collections
+                                      ? buildCollectionsCatalog()
+                                      : buildCatalogGrid(),
+                                ),
                               ],
                             ),
                           ),
@@ -5596,6 +7200,10 @@ class _MediaPlayerScreen extends StatefulWidget {
   final int seriesEpisodeIndex;
   final PlaylistPlaybackSession? mixedSession;
   final String? mixedSessionEntryId;
+  final Future<void> Function(String streamUrl)? onAddToPlaylist;
+  final Future<void> Function(String streamUrl)? onToggleFavorite;
+  final bool Function(String streamUrl)? isFavoriteForStream;
+  final Future<void> Function(String streamUrl)? onShowDetailsForStream;
 
   /// Set for Jellyfin titles: supplies the real stream URL and reports
   /// progress back to the server. [jellyfinFor] builds one for the next
@@ -5622,6 +7230,10 @@ class _MediaPlayerScreen extends StatefulWidget {
     this.jellyfinFor,
     this.mixedSession,
     this.mixedSessionEntryId,
+    this.onAddToPlaylist,
+    this.onToggleFavorite,
+    this.isFavoriteForStream,
+    this.onShowDetailsForStream,
   });
 
   @override
@@ -5719,12 +7331,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   bool _routeExitTriggered = false;
   bool _mixedExitSent = false;
   bool _globalShortcutsSuppressed = false;
+  DateTime? _lastManualSeekAtUtc;
+  int? _lastManualSeekTargetMs;
+  String? _activeMixedEntryId;
   final FocusScopeNode _panelFocusNode = FocusScopeNode();
   late _ActivePlaybackMedia _activeMedia = _initialActiveMedia();
   bool showMovieQueuePanel = false;
   bool showSeriesEpisodesPanel = false;
   bool get _hasMixedSession =>
-      widget.mixedSession != null && widget.mixedSessionEntryId != null;
+      widget.mixedSession != null && _activeMixedEntryId != null;
   bool get _hasMovieQueue => _movieQueue.isNotEmpty;
   bool get _hasPreviousMovieQueueItem => _hasMovieQueue && _movieQueueIndex > 0;
   bool get _hasNextMovieQueueItem =>
@@ -5747,6 +7362,24 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               (widget.seriesEpisodePlayback && _hasNextSeriesEpisode)) &&
           creditsVisible) ||
       (_hasNextMovieQueueItem && playNextPromptVisible);
+
+  String? _mixedQueueLabel() {
+    final session = widget.mixedSession;
+    if (session == null || session.entries.isEmpty) {
+      return null;
+    }
+    final entryId = _activeMixedEntryId;
+    var index = session.currentIndex;
+    if (entryId != null) {
+      final explicit = session.entries.indexWhere(
+        (entry) => entry.entryId == entryId,
+      );
+      if (explicit >= 0) {
+        index = explicit;
+      }
+    }
+    return '${index + 1}/${session.entries.length}';
+  }
 
   int get _resolvedProfileId {
     final scoped = SelectedProfileScope.maybeOf(context)?.profile.id;
@@ -5813,6 +7446,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   @override
   void initState() {
     super.initState();
+    _activeMixedEntryId = widget.mixedSessionEntryId;
     if (_movieQueue.isNotEmpty) {
       _movieQueueIndex = _movieQueueIndex.clamp(0, _movieQueue.length - 1);
     } else {
@@ -5966,6 +7600,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Future<void> _openWithPolicy(
     Player created, {
     required bool compatibleMode,
+    bool playImmediately = true,
     _ActivePlaybackMedia? media,
     JellyfinPlaybackReporter? reporter,
   }) async {
@@ -5981,7 +7616,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     for (final candidate in candidates) {
       attempt++;
       try {
-        await created.open(Media(candidate), play: true);
+        await created.open(Media(candidate), play: playImmediately);
         lastError = null;
         AppLog.info(
           LogCategory.playback,
@@ -6086,6 +7721,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       if (remoteResume > 0) {
         resumePositionMs = remoteResume;
       }
+      final needsResumeChoice = _needsResumeChoice();
       MediaKit.ensureInitialized();
       final created = Player(
         configuration: playerConfigurationFor(widget.playbackPerformance),
@@ -6121,6 +7757,20 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       );
       subscriptions.add(
         created.stream.position.listen((value) {
+          final nowUtc = DateTime.now().toUtc();
+          final recentSeek = _lastManualSeekAtUtc != null &&
+              nowUtc.difference(_lastManualSeekAtUtc!) <
+                  const Duration(seconds: 2);
+          final seekTargetMs = _lastManualSeekTargetMs;
+          if (recentSeek &&
+              seekTargetMs != null &&
+              seekTargetMs > 15000 &&
+              value.inMilliseconds < 2000) {
+            unawaited(
+              created.seek(Duration(milliseconds: seekTargetMs)),
+            );
+            return;
+          }
           if (mounted) {
             setState(() {
               position = value;
@@ -6149,9 +7799,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               }
             });
           }
-          final now = DateTime.now().toUtc();
-          if (now.difference(lastProgressWrite) >= const Duration(seconds: 5)) {
-            lastProgressWrite = now;
+          if (nowUtc.difference(lastProgressWrite) >= const Duration(seconds: 5)) {
+            lastProgressWrite = nowUtc;
             unawaited(_saveProgressSnapshot());
           }
         }),
@@ -6227,7 +7876,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           unawaited(_handlePlaybackCompleted());
         }),
       );
-      await _openWithPolicy(created, compatibleMode: forceCompatiblePlayback);
+      await _openWithPolicy(
+        created,
+        compatibleMode: forceCompatiblePlayback,
+        playImmediately: !needsResumeChoice,
+      );
       compatibilityProfileApplied = forceCompatiblePlayback;
       if (forceCompatiblePlayback) {
         qualityRoute = 'compatibility-constrained';
@@ -6255,7 +7908,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         video = controller;
       });
       _scheduleControlsAutoHide();
-      unawaited(_offerResumeIfAvailable());
+      if (needsResumeChoice) {
+        unawaited(_offerResumeIfAvailable(startAfterDecision: true));
+      }
     } catch (e) {
       if (!attemptedCompatibleFallback) {
         attemptedCompatibleFallback = true;
@@ -6468,6 +8123,36 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       return _movieQueue[_movieQueueIndex].posterUrl;
     }
     return _activeMedia.posterUrl;
+  }
+
+  bool get _canManageCurrentLibraryItem =>
+      widget.onAddToPlaylist != null || widget.onToggleFavorite != null;
+
+  bool get _currentIsFavorite =>
+      widget.isFavoriteForStream?.call(_activeMedia.streamUrl) ?? false;
+
+  Future<void> _toggleCurrentFavorite() async {
+    final action = widget.onToggleFavorite;
+    if (action == null) {
+      return;
+    }
+    await action(_activeMedia.streamUrl);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _addCurrentToPlaylist() async {
+    final action = widget.onAddToPlaylist;
+    if (action == null) {
+      return;
+    }
+    await action(_activeMedia.streamUrl);
+    if (mounted) {
+      setState(() => statusMessage = 'Added to playlist.');
+    } else {
+      statusMessage = 'Added to playlist.';
+    }
   }
 
   String _trackKindLabel(String title) {
@@ -6971,24 +8656,34 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     } catch (_) {}
   }
 
-  Future<void> _offerResumeIfAvailable() async {
-    if (showingResumePrompt) {
-      return;
-    }
-    final current = player;
-    if (!mounted || current == null) {
-      return;
-    }
+  bool _needsResumeChoice() {
     final resumeMs = resumePositionMs;
     if (resumeMs == null || resumeMs <= 15000) {
-      return;
+      return false;
     }
     if (duration.inMilliseconds > 0 &&
         resumeMs >=
             duration.inMilliseconds -
                 const Duration(seconds: 12).inMilliseconds) {
-      return;
+      return false;
     }
+    return true;
+  }
+
+  Future<bool> _offerResumeIfAvailable({
+    bool startAfterDecision = false,
+  }) async {
+    if (showingResumePrompt) {
+      return false;
+    }
+    final current = player;
+    if (!mounted || current == null) {
+      return false;
+    }
+    if (!_needsResumeChoice()) {
+      return false;
+    }
+    final resumeMs = resumePositionMs!;
     showingResumePrompt = true;
     final action = await showDialog<String>(
       context: context,
@@ -7011,13 +8706,17 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     );
     showingResumePrompt = false;
     if (!mounted || action == null) {
-      return;
+      return false;
     }
     if (action == 'resume') {
       await current.seek(Duration(milliseconds: resumeMs));
     } else {
       await current.seek(Duration.zero);
     }
+    if (startAfterDecision) {
+      await current.play();
+    }
+    return true;
   }
 
   Future<void> _attemptStreamRecovery() async {
@@ -7080,7 +8779,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (_hasMixedSession) {
       final session = widget.mixedSession!;
       final current = session.current;
-      if (current == null || current.entryId != widget.mixedSessionEntryId) {
+      if (current == null || current.entryId != _activeMixedEntryId) {
         return;
       }
       if (!session.autoplay && !force) {
@@ -7156,8 +8855,41 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       return;
     }
     final entry = _movieQueue[index];
-    await _saveFinalProgress();
+    await _saveFinalProgress(allowDuringTransition: true);
     if (!mounted) {
+      return;
+    }
+    final current = player;
+    if (current != null) {
+      _playbackSessionId += 1;
+      _activeMedia = _ActivePlaybackMedia(
+        id: entry.id,
+        title: entry.title,
+        subtitle: entry.subtitle,
+        streamUrl: entry.streamUrl,
+        streamUrlCandidates: entry.streamUrlCandidates,
+        posterUrl: entry.posterUrl ?? widget.posterUrl,
+        description: entry.description ?? widget.description,
+      );
+      jellyfin = widget.jellyfinFor?.call(entry.streamUrl);
+      resumePositionMs = 0;
+      _lastManualSeekAtUtc = null;
+      _lastManualSeekTargetMs = null;
+      await current.open(Media(jellyfin?.playUrl ?? entry.streamUrl), play: true);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _movieQueueIndex = index;
+        error = '';
+        creditsVisible = false;
+        playNextPromptVisible = false;
+        playNextPromptDismissed = false;
+        nextMoviePromptRemainingMs = const Duration(minutes: 5).inMilliseconds;
+        if (status != null && status.trim().isNotEmpty) {
+          statusMessage = status;
+        }
+      });
       return;
     }
     if (status != null && status.trim().isNotEmpty) {
@@ -7179,6 +8911,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
           movieQueueIndex: index,
           jellyfin: widget.jellyfinFor?.call(entry.streamUrl),
           jellyfinFor: widget.jellyfinFor,
+          onShowDetailsForStream: widget.onShowDetailsForStream,
+          onAddToPlaylist: widget.onAddToPlaylist,
+          onToggleFavorite: widget.onToggleFavorite,
+          isFavoriteForStream: widget.isFavoriteForStream,
         ),
       ),
     );
@@ -7457,6 +9193,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   }
 
   Future<void> _showCurrentDescription() async {
+    final detailsAction = widget.onShowDetailsForStream;
+    if (detailsAction != null) {
+      await detailsAction(_activeMedia.streamUrl);
+      return;
+    }
     final description = _currentTopDescription();
     if (description == null || description.trim().isEmpty) {
       if (mounted) {
@@ -7683,9 +9424,11 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
 
   Future<void> _switchToMixedEntry(String entryId) async {
     final session = widget.mixedSession;
-    if (session == null ||
-        session.entryById(entryId) == null ||
-        session.current?.entryId == entryId) {
+    final target = session?.entryById(entryId);
+    if (session == null || target == null || session.current?.entryId == entryId) {
+      return;
+    }
+    if (await _openMixedEntryInPlace(target)) {
       return;
     }
     await _saveFinalProgress(allowDuringTransition: true);
@@ -7698,6 +9441,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (target == null) {
       return;
     }
+    if (await _openMixedEntryInPlace(target)) {
+      return;
+    }
     await _saveFinalProgress(allowDuringTransition: true);
     _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
   }
@@ -7708,8 +9454,60 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (target == null) {
       return;
     }
+    if (await _openMixedEntryInPlace(target)) {
+      return;
+    }
     await _saveFinalProgress(allowDuringTransition: true);
     _exitMixed(PlaylistPlaybackExit.switched(target.entryId));
+  }
+
+  Future<bool> _openMixedEntryInPlace(PlaylistPlaybackEntry target) async {
+    final current = player;
+    final session = widget.mixedSession;
+    if (current == null || session == null) {
+      return false;
+    }
+    final raw = target.item.payload;
+    LiveTvLibraryItem item;
+    try {
+      item = LiveTvLibraryItem.fromJson(Map<String, dynamic>.from(raw));
+    } catch (_) {
+      return false;
+    }
+    final stream = item.streamUrl?.trim() ?? '';
+    if (stream.isEmpty) {
+      return false;
+    }
+    await _saveFinalProgress(allowDuringTransition: true);
+    session.playEntry(target.entryId);
+    _activeMixedEntryId = target.entryId;
+    _playbackSessionId += 1;
+    _activeMedia = _ActivePlaybackMedia(
+      id: item.mediaId,
+      title: item.title,
+      subtitle: item.subtitle ?? item.sourceName,
+      streamUrl: stream,
+      streamUrlCandidates: <String>[stream],
+      posterUrl: item.posterUrl,
+      description: item.subtitle,
+    );
+    jellyfin = widget.jellyfinFor?.call(stream);
+    resumePositionMs = 0;
+    _lastManualSeekAtUtc = null;
+    _lastManualSeekTargetMs = null;
+    await current.open(Media(jellyfin?.playUrl ?? stream), play: true);
+    if (!mounted) {
+      return true;
+    }
+    setState(() {
+      error = '';
+      creditsVisible = false;
+      playNextPromptVisible = false;
+      playNextPromptDismissed = false;
+      nextMoviePromptRemainingMs = const Duration(minutes: 5).inMilliseconds;
+      statusMessage = 'Playing ${item.title}';
+    });
+    return true;
   }
 
   void _moveQueueItem(int oldIndex, int newIndex) {
@@ -9162,9 +10960,15 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     if (current == null) {
       return;
     }
-    await current.seek(Duration(milliseconds: value.round()));
+    final target = value.round().clamp(0, duration.inMilliseconds);
+    _lastManualSeekAtUtc = DateTime.now().toUtc();
+    _lastManualSeekTargetMs = target;
+    await current.seek(Duration(milliseconds: target));
     if (mounted) {
-      setState(() => scrubPreviewMs = null);
+      setState(() {
+        position = Duration(milliseconds: target);
+        scrubPreviewMs = null;
+      });
     } else {
       scrubPreviewMs = null;
     }
@@ -9375,7 +11179,14 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       0,
       duration.inMilliseconds,
     );
+    _lastManualSeekAtUtc = DateTime.now().toUtc();
+    _lastManualSeekTargetMs = target;
     await current.seek(Duration(milliseconds: target));
+    if (mounted) {
+      setState(() => position = Duration(milliseconds: target));
+    } else {
+      position = Duration(milliseconds: target);
+    }
   }
 
   Future<void> _seekByConfigured(
@@ -9661,7 +11472,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                           ),
                           title: _activeMedia.title,
                           metadata: _currentTopMetaLine(),
-                          description: _currentTopDescription(),
+                          description: null,
                           poster:
                               _currentTopPosterUrl()?.trim().isNotEmpty == true
                               ? ClipRRect(
@@ -9692,6 +11503,22 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
                               unawaited(_setVolume(value)),
                           onDescription: () =>
                               unawaited(_showCurrentDescription()),
+                          onToggleFavorite: _canManageCurrentLibraryItem
+                              ? () => unawaited(_toggleCurrentFavorite())
+                              : null,
+                          favoriteActive: _currentIsFavorite,
+                          onAddToPlaylist: _canManageCurrentLibraryItem
+                              ? () => unawaited(_addCurrentToPlaylist())
+                              : null,
+                          onPreviousQueueItem: _hasMixedSession
+                              ? () => unawaited(_switchToMixedPrevious())
+                              : null,
+                          onNextQueueItem: _hasMixedSession
+                              ? () => unawaited(_switchToMixedNext())
+                              : null,
+                          queuePositionLabel: _hasMixedSession
+                              ? _mixedQueueLabel()
+                              : null,
                           onSubtitles: _pickSubtitle,
                           onSpeed: () => unawaited(_openSpeedPicker()),
                           onSettings: () => unawaited(_openPlaybackSettings()),
@@ -9766,6 +11593,8 @@ class _SeriesDetailsScreen extends StatefulWidget {
   final String? status;
   final String? contentRating;
   final List<String> genres;
+  final List<LiveTvPersonCredit> castCredits;
+  final List<LiveTvRelatedTitle> relatedItems;
   final bool followed;
   final String? nextUpLabel;
   final bool hasNewEpisode;
@@ -9773,11 +11602,14 @@ class _SeriesDetailsScreen extends StatefulWidget {
   final Future<void> Function(LiveTvSeriesEpisode episode) onPlay;
   final Future<void> Function(LiveTvSeriesEpisode episode) onEpisodeDetails;
   final Future<void> Function() onToggleFollow;
+  final Future<void> Function() onAddToPlaylist;
   const _SeriesDetailsScreen({
     required this.details,
     this.status,
     this.contentRating,
     this.genres = const [],
+    this.castCredits = const [],
+    this.relatedItems = const [],
     required this.followed,
     this.nextUpLabel,
     required this.hasNewEpisode,
@@ -9785,6 +11617,7 @@ class _SeriesDetailsScreen extends StatefulWidget {
     required this.onPlay,
     required this.onEpisodeDetails,
     required this.onToggleFollow,
+    required this.onAddToPlaylist,
   });
 
   @override
@@ -9821,6 +11654,11 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
       appBar: AppBar(
         title: Text(widget.details.title),
         actions: [
+          IconButton(
+            tooltip: 'Add series to playlist',
+            onPressed: () => unawaited(widget.onAddToPlaylist()),
+            icon: const Icon(Icons.playlist_add),
+          ),
           IconButton(
             tooltip: followed ? 'Unfollow series' : 'Follow series',
             onPressed: () async {
@@ -9991,6 +11829,118 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                 ],
               ),
             ),
+            if (widget.castCredits.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: sectionCardDecoration,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Cast',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: widget.castCredits
+                            .map(
+                              (entry) => SizedBox(
+                                width: 118,
+                                child: Column(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 26,
+                                      backgroundImage:
+                                          entry.photoUrl?.trim().isNotEmpty ==
+                                              true
+                                          ? NetworkImage(entry.photoUrl!)
+                                          : null,
+                                      child:
+                                          entry.photoUrl?.trim().isNotEmpty ==
+                                              true
+                                          ? null
+                                          : const Icon(Icons.person),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      entry.name,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                    ),
+                                    if (entry.role?.trim().isNotEmpty == true)
+                                      Text(
+                                        entry.role!,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        textAlign: TextAlign.center,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall,
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (widget.relatedItems.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: sectionCardDecoration,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Similar titles',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: widget.relatedItems
+                            .map(
+                              (entry) => Chip(
+                                avatar: entry.posterUrl?.trim().isNotEmpty ==
+                                        true
+                                    ? CircleAvatar(
+                                        backgroundImage: NetworkImage(
+                                          entry.posterUrl!,
+                                        ),
+                                      )
+                                    : null,
+                                label: Text(
+                                  entry.year == null
+                                      ? entry.title
+                                      : '${entry.title} (${entry.year})',
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
               child: Container(

@@ -668,6 +668,7 @@ class _MusicScreenState extends State<MusicScreen>
   List<String> followedUsers = const [];
   List<String> blockedSocialUsers = const [];
   List<Map<String, dynamic>> socialFeed = const [];
+  List<Map<String, dynamic>> remoteShares = const [];
   List<Map<String, dynamic>> queueInvitationItems = const [];
   Map<String, dynamic> invitationControlState = const {
     'allowInvites': true,
@@ -1454,6 +1455,9 @@ class _MusicScreenState extends State<MusicScreen>
         client = NavidromeClient(config!);
         await client!.ping();
         try {
+          await _syncPlaylistsFromServer(client!, silent: true);
+        } catch (_) {}
+        try {
           await _syncFavoritesFromServer(client!);
           favorites = await music.favorites(widget.profileId);
         } catch (_) {
@@ -1537,11 +1541,95 @@ class _MusicScreenState extends State<MusicScreen>
     );
     queueInvitationItems = await music.queueInvitations(widget.profileId);
     invitationControlState = await music.invitationControls(widget.profileId);
+    remoteShares = await music.remoteShares(widget.profileId);
+    await _refreshRemoteSharesFromServer(silent: true);
   }
 
   Future<void> _syncFavoritesFromServer(NavidromeClient nav) async {
     final remoteFavorites = await nav.starredSongs();
     await music.saveFavorites(widget.profileId, remoteFavorites);
+  }
+
+  Future<void> _syncPlaylistsFromServer(
+    NavidromeClient nav, {
+    required bool silent,
+  }) async {
+    try {
+      final remotePlaylists = await nav.playlists();
+      await music.savePlaylists(widget.profileId, remotePlaylists);
+      playlists = await music.playlists(widget.profileId);
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (_) {
+      if (!silent && mounted) {
+        setState(() => status = 'Could not refresh playlists from Navidrome.');
+      }
+    }
+  }
+
+  Future<void> _refreshRemoteSharesFromServer({required bool silent}) async {
+    final nav = client;
+    if (nav == null) {
+      return;
+    }
+    try {
+      final serverShares = await nav.shares();
+      final normalized = [
+        for (final entry in serverShares) _mapRemoteShare(entry),
+      ];
+      await music.saveRemoteShares(widget.profileId, normalized);
+      remoteShares = await music.remoteShares(widget.profileId);
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (_) {
+      if (!silent && mounted) {
+        setState(() => status = 'Could not refresh share links from Navidrome.');
+      }
+    }
+  }
+
+  Map<String, dynamic> _mapRemoteShare(Map<String, dynamic> share) {
+    final shareId = share['id']?.toString().trim() ?? '';
+    final rawUrl = share['url']?.toString().trim() ?? '';
+    final link = rawUrl.isEmpty
+        ? ''
+        : (rawUrl.startsWith('http')
+              ? rawUrl
+              : '${config?.baseUrl ?? ''}$rawUrl');
+    final expires = _parseShareDateTime(
+      share['expires'] ?? share['expiresAt'] ?? share['expiration'],
+    );
+    final created = _parseShareDateTime(
+      share['created'] ?? share['createdAt'] ?? share['createdAtUtc'],
+    );
+    return {
+      'shareId': shareId,
+      'url': link,
+      'description': share['description']?.toString().trim() ?? '',
+      'username': share['username']?.toString().trim() ?? '',
+      if (expires != null) 'expiresAtUtc': expires.toIso8601String(),
+      'createdAtUtc':
+          created?.toIso8601String() ?? DateTime.now().toUtc().toIso8601String(),
+    };
+  }
+
+  DateTime? _parseShareDateTime(Object? value) {
+    if (value == null) {
+      return null;
+    }
+    final text = value.toString().trim();
+    if (text.isEmpty) {
+      return null;
+    }
+    final unix = int.tryParse(text);
+    if (unix != null && unix > 0) {
+      return unix > 9999999999
+          ? DateTime.fromMillisecondsSinceEpoch(unix, isUtc: true)
+          : DateTime.fromMillisecondsSinceEpoch(unix * 1000, isUtc: true);
+    }
+    return DateTime.tryParse(text)?.toUtc();
   }
 
   Future<void> _refreshFavoritesFromServerIfConnected({
@@ -2978,6 +3066,8 @@ class _MusicScreenState extends State<MusicScreen>
       return;
     }
     final link = share['url']?.toString().trim() ?? '';
+    final shareId = share['id']?.toString().trim() ?? '';
+    final expiresAt = _parseShareDateTime(share['expires']);
     if (link.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3058,6 +3148,17 @@ class _MusicScreenState extends State<MusicScreen>
         ),
       );
     }
+    await music.upsertRemoteShare(widget.profileId, {
+      'shareId': shareId,
+      'url': link,
+      'description': label,
+      'contentType': contentType,
+      'contentId': contentId,
+      'allowDownload': options.allowDownload,
+      if (expiresAt != null) 'expiresAtUtc': expiresAt.toIso8601String(),
+      'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
+    });
+    remoteShares = await music.remoteShares(widget.profileId);
     await _appendActivity(
       type: 'share',
       targetType: contentType,
@@ -3066,6 +3167,8 @@ class _MusicScreenState extends State<MusicScreen>
       metadata: {
         'label': label,
         'link': link,
+        if (shareId.isNotEmpty) 'shareId': shareId,
+        if (expiresAt != null) 'expiresAtUtc': expiresAt.toIso8601String(),
         'allowDownload': options.allowDownload,
       },
     );
@@ -3577,6 +3680,79 @@ class _MusicScreenState extends State<MusicScreen>
                       'History visibility: ${historyVisibility == 'public' ? 'Public' : 'Private'}',
                     ),
                     const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Share links',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => unawaited(
+                            _refreshRemoteSharesFromServer(silent: false),
+                          ),
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('Refresh'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    if (remoteShares.isEmpty)
+                      const Text('No share links yet.')
+                    else
+                      for (final share in remoteShares.take(30))
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.link_outlined),
+                          title: Text(
+                            share['description']?.toString().trim().isNotEmpty ==
+                                    true
+                                ? share['description']!.toString()
+                                : (share['url']?.toString() ?? ''),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            [
+                              if ((share['expiresAtUtc']?.toString() ?? '')
+                                  .isNotEmpty)
+                                'Expires ${share['expiresAtUtc']}'
+                              else
+                                'No expiration',
+                              if ((share['shareId']?.toString() ?? '')
+                                  .isNotEmpty)
+                                'ID ${share['shareId']}',
+                            ].join(' • '),
+                          ),
+                          trailing: Wrap(
+                            spacing: 4,
+                            children: [
+                              IconButton(
+                                tooltip: 'Copy link',
+                                onPressed: () => unawaited(
+                                  _copyShareLink(
+                                    share['url']?.toString() ?? '',
+                                  ),
+                                ),
+                                icon: const Icon(Icons.copy_outlined),
+                              ),
+                              IconButton(
+                                tooltip: 'Change expiration',
+                                onPressed: () =>
+                                    unawaited(_editShareExpiration(share)),
+                                icon: const Icon(Icons.schedule_outlined),
+                              ),
+                              IconButton(
+                                tooltip: 'Remove share',
+                                onPressed: () =>
+                                    unawaited(_removeShareLink(share)),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
+                          ),
+                        ),
+                    const SizedBox(height: 10),
                     const Text(
                       'Queue invitations',
                       style: TextStyle(fontWeight: FontWeight.w700),
@@ -3671,6 +3847,151 @@ class _MusicScreenState extends State<MusicScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _copyShareLink(String link) async {
+    final value = link.trim();
+    if (value.isEmpty) {
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: value));
+    if (mounted) {
+      setState(() => status = 'Share link copied.');
+    }
+  }
+
+  Future<void> _removeShareLink(Map<String, dynamic> share) async {
+    final shareId = share['shareId']?.toString().trim() ?? '';
+    final nav = client;
+    if (shareId.isNotEmpty && nav != null) {
+      try {
+        await nav.deleteShare(shareId);
+      } catch (error) {
+        if (mounted) {
+          setState(() => status = 'Could not remove share from Navidrome: $error');
+        }
+        return;
+      }
+    }
+    if (shareId.isNotEmpty) {
+      await music.removeRemoteShare(widget.profileId, shareId);
+    }
+    remoteShares = await music.remoteShares(widget.profileId);
+    if (mounted) {
+      setState(() => status = 'Share link removed.');
+    }
+  }
+
+  Future<void> _editShareExpiration(Map<String, dynamic> share) async {
+    final shareId = share['shareId']?.toString().trim() ?? '';
+    if (shareId.isEmpty) {
+      return;
+    }
+    final nav = client;
+    if (nav == null) {
+      if (mounted) {
+        setState(() => status = 'Connect to Navidrome to edit share expiration.');
+      }
+      return;
+    }
+    final currentExpiry = _parseShareDateTime(share['expiresAtUtc']);
+    final now = DateTime.now();
+    final currentPreset = () {
+      if (currentExpiry == null) {
+        return _ShareExpiryPreset.never;
+      }
+      final delta = currentExpiry.difference(now).inDays;
+      if (delta <= 1) {
+        return _ShareExpiryPreset.oneDay;
+      }
+      if (delta <= 7) {
+        return _ShareExpiryPreset.oneWeek;
+      }
+      return _ShareExpiryPreset.oneMonth;
+    }();
+    final selected = await showDialog<_ShareExpiryPreset>(
+      context: context,
+      builder: (context) {
+        var local = currentPreset;
+        return StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Edit share expiration'),
+            content: DropdownButtonFormField<_ShareExpiryPreset>(
+              initialValue: local,
+              decoration: const InputDecoration(
+                labelText: 'Expires',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.never,
+                  child: Text('Never'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneDay,
+                  child: Text('In 1 day'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneWeek,
+                  child: Text('In 1 week'),
+                ),
+                DropdownMenuItem(
+                  value: _ShareExpiryPreset.oneMonth,
+                  child: Text('In 1 month'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value == null) {
+                  return;
+                }
+                setDialogState(() => local = value);
+              },
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, local),
+                child: const Text('Update'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (selected == null) {
+      return;
+    }
+    final expiresAt = switch (selected) {
+      _ShareExpiryPreset.never => null,
+      _ShareExpiryPreset.oneDay => now.add(const Duration(days: 1)),
+      _ShareExpiryPreset.oneWeek => now.add(const Duration(days: 7)),
+      _ShareExpiryPreset.oneMonth => now.add(const Duration(days: 30)),
+    };
+    Map<String, dynamic> updated;
+    try {
+      updated = await nav.updateShare(
+        shareId: shareId,
+        expires: expiresAt,
+        clearExpires: expiresAt == null,
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => status = 'Could not update share expiration: $error');
+      }
+      return;
+    }
+    await music.upsertRemoteShare(widget.profileId, {
+      ...share,
+      ..._mapRemoteShare(updated),
+    });
+    remoteShares = await music.remoteShares(widget.profileId);
+    if (mounted) {
+      setState(() => status = 'Share expiration updated.');
+    }
   }
 
   Future<void> _openAlbumContext(MusicTrack track) async {

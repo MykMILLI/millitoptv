@@ -827,17 +827,41 @@ class JellyfinApi {
     return _items(result).map((item) => entry(item)).toList();
   }
 
-  Future<List<JellyfinEntry>> episodes(String userId, String seriesId) async {
-    final result = await _request(
-      'GET',
-      '/Shows/$seriesId/Episodes',
-      query: {
-        'userId': userId,
-        'Fields': 'Overview,PremiereDate',
-        'EnableImageTypes': 'Primary,Thumb',
-      },
-    );
-    return _items(result).map((item) => entry(item)).toList();
+  Future<List<JellyfinEntry>> episodes(
+    String userId,
+    String seriesId, {
+    int pageSize = 400,
+  }) async {
+    final entries = <JellyfinEntry>[];
+    var start = 0;
+    while (true) {
+      final result = await _request(
+        'GET',
+        '/Items',
+        query: {
+          'userId': userId,
+          'ParentId': seriesId,
+          'Recursive': 'true',
+          'IncludeItemTypes': 'Episode',
+          'Fields': '$_itemFields,ParentIndexNumber,IndexNumber,SeriesName,SeriesId,RunTimeTicks,OfficialRating',
+          'EnableImageTypes': 'Primary,Backdrop,Thumb',
+          'SortBy': 'ParentIndexNumber,IndexNumber,SortName',
+          'SortOrder': 'Ascending',
+          'StartIndex': '$start',
+          'Limit': '$pageSize',
+        },
+      );
+      final page = _items(result);
+      entries.addAll(page.map((item) => entry(item)));
+      final total = result is Map
+          ? int.tryParse(result['TotalRecordCount']?.toString() ?? '')
+          : null;
+      start += page.length;
+      if (page.length < pageSize || (total != null && start >= total)) {
+        break;
+      }
+    }
+    return entries;
   }
 
   Future<JellyfinEntry?> item(String userId, String itemId) async {

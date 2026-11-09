@@ -186,6 +186,9 @@ class LiveTvMetadataDetails {
   final List<String> cast;
   final List<String> crew;
   final List<String> relatedTitles;
+  final List<LiveTvPersonCredit> castCredits;
+  final List<LiveTvPersonCredit> crewCredits;
+  final List<LiveTvRelatedTitle> relatedItems;
   final List<LiveTvMediaExtraLink> extras;
   final String? trailerUrl;
   const LiveTvMetadataDetails({
@@ -202,15 +205,53 @@ class LiveTvMetadataDetails {
     this.cast = const [],
     this.crew = const [],
     this.relatedTitles = const [],
+    this.castCredits = const [],
+    this.crewCredits = const [],
+    this.relatedItems = const [],
     this.extras = const [],
     this.trailerUrl,
   });
+}
+
+class LiveTvPersonCredit {
+  final String name;
+  final String? role;
+  final String? photoUrl;
+  const LiveTvPersonCredit({required this.name, this.role, this.photoUrl});
+}
+
+class LiveTvRelatedTitle {
+  final String title;
+  final int? year;
+  final String? posterUrl;
+  const LiveTvRelatedTitle({required this.title, this.year, this.posterUrl});
 }
 
 class LiveTvMediaExtraLink {
   final String label;
   final String url;
   const LiveTvMediaExtraLink({required this.label, required this.url});
+}
+
+class LiveTvTmdbSearchCandidate {
+  final int mediaId;
+  final bool series;
+  final String title;
+  final String? posterUrl;
+  final String? backdropUrl;
+  final String? overview;
+  final int? year;
+  final DateTime? releaseDate;
+  const LiveTvTmdbSearchCandidate({
+    required this.mediaId,
+    required this.series,
+    required this.title,
+    this.posterUrl,
+    this.backdropUrl,
+    this.overview,
+    this.year,
+    this.releaseDate,
+  });
 }
 
 class _ParsedM3uEntry {
@@ -614,69 +655,73 @@ class LiveTvPlaylistService {
       if (result == null) {
         return null;
       }
-      final cast = await _loadTmdbCast(
+      return await _loadTmdbMetadataDetailsForId(
         client: client,
         apiKey: key,
         mediaId: result.mediaId,
         series: series,
+        seed: result,
       );
-      final crew = await _loadTmdbCrew(
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<LiveTvMetadataDetails?> loadTmdbMetadataDetailsById({
+    required int mediaId,
+    required bool series,
+    required String tmdbApiKey,
+  }) async {
+    final key = tmdbApiKey.trim();
+    if (key.isEmpty || mediaId <= 0) {
+      return null;
+    }
+    final client = HttpClient();
+    try {
+      return await _loadTmdbMetadataDetailsForId(
         client: client,
         apiKey: key,
-        mediaId: result.mediaId,
+        mediaId: mediaId,
         series: series,
       );
-      final trailerUrl = await _loadTmdbTrailerUrl(
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<List<LiveTvTmdbSearchCandidate>> searchTmdbTitles({
+    required String query,
+    required bool series,
+    required String tmdbApiKey,
+    int maxResults = 12,
+  }) async {
+    final key = tmdbApiKey.trim();
+    final normalized = _normalizeMediaLookupTitle(query);
+    if (key.isEmpty || normalized.isEmpty) {
+      return const [];
+    }
+    final client = HttpClient();
+    try {
+      final results = await _searchTmdbMany(
         client: client,
         apiKey: key,
-        mediaId: result.mediaId,
+        query: normalized,
         series: series,
+        maxResults: maxResults,
       );
-      final details = await _loadTmdbDetailPayload(
-        client: client,
-        apiKey: key,
-        mediaId: result.mediaId,
-        series: series,
-      );
-      final contentRating = await _loadTmdbContentRating(
-        client: client,
-        apiKey: key,
-        mediaId: result.mediaId,
-        series: series,
-      );
-      final related = await _loadTmdbRelatedTitles(
-        client: client,
-        apiKey: key,
-        mediaId: result.mediaId,
-        series: series,
-      );
-      final extras = await _loadTmdbExtras(
-        client: client,
-        apiKey: key,
-        mediaId: result.mediaId,
-        series: series,
-      );
-      final advisories = _advisoriesForRating(contentRating);
-      final runtime = _runtimeFromTmdbPayload(details, series);
-      final genres = _genresFromTmdbPayload(details);
-      final status = details?['status']?.toString().trim();
-      return LiveTvMetadataDetails(
-        posterUrl: result.posterUrl,
-        backdropUrl: result.backdropUrl,
-        overview: result.overview,
-        year: result.year,
-        runtimeMinutes: runtime,
-        status: status == null || status.isEmpty ? null : status,
-        ratingSystem: contentRating == null ? null : (series ? 'TV' : 'MPA'),
-        contentRating: contentRating,
-        advisories: advisories,
-        genres: genres,
-        cast: cast,
-        crew: crew,
-        relatedTitles: related,
-        extras: extras,
-        trailerUrl: trailerUrl,
-      );
+      return [
+        for (final result in results)
+          LiveTvTmdbSearchCandidate(
+            mediaId: result.mediaId,
+            series: series,
+            title: result.title,
+            posterUrl: result.posterUrl,
+            backdropUrl: result.backdropUrl,
+            overview: result.overview,
+            year: result.year,
+            releaseDate: result.releaseDate,
+          ),
+      ];
     } finally {
       client.close(force: true);
     }
@@ -1366,6 +1411,25 @@ class LiveTvPlaylistService {
     if (_tmdbCache.containsKey(cacheKey)) {
       return _tmdbCache[cacheKey];
     }
+    final results = await _searchTmdbMany(
+      client: client,
+      apiKey: apiKey,
+      query: query,
+      series: series,
+      maxResults: 1,
+    );
+    final first = results.isEmpty ? null : results.first;
+    _tmdbCache[cacheKey] = first;
+    return first;
+  }
+
+  Future<List<_TmdbSearchResult>> _searchTmdbMany({
+    required HttpClient client,
+    required String apiKey,
+    required String query,
+    required bool series,
+    int maxResults = 12,
+  }) async {
     final uri = Uri.https(
       'api.themoviedb.org',
       '/3/search/${series ? 'tv' : 'movie'}',
@@ -1386,53 +1450,150 @@ class LiveTvPlaylistService {
         const Duration(seconds: 12),
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        _tmdbCache[cacheKey] = null;
-        return null;
+        return const [];
       }
       final payload = await utf8.decoder.bind(response).join();
       final decoded = jsonDecode(payload);
       if (decoded is! Map) {
-        _tmdbCache[cacheKey] = null;
-        return null;
+        return const [];
       }
       final rawResults = decoded['results'];
       if (rawResults is! List || rawResults.isEmpty) {
-        _tmdbCache[cacheKey] = null;
-        return null;
+        return const [];
       }
-      final top = rawResults.first;
-      if (top is! Map) {
-        _tmdbCache[cacheKey] = null;
-        return null;
+      final results = <_TmdbSearchResult>[];
+      for (final rawItem in rawResults) {
+        if (rawItem is! Map) {
+          continue;
+        }
+        final item = Map<String, dynamic>.from(rawItem);
+        final mediaId = item['id'];
+        final parsedId = mediaId is int ? mediaId : int.tryParse('$mediaId');
+        if (parsedId == null) {
+          continue;
+        }
+        final title = (series
+                ? item['name']?.toString().trim()
+                : item['title']?.toString().trim()) ??
+            '';
+        if (title.isEmpty) {
+          continue;
+        }
+        final posterPath = item['poster_path']?.toString().trim();
+        final backdropPath = item['backdrop_path']?.toString().trim();
+        final overview = item['overview']?.toString().trim();
+        results.add(
+          _TmdbSearchResult(
+            mediaId: parsedId,
+            title: title,
+            posterUrl: (posterPath == null || posterPath.isEmpty)
+                ? null
+                : 'https://image.tmdb.org/t/p/w500$posterPath',
+            backdropUrl: (backdropPath == null || backdropPath.isEmpty)
+                ? null
+                : 'https://image.tmdb.org/t/p/w780$backdropPath',
+            overview: (overview == null || overview.isEmpty) ? null : overview,
+            year: _extractTmdbYear(item, series),
+            releaseDate: _extractTmdbReleaseDate(item, series),
+          ),
+        );
+        if (results.length >= maxResults) {
+          break;
+        }
       }
-      final item = Map<String, dynamic>.from(top);
-      final mediaId = item['id'];
-      final parsedId = mediaId is int ? mediaId : int.tryParse('$mediaId');
-      if (parsedId == null) {
-        _tmdbCache[cacheKey] = null;
-        return null;
-      }
-      final posterPath = item['poster_path']?.toString().trim();
-      final backdropPath = item['backdrop_path']?.toString().trim();
-      final overview = item['overview']?.toString().trim();
-      final result = _TmdbSearchResult(
-        mediaId: parsedId,
-        posterUrl: (posterPath == null || posterPath.isEmpty)
-            ? null
-            : 'https://image.tmdb.org/t/p/w500$posterPath',
-        backdropUrl: (backdropPath == null || backdropPath.isEmpty)
-            ? null
-            : 'https://image.tmdb.org/t/p/w780$backdropPath',
-        overview: (overview == null || overview.isEmpty) ? null : overview,
-        year: _extractTmdbYear(item, series),
-        releaseDate: _extractTmdbReleaseDate(item, series),
-      );
-      _tmdbCache[cacheKey] = result;
-      return result;
+      return results;
     } catch (_) {
-      _tmdbCache[cacheKey] = null;
+      return const [];
+    }
+  }
+
+  Future<LiveTvMetadataDetails?> _loadTmdbMetadataDetailsForId({
+    required HttpClient client,
+    required String apiKey,
+    required int mediaId,
+    required bool series,
+    _TmdbSearchResult? seed,
+  }) async {
+    final castCredits = await _loadTmdbCast(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final crewCredits = await _loadTmdbCrew(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final trailerUrl = await _loadTmdbTrailerUrl(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final details = await _loadTmdbDetailPayload(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    if (details == null && seed == null) {
       return null;
     }
+    final contentRating = await _loadTmdbContentRating(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final related = await _loadTmdbRelatedTitles(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final extras = await _loadTmdbExtras(
+      client: client,
+      apiKey: apiKey,
+      mediaId: mediaId,
+      series: series,
+    );
+    final advisories = _advisoriesForRating(contentRating);
+    final runtime = _runtimeFromTmdbPayload(details, series);
+    final genres = _genresFromTmdbPayload(details);
+    final status = details?['status']?.toString().trim();
+    final posterPath = details?['poster_path']?.toString().trim();
+    final backdropPath = details?['backdrop_path']?.toString().trim();
+    final overviewRaw = details?['overview']?.toString().trim();
+    return LiveTvMetadataDetails(
+      posterUrl: (posterPath == null || posterPath.isEmpty)
+          ? seed?.posterUrl
+          : 'https://image.tmdb.org/t/p/w500$posterPath',
+      backdropUrl: (backdropPath == null || backdropPath.isEmpty)
+          ? seed?.backdropUrl
+          : 'https://image.tmdb.org/t/p/w780$backdropPath',
+      overview: (overviewRaw == null || overviewRaw.isEmpty)
+          ? seed?.overview
+          : overviewRaw,
+      year: details == null
+          ? seed?.year
+          : (_extractTmdbYear(details, series) ?? seed?.year),
+      runtimeMinutes: runtime,
+      status: status == null || status.isEmpty ? null : status,
+      ratingSystem: contentRating == null ? null : (series ? 'TV' : 'MPA'),
+      contentRating: contentRating,
+      advisories: advisories,
+      genres: genres,
+      cast: castCredits.map((entry) => entry.name).toList(),
+      crew: crewCredits.map((entry) => entry.name).toList(),
+      relatedTitles: related.map((entry) => entry.title).toList(),
+      castCredits: castCredits,
+      crewCredits: crewCredits,
+      relatedItems: related,
+      extras: extras,
+      trailerUrl: trailerUrl,
+    );
   }
 
   String _normalizeMediaLookupTitle(String title) {
@@ -1453,7 +1614,7 @@ class LiveTvPlaylistService {
     return cleaned;
   }
 
-  Future<List<String>> _loadTmdbCast({
+  Future<List<LiveTvPersonCredit>> _loadTmdbCast({
     required HttpClient client,
     required String apiKey,
     required int mediaId,
@@ -1473,29 +1634,43 @@ class LiveTvPlaylistService {
         const Duration(seconds: 12),
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       final body = await utf8.decoder.bind(response).join();
       final decoded = jsonDecode(body);
       if (decoded is! Map) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       final rawCast = decoded['cast'];
       if (rawCast is! List) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       return rawCast
           .whereType<Map>()
-          .map((item) => item['name']?.toString().trim() ?? '')
-          .where((name) => name.isNotEmpty)
-          .take(8)
+          .map((entry) {
+            final name = entry['name']?.toString().trim() ?? '';
+            if (name.isEmpty) {
+              return null;
+            }
+            final role = entry['character']?.toString().trim();
+            final profilePath = entry['profile_path']?.toString().trim();
+            return LiveTvPersonCredit(
+              name: name,
+              role: role == null || role.isEmpty ? null : role,
+              photoUrl: (profilePath == null || profilePath.isEmpty)
+                  ? null
+                  : 'https://image.tmdb.org/t/p/w185$profilePath',
+            );
+          })
+          .whereType<LiveTvPersonCredit>()
+          .take(10)
           .toList();
     } catch (_) {
-      return const [];
+      return const <LiveTvPersonCredit>[];
     }
   }
 
-  Future<List<String>> _loadTmdbCrew({
+  Future<List<LiveTvPersonCredit>> _loadTmdbCrew({
     required HttpClient client,
     required String apiKey,
     required int mediaId,
@@ -1515,16 +1690,16 @@ class LiveTvPlaylistService {
         const Duration(seconds: 12),
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       final body = await utf8.decoder.bind(response).join();
       final decoded = jsonDecode(body);
       if (decoded is! Map) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       final rawCrew = decoded['crew'];
       if (rawCrew is! List) {
-        return const [];
+        return const <LiveTvPersonCredit>[];
       }
       final wanted = {
         'director',
@@ -1533,7 +1708,8 @@ class LiveTvPlaylistService {
         'creator',
         'producer',
       };
-      final values = <String>{};
+      final values = <LiveTvPersonCredit>[];
+      final seen = <String>{};
       for (final entry in rawCrew.whereType<Map>()) {
         final job = entry['job']?.toString().trim().toLowerCase() ?? '';
         final name = entry['name']?.toString().trim() ?? '';
@@ -1541,12 +1717,25 @@ class LiveTvPlaylistService {
           continue;
         }
         if (wanted.contains(job)) {
-          values.add('$name (${entry['job']})');
+          final key = '$name|$job';
+          if (!seen.add(key)) {
+            continue;
+          }
+          final profilePath = entry['profile_path']?.toString().trim();
+          values.add(
+            LiveTvPersonCredit(
+              name: name,
+              role: entry['job']?.toString().trim(),
+              photoUrl: (profilePath == null || profilePath.isEmpty)
+                  ? null
+                  : 'https://image.tmdb.org/t/p/w185$profilePath',
+            ),
+          );
         }
       }
-      return values.take(8).toList();
+      return values.take(10).toList();
     } catch (_) {
-      return const [];
+      return const <LiveTvPersonCredit>[];
     }
   }
 
@@ -1688,7 +1877,7 @@ class LiveTvPlaylistService {
     }
   }
 
-  Future<List<String>> _loadTmdbRelatedTitles({
+  Future<List<LiveTvRelatedTitle>> _loadTmdbRelatedTitles({
     required HttpClient client,
     required String apiKey,
     required int mediaId,
@@ -1702,23 +1891,39 @@ class LiveTvPlaylistService {
     try {
       final payload = await _getJson(client, uri);
       if (payload is! Map) {
-        return const [];
+        return const <LiveTvRelatedTitle>[];
       }
       final results = payload['results'];
       if (results is! List) {
-        return const [];
+        return const <LiveTvRelatedTitle>[];
       }
       return results
           .whereType<Map>()
-          .map(
-            (entry) =>
-                (entry['title'] ?? entry['name'] ?? '').toString().trim(),
-          )
-          .where((value) => value.isNotEmpty)
-          .take(8)
+          .map((entry) {
+            final title =
+                (entry['title'] ?? entry['name'] ?? '').toString().trim();
+            if (title.isEmpty) {
+              return null;
+            }
+            final posterPath = entry['poster_path']?.toString().trim();
+            final releaseDate =
+                entry['release_date']?.toString().trim().isNotEmpty == true
+                ? entry['release_date'].toString()
+                : entry['first_air_date']?.toString() ?? '';
+            final year = int.tryParse(releaseDate.split('-').first);
+            return LiveTvRelatedTitle(
+              title: title,
+              year: year,
+              posterUrl: (posterPath == null || posterPath.isEmpty)
+                  ? null
+                  : 'https://image.tmdb.org/t/p/w342$posterPath',
+            );
+          })
+          .whereType<LiveTvRelatedTitle>()
+          .take(10)
           .toList();
     } catch (_) {
-      return const [];
+      return const <LiveTvRelatedTitle>[];
     }
   }
 
@@ -1864,6 +2069,7 @@ class LiveTvPlaylistService {
 
 class _TmdbSearchResult {
   final int mediaId;
+  final String title;
   final String? posterUrl;
   final String? backdropUrl;
   final String? overview;
@@ -1871,6 +2077,7 @@ class _TmdbSearchResult {
   final DateTime? releaseDate;
   const _TmdbSearchResult({
     required this.mediaId,
+    required this.title,
     this.posterUrl,
     this.backdropUrl,
     this.overview,

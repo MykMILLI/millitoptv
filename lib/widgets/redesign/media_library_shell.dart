@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-enum LibrarySection { home, movies, series }
+enum LibrarySection { home, movies, series, collections }
 
 /// Presentation-only: parent owns catalog, filtering, search and persistence.
 class MediaLibraryShell extends StatelessWidget {
@@ -18,6 +18,8 @@ class MediaLibraryShell extends StatelessWidget {
     required this.onChooseGenre,
     required this.sortLabel,
     required this.onChooseSort,
+    this.onShuffle,
+    this.shuffleLabel = 'Shuffle',
     required this.filtersOpen,
     required this.onToggleFilters,
     required this.onCloseFilters,
@@ -37,6 +39,8 @@ class MediaLibraryShell extends StatelessWidget {
   final ValueChanged<String> onSearchChanged;
   final String libraryName, summary, genreLabel, sortLabel;
   final VoidCallback onChooseLibrary, onChooseGenre, onChooseSort;
+  final VoidCallback? onShuffle;
+  final String shuffleLabel;
   final bool filtersOpen;
   final VoidCallback onToggleFilters, onCloseFilters;
   final Widget filters, content;
@@ -53,6 +57,7 @@ class MediaLibraryShell extends StatelessWidget {
       LibrarySection.home => 'Your library',
       LibrarySection.movies => 'Browse movies',
       LibrarySection.series => 'Browse series',
+      LibrarySection.collections => 'Browse collections',
     };
     final body = LayoutBuilder(
       builder: (context, box) {
@@ -69,6 +74,8 @@ class MediaLibraryShell extends StatelessWidget {
                 decoration: InputDecoration(
                   hintText: section == LibrarySection.series
                       ? 'Search series'
+                      : section == LibrarySection.collections
+                      ? 'Search collections'
                       : 'Search movies and shows',
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: onVoiceSearch == null
@@ -111,6 +118,10 @@ class MediaLibraryShell extends StatelessWidget {
                               value: LibrarySection.series,
                               label: Text('Series'),
                             ),
+                            ButtonSegment(
+                              value: LibrarySection.collections,
+                              label: Text('Collections'),
+                            ),
                           ],
                           selected: {section},
                           showSelectedIcon: false,
@@ -145,6 +156,11 @@ class MediaLibraryShell extends StatelessWidget {
                       OutlinedButton(
                         onPressed: onChooseSort,
                         child: Text(sortLabel),
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: onShuffle,
+                        icon: const Icon(Icons.shuffle),
+                        label: Text(shuffleLabel),
                       ),
                       FilledButton.tonalIcon(
                         onPressed: onToggleFilters,

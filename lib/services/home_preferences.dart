@@ -232,6 +232,100 @@ class LiveTvUserPlaylist {
   }
 }
 
+class LiveTvTmdbOverride {
+  final String sourceId;
+  final String mediaType;
+  final String mediaId;
+  final int tmdbId;
+  final bool series;
+  final String? title;
+  final String? posterUrl;
+  final String? backdropUrl;
+  final String? overview;
+  final int? year;
+  final List<String> genres;
+  final DateTime? releaseDate;
+  final DateTime updatedAtUtc;
+  const LiveTvTmdbOverride({
+    required this.sourceId,
+    required this.mediaType,
+    required this.mediaId,
+    required this.tmdbId,
+    required this.series,
+    this.title,
+    this.posterUrl,
+    this.backdropUrl,
+    this.overview,
+    this.year,
+    this.genres = const [],
+    this.releaseDate,
+    required this.updatedAtUtc,
+  });
+
+  String get key => tmdbOverrideKey(sourceId, mediaType, mediaId);
+
+  static String tmdbOverrideKey(
+    String sourceId,
+    String mediaType,
+    String mediaId,
+  ) => '$sourceId|$mediaType|$mediaId';
+
+  Map<String, dynamic> toJson() => {
+    'sourceId': sourceId,
+    'mediaType': mediaType,
+    'mediaId': mediaId,
+    'tmdbId': tmdbId,
+    'series': series,
+    if (title != null) 'title': title,
+    if (posterUrl != null) 'posterUrl': posterUrl,
+    if (backdropUrl != null) 'backdropUrl': backdropUrl,
+    if (overview != null) 'overview': overview,
+    if (year != null) 'year': year,
+    if (genres.isNotEmpty) 'genres': genres,
+    if (releaseDate != null) 'releaseDate': releaseDate!.toIso8601String(),
+    'updatedAtUtc': updatedAtUtc.toIso8601String(),
+  };
+
+  static LiveTvTmdbOverride fromJson(Map<String, dynamic> json) {
+    final sourceId = json['sourceId']?.toString().trim() ?? '';
+    final mediaType = json['mediaType']?.toString().trim() ?? '';
+    final mediaId = json['mediaId']?.toString().trim() ?? '';
+    final tmdbId = int.tryParse(json['tmdbId']?.toString() ?? '') ?? 0;
+    if (sourceId.isEmpty || mediaType.isEmpty || mediaId.isEmpty || tmdbId < 1) {
+      throw const FormatException('TMDB override is incomplete.');
+    }
+    final updatedAt =
+        DateTime.tryParse(json['updatedAtUtc']?.toString() ?? '')?.toUtc() ??
+        DateTime.now().toUtc();
+    final releaseDate = DateTime.tryParse(
+      json['releaseDate']?.toString() ?? '',
+    )?.toUtc();
+    final genres = [
+      ...(json['genres'] as List? ?? const []),
+    ].map((value) => value.toString().trim()).where((value) => value.isNotEmpty).toList();
+    String? clean(String field) {
+      final value = json[field]?.toString().trim();
+      return value == null || value.isEmpty ? null : value;
+    }
+
+    return LiveTvTmdbOverride(
+      sourceId: sourceId,
+      mediaType: mediaType,
+      mediaId: mediaId,
+      tmdbId: tmdbId,
+      series: json['series'] == true,
+      title: clean('title'),
+      posterUrl: clean('posterUrl'),
+      backdropUrl: clean('backdropUrl'),
+      overview: clean('overview'),
+      year: int.tryParse(json['year']?.toString() ?? ''),
+      genres: genres,
+      releaseDate: releaseDate,
+      updatedAtUtc: updatedAt,
+    );
+  }
+}
+
 List<String> mergeAppOrder(List<String> available, List<String> saved) {
   final allowed = available.toSet();
   return [
@@ -945,6 +1039,67 @@ class HomePreferences {
     }
   }
 
+  Future<List<LiveTvTmdbOverride>> liveTvTmdbOverrides(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.liveTvTmdbOverrides.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const [];
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) {
+      throw const FormatException('TMDB overrides format is invalid.');
+    }
+    final values = <LiveTvTmdbOverride>[];
+    for (final entry in decoded) {
+      if (entry is! Map) {
+        continue;
+      }
+      try {
+        values.add(LiveTvTmdbOverride.fromJson(Map<String, dynamic>.from(entry)));
+      } catch (_) {}
+    }
+    values.sort((a, b) => b.updatedAtUtc.compareTo(a.updatedAtUtc));
+    return values;
+  }
+
+  Future<void> upsertLiveTvTmdbOverride(
+    int profile,
+    LiveTvTmdbOverride override,
+  ) async {
+    final current = await liveTvTmdbOverrides(profile);
+    final merged = [
+      override,
+      ...current.where((entry) => entry.key != override.key),
+    ];
+    await _saveLiveTvTmdbOverrides(profile, merged.take(1500).toList());
+  }
+
+  Future<void> removeLiveTvTmdbOverride(
+    int profile, {
+    required String sourceId,
+    required String mediaType,
+    required String mediaId,
+  }) async {
+    final key = LiveTvTmdbOverride.tmdbOverrideKey(sourceId, mediaType, mediaId);
+    final current = await liveTvTmdbOverrides(profile);
+    final filtered = current.where((entry) => entry.key != key).toList();
+    await _saveLiveTvTmdbOverrides(profile, filtered);
+  }
+
+  Future<void> _saveLiveTvTmdbOverrides(
+    int profile,
+    List<LiveTvTmdbOverride> values,
+  ) async {
+    final encoded = jsonEncode(values.map((item) => item.toJson()).toList());
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.liveTvTmdbOverrides.v1.$profile',
+      encoded,
+    )) {
+      throw StateError('Could not save TMDB overrides.');
+    }
+  }
+
   Future<Map<String, dynamic>> liveTvProfileSyncState(int profile) async {
     Map<String, dynamic>? profileIdentity;
     Map<String, dynamic>? jellyfinAccount;
@@ -999,6 +1154,9 @@ class HomePreferences {
         profile,
       )).map((item) => item.toJson()).toList(),
       'playlists': (await liveTvPlaylists(
+        profile,
+      )).map((item) => item.toJson()).toList(),
+      'tmdbOverrides': (await liveTvTmdbOverrides(
         profile,
       )).map((item) => item.toJson()).toList(),
       'uiState': await liveTvUiState(profile),
@@ -1149,6 +1307,22 @@ class HomePreferences {
         } catch (_) {}
       }
       await _saveLiveTvPlaylists(profile, playlists);
+    }
+
+    final tmdbOverridesRaw = state['tmdbOverrides'];
+    if (tmdbOverridesRaw is List) {
+      final overrides = <LiveTvTmdbOverride>[];
+      for (final entry in tmdbOverridesRaw) {
+        if (entry is! Map) {
+          continue;
+        }
+        try {
+          overrides.add(
+            LiveTvTmdbOverride.fromJson(Map<String, dynamic>.from(entry)),
+          );
+        } catch (_) {}
+      }
+      await _saveLiveTvTmdbOverrides(profile, overrides.take(1500).toList());
     }
 
     final uiStateRaw = state['uiState'];
@@ -1499,6 +1673,7 @@ class HomePreferences {
       'home.liveTvRecentMedia.v1.$profile',
       'home.liveTvFavorites.v1.$profile',
       'home.liveTvPlaylists.v1.$profile',
+      'home.liveTvTmdbOverrides.v1.$profile',
       'home.liveTvUiState.v1.$profile',
       'home.liveTvPlayerDefaults.v1.$profile',
       'weather.auto.v1.$profile.enabled',

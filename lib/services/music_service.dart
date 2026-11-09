@@ -393,6 +393,7 @@ class MusicService {
   static const _homeSectionsKeyPrefix = 'music.home.sections.v1.';
   static const _pinsKeyPrefix = 'music.pins.v1.';
   static const _socialSharesKeyPrefix = 'music.social.shares.v1.';
+  static const _remoteSharesKeyPrefix = 'music.social.remote-shares.v1.';
   static const _publicProfileKeyPrefix = 'music.social.public-profile.v1.';
   static const _historyPrivacyKeyPrefix = 'music.social.history-privacy.v1.';
   static const _followingKeyPrefix = 'music.social.following.v1.';
@@ -1784,6 +1785,84 @@ class MusicService {
     ).toString();
   }
 
+  Future<List<Map<String, dynamic>>> remoteShares(int profileId) async {
+    final current = await _mapListByKey('$_remoteSharesKeyPrefix$profileId');
+    current.sort((a, b) {
+      final aRaw = a['createdAtUtc']?.toString() ?? '';
+      final bRaw = b['createdAtUtc']?.toString() ?? '';
+      final aTime =
+          DateTime.tryParse(aRaw)?.toUtc() ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+      final bTime =
+          DateTime.tryParse(bRaw)?.toUtc() ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+      return bTime.compareTo(aTime);
+    });
+    return current;
+  }
+
+  Future<void> saveRemoteShares(
+    int profileId,
+    List<Map<String, dynamic>> shares,
+  ) async {
+    final existing = await _mapListByKey('$_remoteSharesKeyPrefix$profileId');
+    final byId = <String, Map<String, dynamic>>{};
+    for (final entry in existing) {
+      final id = entry['shareId']?.toString().trim() ?? '';
+      if (id.isEmpty) {
+        continue;
+      }
+      byId[id] = Map<String, dynamic>.from(entry);
+    }
+    for (final raw in shares) {
+      final incoming = Map<String, dynamic>.from(raw);
+      final id = incoming['shareId']?.toString().trim() ?? '';
+      if (id.isEmpty) {
+        continue;
+      }
+      final previous = byId[id];
+      byId[id] = {
+        ...?previous,
+        ...incoming,
+      };
+    }
+    final next = byId.values.toList()
+      ..sort((a, b) {
+        final aRaw = a['createdAtUtc']?.toString() ?? '';
+        final bRaw = b['createdAtUtc']?.toString() ?? '';
+        final aTime =
+            DateTime.tryParse(aRaw)?.toUtc() ??
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+        final bTime =
+            DateTime.tryParse(bRaw)?.toUtc() ??
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+        return bTime.compareTo(aTime);
+      });
+    await _saveMapList(
+      '$_remoteSharesKeyPrefix$profileId',
+      next.take(1000).toList(),
+    );
+  }
+
+  Future<void> upsertRemoteShare(
+    int profileId,
+    Map<String, dynamic> share,
+  ) async {
+    await saveRemoteShares(profileId, [share]);
+  }
+
+  Future<void> removeRemoteShare(int profileId, String shareId) async {
+    final id = shareId.trim();
+    if (id.isEmpty) {
+      throw const FormatException('Share id is required.');
+    }
+    final current = await _mapListByKey('$_remoteSharesKeyPrefix$profileId');
+    await _saveMapList(
+      '$_remoteSharesKeyPrefix$profileId',
+      current.where((entry) => entry['shareId']?.toString() != id).toList(),
+    );
+  }
+
   Future<Map<String, dynamic>> resolveShareLink(
     int profileId,
     Uri uri, {
@@ -2508,6 +2587,7 @@ class MusicService {
       'uiState': await uiState(profileId),
       'homeSections': await homeSections(profileId),
       'pins': await pins(profileId),
+      'remoteShares': await remoteShares(profileId),
     };
   }
 
@@ -2778,6 +2858,17 @@ class MusicService {
         'artists': valuesFor('artists'),
         'playlists': valuesFor('playlists'),
       });
+    }
+    final remoteSharesRaw = state['remoteShares'];
+    if (remoteSharesRaw is List) {
+      final values = <Map<String, dynamic>>[];
+      for (final entry in remoteSharesRaw) {
+        if (entry is! Map) {
+          continue;
+        }
+        values.add(Map<String, dynamic>.from(entry));
+      }
+      await saveRemoteShares(profileId, values.take(1000).toList());
     }
   }
 
@@ -3262,6 +3353,48 @@ class NavidromeClient {
     return Map<String, dynamic>.from(list.first as Map);
   }
 
+  Future<List<Map<String, dynamic>>> shares() async {
+    final payload = await _get('getShares.view');
+    final shares = payload['shares'];
+    final raw = shares is Map ? shares['share'] : null;
+    if (raw is! List) {
+      return const [];
+    }
+    return [
+      for (final item in raw)
+        if (item is Map) Map<String, dynamic>.from(item),
+    ];
+  }
+
+  Future<Map<String, dynamic>> updateShare({
+    required String shareId,
+    String? description,
+    DateTime? expires,
+    bool clearExpires = false,
+  }) async {
+    final id = shareId.trim();
+    if (id.isEmpty) {
+      throw const FormatException('Share id is required.');
+    }
+    final payload = await _get(
+      'updateShare.view',
+      query: {
+        'id': id,
+        if (description != null) 'description': description.trim(),
+        if (clearExpires)
+          'expires': '0'
+        else if (expires != null)
+          'expires': '${expires.toUtc().millisecondsSinceEpoch}',
+      },
+    );
+    final shares = payload['shares'];
+    final list = shares is Map ? shares['share'] : null;
+    if (list is! List || list.isEmpty || list.first is! Map) {
+      throw StateError('Music server did not return the updated share.');
+    }
+    return Map<String, dynamic>.from(list.first as Map);
+  }
+
   Future<void> deleteShare(String shareId) async {
     final id = shareId.trim();
     if (id.isEmpty) {
@@ -3300,6 +3433,78 @@ class NavidromeClient {
       } catch (_) {}
     }
     return values;
+  }
+
+  Future<List<MusicPlaylist>> playlists({int limit = 500}) async {
+    final payload = await _get('getPlaylists.view');
+    final root = payload['playlists'];
+    if (root is! Map) {
+      return const [];
+    }
+    final rawPlaylists = root['playlist'];
+    if (rawPlaylists is! List || rawPlaylists.isEmpty) {
+      return const [];
+    }
+    final values = <MusicPlaylist>[];
+    for (final raw in rawPlaylists) {
+      if (raw is! Map) {
+        continue;
+      }
+      final id = raw['id']?.toString().trim() ?? '';
+      final name = raw['name']?.toString().trim() ?? '';
+      if (id.isEmpty || name.isEmpty) {
+        continue;
+      }
+      try {
+        values.add(await playlistById(id, fallbackName: name));
+      } catch (_) {}
+      if (values.length >= limit) {
+        break;
+      }
+    }
+    values.sort((a, b) => b.createdAtUtc.compareTo(a.createdAtUtc));
+    return values;
+  }
+
+  Future<MusicPlaylist> playlistById(
+    String playlistId, {
+    String? fallbackName,
+  }) async {
+    final id = playlistId.trim();
+    if (id.isEmpty) {
+      throw const FormatException('Playlist id is required.');
+    }
+    final payload = await _get('getPlaylist.view', query: {'id': id});
+    final root = payload['playlist'];
+    if (root is! Map) {
+      throw StateError('Music server did not return the playlist.');
+    }
+    final map = Map<String, dynamic>.from(root);
+    final name = map['name']?.toString().trim() ?? fallbackName?.trim() ?? id;
+    final createdAt = _parseTimestamp(
+      map['created'] ??
+          map['changed'] ??
+          map['updated'] ??
+          map['createdAtUtc'],
+    );
+    final tracks = <MusicTrack>[];
+    final rawEntries = map['entry'];
+    if (rawEntries is List) {
+      for (final entry in rawEntries) {
+        if (entry is! Map) {
+          continue;
+        }
+        try {
+          tracks.add(_parseTrack(Map<String, dynamic>.from(entry)));
+        } catch (_) {}
+      }
+    }
+    return MusicPlaylist(
+      id: id,
+      name: name.isEmpty ? id : name,
+      createdAtUtc: createdAt ?? DateTime.now().toUtc(),
+      tracks: tracks,
+    );
   }
 
   Uri streamUri(String songId) =>
@@ -3567,5 +3772,22 @@ class NavidromeClient {
       (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
     );
     return values.take(limit).toList();
+  }
+
+  DateTime? _parseTimestamp(Object? value) {
+    if (value == null) {
+      return null;
+    }
+    final text = value.toString().trim();
+    if (text.isEmpty) {
+      return null;
+    }
+    final unix = int.tryParse(text);
+    if (unix != null && unix > 0) {
+      return unix > 9999999999
+          ? DateTime.fromMillisecondsSinceEpoch(unix, isUtc: true)
+          : DateTime.fromMillisecondsSinceEpoch(unix * 1000, isUtc: true);
+    }
+    return DateTime.tryParse(text)?.toUtc();
   }
 }

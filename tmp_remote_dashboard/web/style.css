@@ -548,12 +548,17 @@ input:focus-visible, button:focus-visible, select:focus-visible, textarea:focus-
 
 .release-history-row {
   display: grid;
-  grid-template-columns: 160px 120px 180px 1fr;
+  grid-template-columns: 160px 120px 180px 1fr auto;
   gap: 10px;
   font-size: 13px;
   border: 1px solid var(--dashboard-border);
   border-radius: 8px;
   padding: 10px;
+}
+
+.release-history-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .release-details-backdrop {

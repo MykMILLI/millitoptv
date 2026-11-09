@@ -21,6 +21,7 @@ class MediaHomeCard {
   final Color? badgeColor;
   final IconData? icon;
   final VoidCallback onTap;
+  final ValueChanged<Offset>? onMoreAt;
   const MediaHomeCard({
     required this.id,
     required this.title,
@@ -31,6 +32,7 @@ class MediaHomeCard {
     this.badgeColor,
     this.icon,
     required this.onTap,
+    this.onMoreAt,
   });
 }
 
@@ -295,6 +297,36 @@ class _HomeCard extends StatefulWidget {
 
 class _HomeCardState extends State<_HomeCard> {
   bool focused = false;
+  final GlobalKey _moreButtonKey = GlobalKey();
+
+  void _openMoreMenu() {
+    final callback = widget.card.onMoreAt;
+    if (callback == null) {
+      return;
+    }
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null) {
+      return;
+    }
+    final center = box.localToGlobal(box.size.center(Offset.zero));
+    callback(center);
+  }
+
+  void _openMoreMenuFromButton() {
+    final callback = widget.card.onMoreAt;
+    final ctx = _moreButtonKey.currentContext;
+    if (callback == null || ctx == null) {
+      _openMoreMenu();
+      return;
+    }
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null) {
+      _openMoreMenu();
+      return;
+    }
+    final center = box.localToGlobal(box.size.center(Offset.zero));
+    callback(center);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -349,6 +381,13 @@ class _HomeCardState extends State<_HomeCard> {
                   ],
                 ),
               ),
+              if (card.onMoreAt != null)
+                IconButton(
+                  key: _moreButtonKey,
+                  tooltip: 'More actions',
+                  onPressed: _openMoreMenuFromButton,
+                  icon: const Icon(Icons.more_vert),
+                ),
             ],
           ),
         ),
@@ -388,6 +427,23 @@ class _HomeCardState extends State<_HomeCard> {
                       left: 6,
                       top: 6,
                       child: _Badge(label: card.badge!, color: card.badgeColor),
+                    ),
+                  if (card.onMoreAt != null)
+                    Positioned(
+                      right: 4,
+                      top: 4,
+                      child: Material(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(20),
+                        child: IconButton(
+                          key: _moreButtonKey,
+                          tooltip: 'More actions',
+                          visualDensity: VisualDensity.compact,
+                          iconSize: 18,
+                          onPressed: _openMoreMenuFromButton,
+                          icon: const Icon(Icons.more_vert),
+                        ),
+                      ),
                     ),
                   if (card.progress != null && card.progress! > 0)
                     Align(

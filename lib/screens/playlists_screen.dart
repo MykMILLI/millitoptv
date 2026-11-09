@@ -964,6 +964,23 @@ class _HubItemTile extends StatelessWidget {
   );
 }
 
+class _SeriesPlaylistGroup {
+  final String id;
+  final String title;
+  const _SeriesPlaylistGroup({required this.id, required this.title});
+}
+
+class _PlaylistDisplayRow {
+  final _SeriesPlaylistGroup? group;
+  final int startIndex;
+  final List<HubItem> items;
+  const _PlaylistDisplayRow({
+    required this.group,
+    required this.startIndex,
+    required this.items,
+  });
+}
+
 class _PlaylistContents extends StatefulWidget {
   final HubPlaylist playlist;
   final List<HubItem> available;
@@ -989,6 +1006,7 @@ class _PlaylistContentsState extends State<_PlaylistContents> {
   late HubPlaylist playlist = widget.playlist;
   bool busy = false;
   String error = '';
+  final expandedSeriesGroups = <String>{};
 
   Future<void> _change(List<HubItem> items) async {
     if (busy || widget.onSave == null) return;
@@ -1045,6 +1063,99 @@ class _PlaylistContentsState extends State<_PlaylistContents> {
     );
     if (item != null && mounted) await _change([...playlist.items, item]);
   }
+
+  _SeriesPlaylistGroup? _seriesGroup(HubItem item) {
+    final raw = item.payload['playlistGroup'];
+    if (raw is! Map) {
+      return null;
+    }
+    final value = Map<String, dynamic>.from(raw);
+    if (value['type']?.toString() != 'series') {
+      return null;
+    }
+    final id = value['id']?.toString().trim() ?? '';
+    final title = value['title']?.toString().trim() ?? '';
+    if (id.isEmpty || title.isEmpty) {
+      return null;
+    }
+    return _SeriesPlaylistGroup(id: id, title: title);
+  }
+
+  List<_PlaylistDisplayRow> _rows() {
+    final rows = <_PlaylistDisplayRow>[];
+    var index = 0;
+    while (index < playlist.items.length) {
+      final item = playlist.items[index];
+      final group = _seriesGroup(item);
+      if (group == null) {
+        rows.add(
+          _PlaylistDisplayRow(group: null, startIndex: index, items: [item]),
+        );
+        index += 1;
+        continue;
+      }
+      final grouped = <HubItem>[item];
+      var cursor = index + 1;
+      while (cursor < playlist.items.length) {
+        final current = _seriesGroup(playlist.items[cursor]);
+        if (current == null || current.id != group.id) {
+          break;
+        }
+        grouped.add(playlist.items[cursor]);
+        cursor += 1;
+      }
+      rows.add(
+        _PlaylistDisplayRow(group: group, startIndex: index, items: grouped),
+      );
+      index = cursor;
+    }
+    return rows;
+  }
+
+  Future<void> _removeSeriesGroup(String groupId) async {
+    await _change(
+      playlist.items.where((item) => _seriesGroup(item)?.id != groupId).toList(),
+    );
+  }
+
+  Widget _editableRowActions(int index, HubItem item) => Row(
+    mainAxisAlignment: MainAxisAlignment.end,
+    children: [
+      IconButton(
+        tooltip: 'Move up',
+        onPressed: busy || index == 0
+            ? null
+            : () {
+                final items = List<HubItem>.from(playlist.items);
+                items.insert(index - 1, items.removeAt(index));
+                unawaited(_change(items));
+              },
+        icon: const Icon(Icons.arrow_upward),
+      ),
+      IconButton(
+        tooltip: 'Move down',
+        onPressed: busy || index == playlist.items.length - 1
+            ? null
+            : () {
+                final items = List<HubItem>.from(playlist.items);
+                items.insert(index + 1, items.removeAt(index));
+                unawaited(_change(items));
+              },
+        icon: const Icon(Icons.arrow_downward),
+      ),
+      IconButton(
+        tooltip: 'Remove from playlist',
+        onPressed: busy
+            ? null
+            : () => unawaited(
+                _change(
+                  playlist.items.where((v) => v.key != item.key).toList(),
+                ),
+              ),
+        icon: const Icon(Icons.remove_circle_outline),
+      ),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -1107,82 +1218,133 @@ class _PlaylistContentsState extends State<_PlaylistContents> {
             ),
           ),
         Expanded(
-          child: ListView.builder(
+          child: Builder(
+            builder: (context) {
+              final rows = _rows();
+              return ListView.builder(
             padding: const EdgeInsets.all(12),
-            itemCount: playlist.items.isEmpty ? 1 : playlist.items.length,
+            itemCount: playlist.items.isEmpty ? 1 : rows.length,
             itemBuilder: (context, index) {
               if (playlist.items.isEmpty) {
                 return const Text(
                   'This playlist is empty. Add saved media using the button above.',
                 );
               }
-              final item = playlist.items[index];
-              return Column(
-                children: [
-                  _HubItemTile(
-                    item: item,
-                    favorite: widget.isFavorite(item),
-                    onOpen: () => unawaited(widget.onOpen(item)),
-                    onFavorite: () => unawaited(
-                      widget.onFavorite(item).then((_) {
-                        if (mounted) setState(() {});
-                      }),
+              final row = rows[index];
+              final group = row.group;
+              if (group == null) {
+                final item = row.items.first;
+                return Column(
+                  children: [
+                    _HubItemTile(
+                      item: item,
+                      favorite: widget.isFavorite(item),
+                      onOpen: () => unawaited(widget.onOpen(item)),
+                      onFavorite: () => unawaited(
+                        widget.onFavorite(item).then((_) {
+                          if (mounted) setState(() {});
+                        }),
+                      ),
+                      onAdd: () => unawaited(widget.onAdd(item)),
                     ),
-                    onAdd: () => unawaited(widget.onAdd(item)),
-                  ),
-                  if (widget.onSave != null)
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        IconButton(
-                          tooltip: 'Move up',
-                          onPressed: busy || index == 0
-                              ? null
-                              : () {
-                                  final items = List<HubItem>.from(
-                                    playlist.items,
-                                  );
-                                  items.insert(
-                                    index - 1,
-                                    items.removeAt(index),
-                                  );
-                                  unawaited(_change(items));
-                                },
-                          icon: const Icon(Icons.arrow_upward),
+                    if (widget.onSave != null)
+                      _editableRowActions(row.startIndex, item),
+                  ],
+                );
+              }
+              final expanded = expandedSeriesGroups.contains(group.id);
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.video_library_outlined),
+                        title: Text(group.title),
+                        subtitle: Text(
+                          '${row.items.length} episodes${expanded ? ' · expanded' : ''}',
                         ),
-                        IconButton(
-                          tooltip: 'Move down',
-                          onPressed: busy || index == playlist.items.length - 1
-                              ? null
-                              : () {
-                                  final items = List<HubItem>.from(
-                                    playlist.items,
-                                  );
-                                  items.insert(
-                                    index + 1,
-                                    items.removeAt(index),
-                                  );
-                                  unawaited(_change(items));
-                                },
-                          icon: const Icon(Icons.arrow_downward),
+                        onTap: () {
+                          setState(() {
+                            if (expanded) {
+                              expandedSeriesGroups.remove(group.id);
+                            } else {
+                              expandedSeriesGroups.add(group.id);
+                            }
+                          });
+                        },
+                        trailing: Wrap(
+                          spacing: 4,
+                          children: [
+                            if (widget.onSave != null && !expanded)
+                              IconButton(
+                                tooltip: 'Remove entire series from playlist',
+                                onPressed: busy
+                                    ? null
+                                    : () => unawaited(
+                                        _removeSeriesGroup(group.id),
+                                      ),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            IconButton(
+                              tooltip: expanded
+                                  ? 'Collapse series episodes'
+                                  : 'Expand series episodes',
+                              onPressed: () {
+                                setState(() {
+                                  if (expanded) {
+                                    expandedSeriesGroups.remove(group.id);
+                                  } else {
+                                    expandedSeriesGroups.add(group.id);
+                                  }
+                                });
+                              },
+                              icon: Icon(
+                                expanded
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                            ),
+                          ],
                         ),
-                        IconButton(
-                          tooltip: 'Remove from playlist',
-                          onPressed: busy
-                              ? null
-                              : () => unawaited(
-                                  _change(
-                                    playlist.items
-                                        .where((v) => v.key != item.key)
-                                        .toList(),
+                      ),
+                      if (expanded)
+                        for (var localIndex = 0;
+                            localIndex < row.items.length;
+                            localIndex++)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 16),
+                            child: Column(
+                              children: [
+                                _HubItemTile(
+                                  item: row.items[localIndex],
+                                  favorite: widget.isFavorite(
+                                    row.items[localIndex],
                                   ),
+                                  onOpen: () =>
+                                      unawaited(widget.onOpen(row.items[localIndex])),
+                                  onFavorite: () => unawaited(
+                                    widget.onFavorite(row.items[localIndex]).then((_) {
+                                      if (mounted) setState(() {});
+                                    }),
+                                  ),
+                                  onAdd: () =>
+                                      unawaited(widget.onAdd(row.items[localIndex])),
                                 ),
-                          icon: const Icon(Icons.remove_circle_outline),
-                        ),
-                      ],
-                    ),
-                ],
+                                if (widget.onSave != null)
+                                  _editableRowActions(
+                                    row.startIndex + localIndex,
+                                    row.items[localIndex],
+                                  ),
+                              ],
+                            ),
+                          ),
+                    ],
+                  ),
+                ),
               );
+            },
+          );
             },
           ),
         ),
