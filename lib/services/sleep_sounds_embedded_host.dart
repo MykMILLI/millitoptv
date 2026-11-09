@@ -2,11 +2,22 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter_windows/webview_flutter_windows.dart';
+import 'app_log.dart';
 
 class SleepSoundsEmbeddedHost extends ChangeNotifier {
   SleepSoundsEmbeddedHost._();
   static final SleepSoundsEmbeddedHost instance = SleepSoundsEmbeddedHost._();
+
+  static const String _howlerAssetPath =
+      'assets/native/sleep_sounds/howler/howler-2.2.4.min.js';
+  static const Map<String, String> _soundAssetPaths = <String, String>{
+    'heavy-rain': 'assets/native/sleep_sounds/moodist/rain/heavy-rain.mp3',
+    'thunder': 'assets/native/sleep_sounds/moodist/rain/thunder.mp3',
+    'white-noise': 'assets/native/sleep_sounds/moodist/noise/white-noise.wav',
+    'pink-noise': 'assets/native/sleep_sounds/moodist/noise/pink-noise.wav',
+  };
 
   WebviewController? _controller;
   StreamSubscription<dynamic>? _messageSub;
@@ -15,17 +26,21 @@ class SleepSoundsEmbeddedHost extends ChangeNotifier {
   final StreamController<Map<String, dynamic>> _events =
       StreamController<Map<String, dynamic>>.broadcast();
   Completer<void>? _readyCompleter;
+  Completer<void>? _viewAttachedCompleter;
   int? _activeProfileId;
   bool _initializing = false;
   bool _disposed = false;
+  String? _embeddedHtmlCache;
   String lastError = '';
+  String? _activeAttemptId;
+  DateTime? _attemptStartedAt;
 
   Stream<Map<String, dynamic>> get events => _events.stream;
   WebviewController? get controller => _controller;
   bool get ready => _readyCompleter?.isCompleted == true;
   int? get activeProfileId => _activeProfileId;
 
-  Future<void> ensureReady(int profileId) async {
+  Future<void> ensureReady(int profileId, {String? attemptId}) async {
     if (_disposed) {
       throw StateError('Embedded Sleep Sounds host was disposed.');
     }
@@ -44,15 +59,27 @@ class SleepSoundsEmbeddedHost extends ChangeNotifier {
     }
     _initializing = true;
     try {
+      _activeAttemptId = (attemptId == null || attemptId.trim().isEmpty)
+          ? 'sleep-start-${DateTime.now().microsecondsSinceEpoch}'
+          : attemptId;
+      _attemptStartedAt = DateTime.now();
+      _traceStage('start-attempt');
       await _resetController();
+      _traceStage('asset-validation-start');
+      final embeddedHtml = await _buildEmbeddedHtml();
+      _traceStage('asset-validation-completed');
       final next = WebviewController();
       await next.initialize();
       await next.setBackgroundColor(Colors.black);
       await next.setPopupWindowPolicy(WebviewPopupWindowPolicy.deny);
+      _traceStage('webview-controller-initialized');
 
       _readyCompleter = Completer<void>();
+      _viewAttachedCompleter = Completer<void>();
       _controller = next;
       _activeProfileId = profileId;
+      notifyListeners();
+      _traceStage('webview-controller-published');
 
       _messageSub = next.webMessage.listen(_handleWebMessage);
       _loadErrorSub = next.onLoadError.listen((error) {
@@ -65,12 +92,70 @@ class SleepSoundsEmbeddedHost extends ChangeNotifier {
       });
       _loadingSub = next.loadingState.listen((state) {
         _events.add({'type': 'loading', 'value': state.name});
+        if (state.name == 'navigationCompleted') {
+          _traceStage('document-navigation-completed');
+        }
       });
 
-      await next.loadStringContent(_embeddedSleepSoundsHtml);
-      await _readyCompleter!.future.timeout(const Duration(seconds: 15));
+      await _viewAttachedCompleter!.future.timeout(const Duration(seconds: 6));
+      _traceStage('persistent-webview-widget-attached');
+      await next.loadStringContent(embeddedHtml);
+      await _readyCompleter!.future.timeout(const Duration(seconds: 25));
+      _traceStage('javascript-bootstrap-reached');
+      await postCommand({
+        'commandId': 'howler-status-${DateTime.now().microsecondsSinceEpoch}',
+        'action': 'howlerStatus',
+        'attemptId': _activeAttemptId,
+      });
+      await _awaitEvent(
+        (event) =>
+            event['type'] == 'howler-status' &&
+            event['available'] == true &&
+            event['attemptId'] == _activeAttemptId,
+        const Duration(seconds: 5),
+        'howler-available',
+      );
+      await postCommand({
+        'commandId': 'host-ping-${DateTime.now().microsecondsSinceEpoch}',
+        'action': 'ping',
+        'attemptId': _activeAttemptId,
+      });
+      await _awaitEvent(
+        (event) =>
+            event['type'] == 'pong' && event['attemptId'] == _activeAttemptId,
+        const Duration(seconds: 5),
+        'ping-pong-completed',
+      );
+      await postCommand({
+        'commandId':
+            'probe-heavy-rain-${DateTime.now().microsecondsSinceEpoch}',
+        'action': 'probeHeavyRain',
+        'attemptId': _activeAttemptId,
+      });
+      await _awaitEvent(
+        (event) =>
+            event['type'] == 'probe-heavy-rain-ok' &&
+            event['attemptId'] == _activeAttemptId,
+        const Duration(seconds: 12),
+        'heavy-rain-load-decode-completed',
+      );
       _events.add({'type': 'host-ready'});
+      _traceStage('host-ready');
       notifyListeners();
+    } catch (error, stackTrace) {
+      _traceStage(
+        'host-failed',
+        level: LogLevel.error,
+        details: {'error': error.toString()},
+      );
+      AppLog.error(
+        LogCategory.playback,
+        'Sleep Sounds embedded host initialization failed.',
+        error: error,
+        stackTrace: stackTrace,
+        details: {'attemptId': _activeAttemptId ?? ''},
+      );
+      rethrow;
     } finally {
       _initializing = false;
     }
@@ -107,55 +192,83 @@ class SleepSoundsEmbeddedHost extends ChangeNotifier {
         _readyCompleter!.complete();
       }
     }
+    if (type == 'trace') {
+      _traceStage(
+        map['stage']?.toString() ?? 'js-trace',
+        details: {
+          'source': 'javascript',
+          'audioContextState': map['audioContextState']?.toString() ?? '',
+          'soundId': map['soundId']?.toString() ?? '',
+        },
+      );
+    }
+    if (type == 'error' || type == 'js-error') {
+      AppLog.error(
+        LogCategory.playback,
+        'Sleep Sounds embedded JavaScript error.',
+        details: {
+          'attemptId': _activeAttemptId ?? '',
+          'type': type,
+          'message': map['message']?.toString() ?? '',
+          'action': map['action']?.toString() ?? '',
+        },
+      );
+    }
     _events.add(map);
   }
 
-  Future<void> _resetController() async {
-    await _messageSub?.cancel();
-    await _loadErrorSub?.cancel();
-    await _loadingSub?.cancel();
-    _messageSub = null;
-    _loadErrorSub = null;
-    _loadingSub = null;
-    final active = _controller;
-    _controller = null;
-    if (active != null) {
-      try {
-        await active.dispose();
-      } catch (_) {}
+  Future<void> _awaitEvent(
+    bool Function(Map<String, dynamic> event) match,
+    Duration timeout,
+    String successStage,
+  ) async {
+    final completer = Completer<void>();
+    late final StreamSubscription<Map<String, dynamic>> sub;
+    sub = _events.stream.listen((event) {
+      if (completer.isCompleted) {
+        return;
+      }
+      if (match(event)) {
+        completer.complete();
+      }
+    });
+    try {
+      await completer.future.timeout(timeout);
+      _traceStage(successStage);
+    } on TimeoutException catch (error, stackTrace) {
+      _traceStage(
+        '$successStage-timeout',
+        level: LogLevel.error,
+        details: {'timeoutMs': timeout.inMilliseconds},
+      );
+      AppLog.error(
+        LogCategory.playback,
+        'Sleep Sounds startup stage timed out.',
+        error: error,
+        stackTrace: stackTrace,
+        details: {
+          'attemptId': _activeAttemptId ?? '',
+          'stage': successStage,
+          'timeoutMs': timeout.inMilliseconds,
+        },
+      );
+      rethrow;
+    } finally {
+      unawaited(sub.cancel());
     }
   }
 
-  Future<void> disposeHost() async {
-    _disposed = true;
-    await _resetController();
-    _activeProfileId = null;
-    _readyCompleter = null;
-    notifyListeners();
-  }
-}
+  Future<String> _buildEmbeddedHtml() async {
+    final cached = _embeddedHtmlCache;
+    if (cached != null) {
+      return cached;
+    }
+    final howlerJs = await rootBundle.loadString(_howlerAssetPath);
+    final soundDataUris = await _loadSoundDataUris();
+    final soundAssetsJson = jsonEncode(soundDataUris);
 
-class SleepSoundsEmbeddedHostView extends StatelessWidget {
-  const SleepSoundsEmbeddedHostView({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: SleepSoundsEmbeddedHost.instance,
-      builder: (context, _) {
-        final controller = SleepSoundsEmbeddedHost.instance.controller;
-        if (controller == null) {
-          return const SizedBox.shrink();
-        }
-        return IgnorePointer(
-          child: Opacity(opacity: 0.01, child: Webview(controller)),
-        );
-      },
-    );
-  }
-}
-
-const String _embeddedSleepSoundsHtml = '''
+    final html =
+        '''
 <!doctype html>
 <html>
 <head>
@@ -169,12 +282,17 @@ const String _embeddedSleepSoundsHtml = '''
 </head>
 <body>
 <script>
+$howlerJs
+</script>
+<script>
 (function() {
   const supportsBridge = !!(window.chrome && window.chrome.webview);
+  const SOUND_ASSETS = $soundAssetsJson;
+  const IDS = ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
+  const FADE_MS = 220;
   const engine = {
-    context: null,
-    master: null,
-    active: new Map(),
+    players: new Map(),
+    playIds: new Map(),
     preset: 'overnight-storm',
     playing: false,
     paused: false,
@@ -198,113 +316,30 @@ const String _embeddedSleepSoundsHtml = '''
       supportsEmbeddedPlayback: true
     }
   };
+  let currentAttemptId = '';
+
+  function stage(stageName, details) {
+    emit('trace', Object.assign({
+      stage: stageName,
+      attemptId: currentAttemptId,
+      audioContextState: Howler && Howler.ctx ? Howler.ctx.state : 'unknown'
+    }, details || {}));
+  }
 
   function emit(type, payload) {
     if (!supportsBridge) return;
-    const msg = Object.assign({ type }, payload || {});
+    const msg = Object.assign({ type: type }, payload || {});
     window.chrome.webview.postMessage(JSON.stringify(msg));
   }
 
-  function ensureAudio() {
-    if (engine.context) return;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) throw new Error('Web Audio API is unavailable.');
-    engine.context = new Ctx();
-    engine.master = engine.context.createGain();
-    engine.master.gain.value = engine.masterVolume;
-    engine.master.connect(engine.context.destination);
+  function clamp(value, min, max) {
+    const num = Number(value);
+    if (Number.isNaN(num)) return min;
+    return Math.max(min, Math.min(max, num));
   }
 
-  function withTimeout(promise, ms, label) {
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms))
-    ]);
-  }
-
-  function makeNoiseNode(kind) {
-    const processor = engine.context.createScriptProcessor(4096, 1, 1);
-    let brown = 0.0;
-    let pink0 = 0.0;
-    let pink1 = 0.0;
-    let pink2 = 0.0;
-    let pink3 = 0.0;
-    let pink4 = 0.0;
-    let pink5 = 0.0;
-    let pink6 = 0.0;
-    processor.onaudioprocess = function(e) {
-      const out = e.outputBuffer.getChannelData(0);
-      for (let i = 0; i < out.length; i++) {
-        const white = Math.random() * 2 - 1;
-        if (kind === 'white-noise') {
-          out[i] = white * 0.45;
-          continue;
-        }
-        if (kind === 'pink-noise') {
-          pink0 = 0.99886 * pink0 + white * 0.0555179;
-          pink1 = 0.99332 * pink1 + white * 0.0750759;
-          pink2 = 0.96900 * pink2 + white * 0.1538520;
-          pink3 = 0.86650 * pink3 + white * 0.3104856;
-          pink4 = 0.55000 * pink4 + white * 0.5329522;
-          pink5 = -0.7616 * pink5 - white * 0.0168980;
-          const pink = pink0 + pink1 + pink2 + pink3 + pink4 + pink5 + pink6 + white * 0.5362;
-          pink6 = white * 0.115926;
-          out[i] = pink * 0.11;
-          continue;
-        }
-        brown = (brown + (0.02 * white)) / 1.02;
-        out[i] = brown * 3.5;
-      }
-    };
-    return processor;
-  }
-
-  function createThunderLayer(gain) {
-    const osc = engine.context.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = 48;
-    const rumble = engine.context.createGain();
-    rumble.gain.value = 0.00001;
-    osc.connect(rumble);
-    rumble.connect(gain);
-    osc.start();
-
-    const timer = setInterval(() => {
-      const now = engine.context.currentTime;
-      const hit = 0.12 + Math.random() * 0.20;
-      rumble.gain.cancelScheduledValues(now);
-      rumble.gain.setValueAtTime(0.00001, now);
-      rumble.gain.linearRampToValueAtTime(hit, now + 0.03);
-      rumble.gain.exponentialRampToValueAtTime(0.00001, now + 1.2 + Math.random() * 1.8);
-      osc.frequency.setValueAtTime(42 + Math.random() * 16, now);
-    }, 3200 + Math.floor(Math.random() * 3000));
-    return { osc, rumble, timer };
-  }
-
-  function baseGainFor(id) {
-    switch (id) {
-      case 'heavy-rain':
-        return 0.34;
-      case 'thunder':
-        return 0.26;
-      case 'white-noise':
-        return 0.20;
-      case 'pink-noise':
-        return 0.18;
-      case 'rain':
-        return 0.20;
-      case 'ocean':
-        return 0.24;
-      case 'forest':
-        return 0.16;
-      case 'brown-noise':
-      default:
-        return 0.28;
-    }
-  }
-
-  function layerEnabled(id) {
-    return engine.enabled[id] === true;
+  function toBoolean(value) {
+    return value === true;
   }
 
   function layerVolume(id) {
@@ -312,159 +347,242 @@ const String _embeddedSleepSoundsHtml = '''
     if (typeof raw !== 'number' || Number.isNaN(raw)) {
       return 0.7;
     }
-    return Math.max(0, Math.min(1, raw));
+    return clamp(raw, 0, 1);
   }
 
-  function applyLayerOutput(id) {
-    const layer = engine.active.get(id);
-    if (!layer || !layer.outputGain) return;
-    const now = engine.context.currentTime;
-    const target = layerEnabled(id) ? layerVolume(id) : 0;
-    layer.outputGain.gain.cancelScheduledValues(now);
-    layer.outputGain.gain.setValueAtTime(layer.outputGain.gain.value, now);
-    layer.outputGain.gain.linearRampToValueAtTime(target, now + 0.08);
+  function layerEnabled(id) {
+    return toBoolean(engine.enabled[id]);
+  }
+
+  function targetVolume(id) {
+    return layerEnabled(id) ? layerVolume(id) * engine.masterVolume : 0;
+  }
+
+  function ensurePlayer(id) {
+    if (engine.players.has(id)) {
+      return engine.players.get(id);
+    }
+    const src = SOUND_ASSETS[id];
+    if (!src) {
+      throw new Error('Missing local asset for "' + id + '".');
+    }
+    const player = new Howl({
+      src: [src],
+      preload: true,
+      loop: true,
+      html5: false,
+      volume: 0,
+      onloaderror: function(_, err) {
+        emit('error', { message: 'Could not load Sleep Sounds asset for "' + id + '": ' + String(err) });
+      },
+      onload: function() {
+        if (id === 'heavy-rain') {
+          emit('probe-heavy-rain-ok', { attemptId: currentAttemptId });
+        }
+      },
+      onplayerror: function(_, err) {
+        emit('error', { message: 'Playback unlock error for "' + id + '": ' + String(err) });
+      }
+    });
+    engine.players.set(id, player);
+    return player;
+  }
+
+  function activeLayers() {
+    const layers = [];
+    IDS.forEach(function(id) {
+      const player = engine.players.get(id);
+      const playId = engine.playIds.get(id);
+      if (!player || playId == null) return;
+      if (player.playing(playId)) {
+        layers.push(id);
+      }
+    });
+    return layers;
+  }
+
+  function applyLayerVolume(id, duration) {
+    const player = engine.players.get(id);
+    const playId = engine.playIds.get(id);
+    if (!player || playId == null) return;
+    const current = player.volume(playId);
+    const next = targetVolume(id);
+    if (!Number.isFinite(current) || !Number.isFinite(next)) return;
+    const fadeMs = clamp(duration, 0, 1500);
+    if (fadeMs <= 0) {
+      player.volume(next, playId);
+      return;
+    }
+    player.fade(current, next, fadeMs, playId);
   }
 
   function startLayer(id) {
-    if (engine.active.has(id)) {
-      applyLayerOutput(id);
-      return;
-    }
-    ensureAudio();
-    const node = makeNoiseNode(id);
-    const filter = engine.context.createBiquadFilter();
-    const gain = engine.context.createGain();
-    const outputGain = engine.context.createGain();
-    const lfo = engine.context.createOscillator();
-    const lfoGain = engine.context.createGain();
-    let thunder = null;
+    return new Promise(function(resolve, reject) {
+      try {
+        const player = ensurePlayer(id);
+        const existingId = engine.playIds.get(id);
+        if (existingId != null && player.playing(existingId)) {
+          applyLayerVolume(id, FADE_MS);
+          resolve();
+          return;
+        }
 
-    if (id === 'heavy-rain') {
-      filter.type = 'highpass';
-      filter.frequency.value = 800;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.23;
-      lfoGain.gain.value = 0.05;
-    } else if (id === 'thunder') {
-      filter.type = 'lowpass';
-      filter.frequency.value = 150;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.06;
-      lfoGain.gain.value = 0.04;
-      thunder = createThunderLayer(gain);
-    } else if (id === 'white-noise') {
-      filter.type = 'highpass';
-      filter.frequency.value = 1200;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.12;
-      lfoGain.gain.value = 0.015;
-    } else if (id === 'pink-noise') {
-      filter.type = 'bandpass';
-      filter.frequency.value = 560;
-      filter.Q.value = 0.5;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.08;
-      lfoGain.gain.value = 0.02;
-    } else if (id === 'rain') {
-      filter.type = 'highpass';
-      filter.frequency.value = 1300;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.18;
-      lfoGain.gain.value = 0.03;
-    } else if (id === 'ocean') {
-      filter.type = 'lowpass';
-      filter.frequency.value = 700;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.07;
-      lfoGain.gain.value = 0.06;
-    } else if (id === 'forest') {
-      filter.type = 'bandpass';
-      filter.frequency.value = 1800;
-      filter.Q.value = 0.7;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.22;
-      lfoGain.gain.value = 0.04;
-    } else {
-      filter.type = 'lowpass';
-      filter.frequency.value = 260;
-      gain.gain.value = baseGainFor(id);
-      lfo.frequency.value = 0.03;
-      lfoGain.gain.value = 0.05;
-    }
+        let settled = false;
+        function finishWithError(message) {
+          if (settled) return;
+          settled = true;
+          reject(new Error(message));
+        }
+        function finishSuccess(playId) {
+          if (settled) return;
+          settled = true;
+          engine.playIds.set(id, playId);
+          stage('play-event-received', { soundId: id });
+          applyLayerVolume(id, FADE_MS);
+          resolve();
+        }
 
-    gain.gain.value *= layerVolume(id);
-    outputGain.gain.value = 0;
-    lfo.connect(lfoGain);
-    lfoGain.connect(gain.gain);
-    node.connect(filter);
-    filter.connect(gain);
-    gain.connect(outputGain);
-    outputGain.connect(engine.master);
-    lfo.start();
-    engine.active.set(id, { node, filter, gain, outputGain, lfo, lfoGain, thunder });
-    applyLayerOutput(id);
+        const onPlayError = function(_, err) {
+          player.off('playerror', onPlayError);
+          Howler.once('unlock', function() {
+            try {
+              const unlockedId = player.play(existingId);
+              const playId = typeof unlockedId === 'number' ? unlockedId : existingId;
+              if (typeof playId === 'number') {
+                finishSuccess(playId);
+              } else {
+                finishWithError('Could not resume "' + id + '" after unlock.');
+              }
+            } catch (retryErr) {
+              finishWithError('Could not start "' + id + '" after unlock: ' + String(retryErr));
+            }
+          });
+          setTimeout(function() {
+            finishWithError('Audio unlock required for "' + id + '": ' + String(err));
+          }, 2200);
+        };
+        player.on('playerror', onPlayError);
+
+        let startedId;
+        try {
+          startedId = existingId != null ? player.play(existingId) : player.play();
+        } catch (err) {
+          player.off('playerror', onPlayError);
+          finishWithError('Could not play "' + id + '": ' + String(err));
+          return;
+        }
+        const playId = typeof startedId === 'number' ? startedId : existingId;
+        if (typeof playId !== 'number') {
+          player.off('playerror', onPlayError);
+          finishWithError('No playback handle for "' + id + '".');
+          return;
+        }
+        if (player.playing(playId)) {
+          player.off('playerror', onPlayError);
+          finishSuccess(playId);
+          return;
+        }
+        player.once('play', function(playedId) {
+          if (playedId !== playId) return;
+          player.off('playerror', onPlayError);
+          finishSuccess(playId);
+        }, playId);
+        setTimeout(function() {
+          player.off('playerror', onPlayError);
+          finishWithError('Playback start timed out for "' + id + '".');
+        }, 5000);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  function pauseLayer(id) {
+    return new Promise(function(resolve) {
+      const player = engine.players.get(id);
+      const playId = engine.playIds.get(id);
+      if (!player || playId == null || !player.playing(playId)) {
+        resolve();
+        return;
+      }
+      const current = player.volume(playId);
+      player.fade(current, 0, FADE_MS, playId);
+      setTimeout(function() {
+        try { player.pause(playId); } catch (_) {}
+        resolve();
+      }, FADE_MS + 20);
+    });
   }
 
   function stopLayer(id) {
-    const entry = engine.active.get(id);
-    if (!entry) return;
-      try { entry.node.disconnect(); } catch (_) {}
-      try { entry.filter.disconnect(); } catch (_) {}
-      try { entry.gain.disconnect(); } catch (_) {}
-      try { entry.outputGain.disconnect(); } catch (_) {}
-      try { entry.lfo.stop(); } catch (_) {}
-      try { entry.lfo.disconnect(); } catch (_) {}
-      try { entry.lfoGain.disconnect(); } catch (_) {}
-      if (entry.thunder) {
-        try { clearInterval(entry.thunder.timer); } catch (_) {}
-        try { entry.thunder.osc.stop(); } catch (_) {}
-        try { entry.thunder.osc.disconnect(); } catch (_) {}
-        try { entry.thunder.rumble.disconnect(); } catch (_) {}
+    return new Promise(function(resolve) {
+      const player = engine.players.get(id);
+      const playId = engine.playIds.get(id);
+      if (!player || playId == null) {
+        resolve();
+        return;
       }
-    engine.active.delete(id);
+      const current = player.volume(playId);
+      player.fade(current, 0, FADE_MS, playId);
+      setTimeout(function() {
+        try { player.stop(playId); } catch (_) {}
+        resolve();
+      }, FADE_MS + 20);
+    });
   }
 
-  function stopAllLayers() {
-    Array.from(engine.active.keys()).forEach((id) => stopLayer(id));
-    engine.active.clear();
-  }
-
-  function mixForPreset(preset) {
-    switch (preset) {
-      case 'overnight-storm':
-        return ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
-      case 'heavy-rain':
-        return ['heavy-rain', 'white-noise'];
-      case 'thunder':
-        return ['thunder', 'heavy-rain'];
-      case 'white-noise':
-        return ['white-noise'];
-      case 'pink-noise':
-        return ['pink-noise'];
-      default:
-        return ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
+  async function startEnabledLayers() {
+    const enabledIds = IDS.filter(function(id) { return layerEnabled(id); });
+    if (enabledIds.length === 0) {
+      throw new Error('Enable at least one Sleep Sound to start playback.');
+    }
+    for (const id of enabledIds) {
+      await startLayer(id);
+    }
+    for (const id of IDS) {
+      if (!layerEnabled(id)) {
+        await pauseLayer(id);
+      }
     }
   }
 
-  function syncLayers() {
-    const ids = ['heavy-rain', 'thunder', 'white-noise', 'pink-noise'];
-    ids.forEach((id) => {
-      if (!layerEnabled(id)) {
-        stopLayer(id);
-        return;
-      }
-      startLayer(id);
-      applyLayerOutput(id);
-    });
-    if (engine.active.size === 0) {
-      engine.playing = false;
-      engine.paused = false;
+  async function pauseAllLayers() {
+    const layers = activeLayers();
+    for (const id of layers) {
+      await pauseLayer(id);
+    }
+  }
+
+  async function stopAllLayers() {
+    const ids = Array.from(engine.playIds.keys());
+    for (const id of ids) {
+      await stopLayer(id);
+    }
+  }
+
+  async function syncLayer(id) {
+    ensurePlayer(id);
+    if (!engine.playing || engine.paused) {
+      return;
+    }
+    if (layerEnabled(id)) {
+      await startLayer(id);
+      applyLayerVolume(id, FADE_MS);
+      return;
+    }
+    await pauseLayer(id);
+  }
+
+  async function syncMix() {
+    for (const id of IDS) {
+      await syncLayer(id);
     }
   }
 
   function applyMasterVolume() {
-    if (!engine.master) return;
-    engine.master.gain.value = Math.max(0, Math.min(1, engine.masterVolume));
+    IDS.forEach(function(id) {
+      applyLayerVolume(id, FADE_MS);
+    });
   }
 
   function sendStatus(commandId) {
@@ -475,9 +593,57 @@ const String _embeddedSleepSoundsHtml = '''
       preset: engine.preset,
       masterVolume: engine.masterVolume,
       perSoundVolume: engine.volumes,
-      activeLayers: Array.from(engine.active.keys()).filter((id) => layerEnabled(id)),
+      activeLayers: activeLayers(),
       capabilities: engine.capabilities
     });
+  }
+
+  function applyPreset(preset) {
+    const key = String(preset || '').trim();
+    if (!key) return;
+    engine.preset = key;
+    if (key === 'heavy-rain') {
+      engine.enabled = {
+        'heavy-rain': true,
+        'thunder': false,
+        'white-noise': false,
+        'pink-noise': false
+      };
+      return;
+    }
+    if (key === 'thunder') {
+      engine.enabled = {
+        'heavy-rain': true,
+        'thunder': true,
+        'white-noise': false,
+        'pink-noise': false
+      };
+      return;
+    }
+    if (key === 'white-noise') {
+      engine.enabled = {
+        'heavy-rain': false,
+        'thunder': false,
+        'white-noise': true,
+        'pink-noise': false
+      };
+      return;
+    }
+    if (key === 'pink-noise') {
+      engine.enabled = {
+        'heavy-rain': false,
+        'thunder': false,
+        'white-noise': false,
+        'pink-noise': true
+      };
+      return;
+    }
+    engine.enabled = {
+      'heavy-rain': true,
+      'thunder': true,
+      'white-noise': true,
+      'pink-noise': true
+    };
   }
 
   async function commandHandler(raw) {
@@ -487,169 +653,313 @@ const String _embeddedSleepSoundsHtml = '''
     }
     const action = (cmd.action || '').toString();
     const commandId = cmd.commandId || null;
+    if (typeof cmd.attemptId === 'string' && cmd.attemptId.trim().length > 0) {
+      currentAttemptId = cmd.attemptId.trim();
+    }
     try {
       if (action === 'initialize') {
-        ensureAudio();
-        if (cmd.preset) engine.preset = String(cmd.preset);
+        stage('javascript-bootstrap-reached');
+        if (cmd.preset) {
+          applyPreset(cmd.preset);
+        }
         if (typeof cmd.masterVolume === 'number') {
-          engine.masterVolume = Math.max(0, Math.min(1, cmd.masterVolume));
-          applyMasterVolume();
+          engine.masterVolume = clamp(cmd.masterVolume, 0, 1);
         }
         if (cmd.enabled && typeof cmd.enabled === 'object') {
-          Object.keys(cmd.enabled).forEach((id) => {
-            engine.enabled[id] = cmd.enabled[id] === true;
-          });
-        }
-        if (cmd.volumes && typeof cmd.volumes === 'object') {
-          Object.keys(cmd.volumes).forEach((id) => {
-            const next = Number(cmd.volumes[id]);
-            if (!Number.isNaN(next)) {
-              engine.volumes[id] = Math.max(0, Math.min(1, next));
+          IDS.forEach(function(id) {
+            if (Object.prototype.hasOwnProperty.call(cmd.enabled, id)) {
+              engine.enabled[id] = toBoolean(cmd.enabled[id]);
             }
           });
         }
+        if (cmd.volumes && typeof cmd.volumes === 'object') {
+          IDS.forEach(function(id) {
+            if (Object.prototype.hasOwnProperty.call(cmd.volumes, id)) {
+              engine.volumes[id] = clamp(cmd.volumes[id], 0, 1);
+            }
+          });
+        }
+        IDS.forEach(function(id) {
+          ensurePlayer(id);
+        });
+        stage('assets-preloaded');
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
+        return;
+      }
+      if (action === 'ping') {
+        emit('pong', { commandId: commandId, action: action, attemptId: currentAttemptId });
+        emit('ack', { commandId: commandId, action: action });
+        return;
+      }
+      if (action === 'howlerStatus') {
+        emit('howler-status', {
+          commandId: commandId,
+          action: action,
+          attemptId: currentAttemptId,
+          available: typeof Howl === 'function',
+          audioContextState: Howler && Howler.ctx ? Howler.ctx.state : 'unknown'
+        });
+        emit('ack', { commandId: commandId, action: action });
+        return;
+      }
+      if (action === 'probeHeavyRain') {
+        const player = ensurePlayer('heavy-rain');
+        if (player.state() === 'loaded') {
+          emit('probe-heavy-rain-ok', { attemptId: currentAttemptId, from: 'cached' });
+        } else {
+          player.once('load', function() {
+            emit('probe-heavy-rain-ok', { attemptId: currentAttemptId });
+          });
+          player.once('loaderror', function(_, err) {
+            emit('error', { action: action, message: 'Heavy Rain load failed: ' + String(err), attemptId: currentAttemptId });
+          });
+          player.load();
+        }
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'applyPreset') {
-        const preset = String(cmd.preset || '').trim();
-        if (preset) engine.preset = preset;
-        const nextLayers = mixForPreset(engine.preset);
-        Object.keys(engine.enabled).forEach((id) => {
-          engine.enabled[id] = nextLayers.includes(id);
-        });
+        applyPreset(cmd.preset);
         if (engine.playing && !engine.paused) {
-          syncLayers();
+          await syncMix();
         }
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'applyMix') {
         if (cmd.enabled && typeof cmd.enabled === 'object') {
-          Object.keys(cmd.enabled).forEach((id) => {
-            engine.enabled[id] = cmd.enabled[id] === true;
+          IDS.forEach(function(id) {
+            if (Object.prototype.hasOwnProperty.call(cmd.enabled, id)) {
+              engine.enabled[id] = toBoolean(cmd.enabled[id]);
+            }
           });
         }
         if (cmd.volumes && typeof cmd.volumes === 'object') {
-          Object.keys(cmd.volumes).forEach((id) => {
-            const next = Number(cmd.volumes[id]);
-            if (!Number.isNaN(next)) {
-              engine.volumes[id] = Math.max(0, Math.min(1, next));
+          IDS.forEach(function(id) {
+            if (Object.prototype.hasOwnProperty.call(cmd.volumes, id)) {
+              engine.volumes[id] = clamp(cmd.volumes[id], 0, 1);
             }
           });
         }
         if (engine.playing && !engine.paused) {
-          syncLayers();
+          await syncMix();
         }
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'setLayerEnabled') {
         const id = String(cmd.soundId || '').trim();
-        if (id) {
-          engine.enabled[id] = cmd.enabled === true;
-          if (engine.playing && !engine.paused) {
-            syncLayers();
-          }
+        if (IDS.includes(id)) {
+          engine.enabled[id] = toBoolean(cmd.enabled);
+          await syncLayer(id);
         }
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'setMasterVolume') {
-        const next = Number(cmd.masterVolume);
-        if (!Number.isNaN(next)) {
-          engine.masterVolume = Math.max(0, Math.min(1, next));
-          applyMasterVolume();
-        }
+        engine.masterVolume = clamp(cmd.masterVolume, 0, 1);
+        applyMasterVolume();
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'setPerSoundVolume') {
         const id = String(cmd.soundId || '').trim();
-        const next = Number(cmd.volume);
-        if (id && !Number.isNaN(next)) {
-          engine.volumes[id] = Math.max(0, Math.min(1, next));
-          applyLayerOutput(id);
+        if (IDS.includes(id)) {
+          engine.volumes[id] = clamp(cmd.volume, 0, 1);
+          applyLayerVolume(id, FADE_MS);
         }
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'play') {
-        ensureAudio();
-        syncLayers();
-        if (engine.active.size == 0) {
-          throw new Error('Enable at least one Sleep Sound to start playback.');
-        }
-        await withTimeout(engine.context.resume(), 3000, 'Audio resume');
+        stage('play-requested');
+        await startEnabledLayers();
         engine.playing = true;
         engine.paused = false;
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'pause') {
-        ensureAudio();
-        await withTimeout(engine.context.suspend(), 3000, 'Audio pause');
-        engine.paused = true;
+        await pauseAllLayers();
         engine.playing = true;
+        engine.paused = true;
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'resume') {
-        ensureAudio();
-        if (engine.active.size === 0) {
-          syncLayers();
-        }
-        if (engine.active.size == 0) {
-          throw new Error('Enable at least one Sleep Sound to resume playback.');
-        }
-        await withTimeout(engine.context.resume(), 3000, 'Audio resume');
-        engine.paused = false;
+        await startEnabledLayers();
         engine.playing = true;
+        engine.paused = false;
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'stop') {
-        ensureAudio();
-        stopAllLayers();
-        engine.paused = false;
+        await stopAllLayers();
         engine.playing = false;
+        engine.paused = false;
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
       if (action === 'status') {
         sendStatus(commandId);
-        emit('ack', { commandId, action });
+        emit('ack', { commandId: commandId, action: action });
         return;
       }
-      emit('error', { commandId, message: 'Unknown action: ' + action });
+      emit('ack', { commandId: commandId, action: action, ignored: true });
     } catch (err) {
-      emit('error', { commandId, message: String(err) });
+      emit('error', {
+        commandId: commandId,
+        action: action,
+        message: String(err && err.message ? err.message : err)
+      });
     }
   }
 
+  if (typeof Howl !== 'function') {
+    emit('error', { message: 'Howler runtime did not initialize in embedded host.' });
+  }
+  window.addEventListener('error', function(event) {
+    emit('js-error', {
+      attemptId: currentAttemptId,
+      message: event && event.message ? String(event.message) : 'Unknown JavaScript error'
+    });
+  });
+  window.addEventListener('unhandledrejection', function(event) {
+    let reason = 'Unknown rejection';
+    try {
+      reason = String(event && event.reason ? event.reason : reason);
+    } catch (_) {}
+    emit('js-error', { attemptId: currentAttemptId, message: reason });
+  });
   if (supportsBridge) {
-    window.chrome.webview.addEventListener('message', (event) => {
+    window.chrome.webview.addEventListener('message', function(event) {
       commandHandler(event.data);
     });
   }
   emit('ready', {
-    preset: engine.preset,
-    masterVolume: engine.masterVolume,
-    perSoundVolume: engine.volumes,
-    capabilities: engine.capabilities
+    capabilities: engine.capabilities,
+    source: 'moodist-howler-local-assets',
+    howlerLoaded: typeof Howl === 'function',
+    attemptId: currentAttemptId
   });
 })();
 </script>
 </body>
 </html>
 ''';
+    _embeddedHtmlCache = html;
+    return html;
+  }
+
+  Future<Map<String, String>> _loadSoundDataUris() async {
+    final result = <String, String>{};
+    for (final entry in _soundAssetPaths.entries) {
+      final mimeType = _mimeTypeFor(entry.value);
+      final bytes = await rootBundle.load(entry.value);
+      result[entry.key] = _bytesToDataUri(bytes, mimeType);
+    }
+    return result;
+  }
+
+  String _bytesToDataUri(ByteData bytes, String mimeType) {
+    final encoded = base64Encode(bytes.buffer.asUint8List());
+    return 'data:$mimeType;base64,$encoded';
+  }
+
+  String _mimeTypeFor(String path) {
+    if (path.endsWith('.mp3')) {
+      return 'audio/mpeg';
+    }
+    if (path.endsWith('.wav')) {
+      return 'audio/wav';
+    }
+    return 'application/octet-stream';
+  }
+
+  Future<void> _resetController() async {
+    await _messageSub?.cancel();
+    await _loadErrorSub?.cancel();
+    await _loadingSub?.cancel();
+    _messageSub = null;
+    _loadErrorSub = null;
+    _loadingSub = null;
+    _viewAttachedCompleter = null;
+    final active = _controller;
+    _controller = null;
+    if (active != null) {
+      try {
+        await active.dispose();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> disposeHost() async {
+    _disposed = true;
+    await _resetController();
+    _activeProfileId = null;
+    _readyCompleter = null;
+    notifyListeners();
+  }
+
+  void markWidgetAttached() {
+    final completer = _viewAttachedCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
+  }
+
+  void _traceStage(
+    String stage, {
+    LogLevel level = LogLevel.info,
+    Map<String, Object?> details = const {},
+  }) {
+    final started = _attemptStartedAt;
+    final elapsedMs = started == null
+        ? 0
+        : DateTime.now().difference(started).inMilliseconds;
+    final payload = <String, Object?>{
+      'attemptId': _activeAttemptId ?? '',
+      'stage': stage,
+      'elapsedMs': elapsedMs,
+      ...details,
+    };
+    AppLog.instance.log(
+      level,
+      LogCategory.playback,
+      'Sleep Sounds startup stage: $stage',
+      details: payload,
+    );
+    _events.add({'type': 'trace', ...payload});
+  }
+}
+
+class SleepSoundsEmbeddedHostView extends StatelessWidget {
+  const SleepSoundsEmbeddedHostView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: SleepSoundsEmbeddedHost.instance,
+      builder: (context, _) {
+        final controller = SleepSoundsEmbeddedHost.instance.controller;
+        if (controller == null) {
+          return const SizedBox.shrink();
+        }
+        SleepSoundsEmbeddedHost.instance.markWidgetAttached();
+        return IgnorePointer(
+          child: Opacity(opacity: 0.01, child: Webview(controller)),
+        );
+      },
+    );
+  }
+}

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'app_log.dart';
 import 'home_preferences.dart';
 import 'sleep_sounds_embedded_host.dart';
 
@@ -249,6 +250,7 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   final Map<String, Completer<void>> _pending = <String, Completer<void>>{};
   StreamSubscription<Map<String, dynamic>>? _eventsSub;
   int _counter = 0;
+  String _startupAttemptId = '';
   SleepSoundsCapabilities _capabilities =
       SleepSoundsCapabilities.embeddedDefault;
 
@@ -269,10 +271,17 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
     required Map<String, bool> enabled,
     required Map<String, double> volumes,
   }) async {
-    await _host.ensureReady(profileId);
+    _startupAttemptId = 'sleep-start-${DateTime.now().microsecondsSinceEpoch}';
+    AppLog.info(
+      LogCategory.playback,
+      'Sleep Sounds start attempt created.',
+      details: {'attemptId': _startupAttemptId, 'profileId': profileId},
+    );
+    await _host.ensureReady(profileId, attemptId: _startupAttemptId);
     await _send(
       'initialize',
       payload: {
+        'attemptId': _startupAttemptId,
         'preset': preset,
         'masterVolume': (masterVolume / 100).clamp(0, 1),
         'enabled': enabled,
@@ -321,7 +330,8 @@ class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   );
 
   @override
-  Future<void> play() => _send('play');
+  Future<void> play() =>
+      _send('play', payload: {'attemptId': _startupAttemptId});
 
   @override
   Future<void> pause() => _send('pause');
@@ -730,23 +740,13 @@ class SleepSoundsController extends ChangeNotifier {
         ? 'Preparing embedded Sleep Sounds...'
         : 'Opening Sleep Sounds browser fallback...';
     notifyListeners();
-    final selectedBackend = _createBackend();
-    await _attachBackend(selectedBackend);
-    await selectedBackend.initialize(
-      profileId: profileId,
-      preset: selectedPreset,
-      masterVolume: volume,
-      enabled: {for (final id in simpleSoundIds) id: soundEnabled[id] ?? false},
-      volumes: {
-        for (final id in simpleSoundIds)
-          id: perSoundVolume[id] ?? defaultPerSoundVolume[id]!,
-      },
-    );
-    if (capabilities.supportsMasterVolume) {
-      await selectedBackend.setMasterVolume(volume);
-    }
-    if (capabilities.supportsPerSoundVolume) {
-      await selectedBackend.applyMix(
+    try {
+      final selectedBackend = _createBackend();
+      await _attachBackend(selectedBackend);
+      await selectedBackend.initialize(
+        profileId: profileId,
+        preset: selectedPreset,
+        masterVolume: volume,
         enabled: {
           for (final id in simpleSoundIds) id: soundEnabled[id] ?? false,
         },
@@ -755,19 +755,46 @@ class SleepSoundsController extends ChangeNotifier {
             id: perSoundVolume[id] ?? defaultPerSoundVolume[id]!,
         },
       );
+      if (capabilities.supportsMasterVolume) {
+        await selectedBackend.setMasterVolume(volume);
+      }
+      if (capabilities.supportsPerSoundVolume) {
+        await selectedBackend.applyMix(
+          enabled: {
+            for (final id in simpleSoundIds) id: soundEnabled[id] ?? false,
+          },
+          volumes: {
+            for (final id in simpleSoundIds)
+              id: perSoundVolume[id] ?? defaultPerSoundVolume[id]!,
+          },
+        );
+      }
+      await selectedBackend.play();
+      state = SleepSoundsState.playing;
+      if (activeLayers.isEmpty) {
+        activeLayers = [
+          for (final id in simpleSoundIds)
+            if (soundEnabled[id] ?? false) id,
+        ];
+      }
+      message = backend == SleepSoundsBackend.embeddedWebView
+          ? 'Sleep Sounds is running in-app.'
+          : 'Sleep Sounds browser fallback opened.';
+      notifyListeners();
+    } catch (e, stackTrace) {
+      await _detachBackend();
+      state = SleepSoundsState.error;
+      error = e.toString().replaceFirst('Bad state: ', '');
+      message = 'Could not start Sleep Sounds. Please retry.';
+      AppLog.error(
+        LogCategory.playback,
+        'Sleep Sounds start attempt failed.',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      notifyListeners();
+      rethrow;
     }
-    await selectedBackend.play();
-    state = SleepSoundsState.playing;
-    if (activeLayers.isEmpty) {
-      activeLayers = [
-        for (final id in simpleSoundIds)
-          if (soundEnabled[id] ?? false) id,
-      ];
-    }
-    message = backend == SleepSoundsBackend.embeddedWebView
-        ? 'Sleep Sounds is running in-app.'
-        : 'Sleep Sounds browser fallback opened.';
-    notifyListeners();
   }
 
   Future<void> pause() {
@@ -842,10 +869,16 @@ class SleepSoundsController extends ChangeNotifier {
       error = '';
       activeLayers = const <String>[];
       notifyListeners();
-    } catch (e) {
+    } catch (e, stackTrace) {
       state = SleepSoundsState.error;
       error = e.toString().replaceFirst('Bad state: ', '');
       message = 'Could not stop Sleep Sounds.';
+      AppLog.error(
+        LogCategory.playback,
+        'Sleep Sounds stop failed.',
+        error: e,
+        stackTrace: stackTrace,
+      );
       notifyListeners();
       rethrow;
     }

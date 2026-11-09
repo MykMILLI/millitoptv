@@ -133,6 +133,69 @@ class _FakeSleepSoundsBackend implements SleepSoundsPlaybackBackend {
   }
 }
 
+class _FailingInitSleepSoundsBackend implements SleepSoundsPlaybackBackend {
+  final StreamController<SleepSoundsBackendStatus> _status =
+      StreamController<SleepSoundsBackendStatus>.broadcast();
+  final StreamController<String> _errors = StreamController<String>.broadcast();
+
+  @override
+  SleepSoundsCapabilities get capabilities =>
+      SleepSoundsCapabilities.embeddedDefault;
+
+  @override
+  Stream<SleepSoundsBackendStatus> get statusStream => _status.stream;
+
+  @override
+  Stream<String> get errorStream => _errors.stream;
+
+  @override
+  Future<void> initialize({
+    required int profileId,
+    required String preset,
+    required double masterVolume,
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  }) async {
+    throw StateError('Unable to load asset: howler');
+  }
+
+  @override
+  Future<void> applyPreset(String preset) async {}
+
+  @override
+  Future<void> setMasterVolume(double masterVolume) async {}
+
+  @override
+  Future<void> applyMix({
+    required Map<String, bool> enabled,
+    required Map<String, double> volumes,
+  }) async {}
+
+  @override
+  Future<void> setLayerEnabled(String soundId, bool enabled) async {}
+
+  @override
+  Future<void> setPerSoundVolume(String soundId, double volume) async {}
+
+  @override
+  Future<void> play() async {}
+
+  @override
+  Future<void> pause() async {}
+
+  @override
+  Future<void> resume() async {}
+
+  @override
+  Future<void> stop() async {}
+
+  @override
+  Future<void> dispose() async {
+    await _status.close();
+    await _errors.close();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() async {
@@ -235,6 +298,23 @@ void main() {
     await controller.stop();
     expect(backend.calls, containsAll(['pause', 'resume', 'stop']));
   });
+  test(
+    'failed start leaves controller retryable and not stuck loading',
+    () async {
+      final controller = SleepSoundsController.instance;
+      controller.setBackend(SleepSoundsBackend.embeddedWebView);
+      controller.setEmbeddedBackendFactoryForTesting(
+        () => _FailingInitSleepSoundsBackend(),
+      );
+      await expectLater(
+        controller.play(profileId: 9, url: 'https://sleep.millitop.net'),
+        throwsA(isA<StateError>()),
+      );
+      expect(controller.state, SleepSoundsState.error);
+      expect(controller.message, contains('Please retry'));
+      expect(controller.running, isFalse);
+    },
+  );
   test('live tv playlist URL is profile scoped and validated', () async {
     final prefs = HomePreferences();
     expect(await prefs.liveTvPlaylistUrl(1), isEmpty);

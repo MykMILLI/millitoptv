@@ -87,7 +87,15 @@ dependency_overrides:
 flutter:
   assets:
     - assets/native/
+    - assets/native/sleep_sounds/howler/howler-2.2.4.min.js
+    - assets/native/sleep_sounds/moodist/rain/heavy-rain.mp3
+    - assets/native/sleep_sounds/moodist/rain/thunder.mp3
+    - assets/native/sleep_sounds/moodist/noise/white-noise.wav
+    - assets/native/sleep_sounds/moodist/noise/pink-noise.wav
     - third_party/pstube_engine/LICENSE
+    - third_party/howler/LICENSE.md
+    - third_party/moodist/LICENSE
+    - third_party/moodist/ASSET-NOTICES.md
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
