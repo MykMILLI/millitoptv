@@ -10,22 +10,26 @@ Future<void> showSleepModeSheet(
   BuildContext context, {
   required int profileId,
 }) {
-  return showModalBottomSheet<void>(
+  return showDialog<void>(
     context: context,
-    isScrollControlled: true,
-    backgroundColor: const Color(0xFF0E1B33),
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    builder: (sheetContext) => SafeArea(
-      child: SingleChildScrollView(
-        padding: EdgeInsets.only(
-          left: 16,
-          right: 16,
-          top: 16,
-          bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+    barrierDismissible: true,
+    builder: (dialogContext) => Dialog(
+      backgroundColor: const Color(0xFF0E1B33),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760, maxHeight: 900),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 16,
+              bottom: 16 + MediaQuery.of(dialogContext).viewInsets.bottom,
+            ),
+            child: SleepModePanel(profileId: profileId),
+          ),
         ),
-        child: SleepModePanel(profileId: profileId),
       ),
     ),
   );
@@ -45,6 +49,27 @@ class _SleepModePanelState extends State<SleepModePanel> {
   final extensionMinutes = TextEditingController(text: '15');
   bool busy = false;
   String error = '';
+
+  String _soundLabel(String key) {
+    switch (key) {
+      case 'heavy-rain':
+        return 'Heavy Rain';
+      case 'thunder':
+        return 'Thunder';
+      case 'white-noise':
+        return 'White Noise';
+      case 'pink-noise':
+        return 'Pink Noise';
+      case 'brown-noise':
+        return 'Brown Noise';
+      default:
+        if (key.isEmpty) {
+          return key;
+        }
+        final normalized = key.replaceAll('-', ' ');
+        return normalized[0].toUpperCase() + normalized.substring(1);
+    }
+  }
 
   @override
   void initState() {
@@ -146,41 +171,12 @@ class _SleepModePanelState extends State<SleepModePanel> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Start your sounds in the separate Sleep Sounds window, then return to watch TV. The viewing timer leaves that window running.',
+              'Sleep Sounds runs in-app with embedded playback by default. Browser fallback remains available if needed.',
             ),
             const SizedBox(height: 14),
             Text(
               'Sleep Sounds backend: ${sounds.backend == SleepSoundsBackend.browserFallback ? 'Browser fallback' : 'Embedded WebView'}',
               style: const TextStyle(color: Colors.white70),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                ChoiceChip(
-                  label: const Text('Browser fallback'),
-                  selected:
-                      sounds.backend == SleepSoundsBackend.browserFallback,
-                  onSelected: busy
-                      ? null
-                      : (_) => act(() async {
-                          sounds.setBackend(SleepSoundsBackend.browserFallback);
-                          await sounds.savePreferences(widget.profileId);
-                        }),
-                ),
-                ChoiceChip(
-                  label: const Text('Embedded WebView (coming soon)'),
-                  selected:
-                      sounds.backend == SleepSoundsBackend.embeddedWebView,
-                  onSelected: busy
-                      ? null
-                      : (_) => act(() async {
-                          sounds.setBackend(SleepSoundsBackend.embeddedWebView);
-                          await sounds.savePreferences(widget.profileId);
-                        }),
-                ),
-              ],
             ),
             const SizedBox(height: 10),
             Wrap(
@@ -192,25 +188,31 @@ class _SleepModePanelState extends State<SleepModePanel> {
                       ? null
                       : () => act(_openSounds),
                   icon: const Icon(Icons.nightlight_outlined),
-                  label: const Text('Open / return to Sleep Sounds'),
+                  label: const Text('Start / return to Sleep Sounds'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: busy || sleep.applying
+                  onPressed:
+                      busy ||
+                          sleep.applying ||
+                          !sounds.capabilities.supportsPauseResume
                       ? null
                       : () => act(() async {
-                          await sounds.resume();
-                        }),
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Resume Sounds'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: busy || sleep.applying
-                      ? null
-                      : () => act(() async {
+                          if (sounds.state == SleepSoundsState.paused) {
+                            await sounds.resume();
+                            return;
+                          }
                           await sounds.pause();
                         }),
-                  icon: const Icon(Icons.pause),
-                  label: const Text('Pause Sounds'),
+                  icon: Icon(
+                    sounds.state == SleepSoundsState.paused
+                        ? Icons.play_arrow
+                        : Icons.pause,
+                  ),
+                  label: Text(
+                    sounds.state == SleepSoundsState.paused
+                        ? 'Resume Sounds'
+                        : 'Pause Sounds',
+                  ),
                 ),
                 OutlinedButton.icon(
                   onPressed: busy || sleep.applying
@@ -221,13 +223,9 @@ class _SleepModePanelState extends State<SleepModePanel> {
                   icon: const Icon(Icons.stop),
                   label: const Text('Stop Sleep Sounds'),
                 ),
-                TextButton(
-                  onPressed: busy ? null : () => act(editUrl),
-                  child: const Text('Website address'),
-                ),
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             Wrap(
               spacing: 10,
               runSpacing: 10,
@@ -236,6 +234,23 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 DropdownButton<String>(
                   value: sounds.selectedPreset,
                   items: const [
+                    DropdownMenuItem(
+                      value: 'overnight-storm',
+                      child: Text('Overnight storm mix'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'heavy-rain',
+                      child: Text('Heavy rain'),
+                    ),
+                    DropdownMenuItem(value: 'thunder', child: Text('Thunder')),
+                    DropdownMenuItem(
+                      value: 'white-noise',
+                      child: Text('White noise'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'pink-noise',
+                      child: Text('Pink noise'),
+                    ),
                     DropdownMenuItem(value: 'rain', child: Text('Rain')),
                     DropdownMenuItem(value: 'ocean', child: Text('Ocean')),
                     DropdownMenuItem(value: 'forest', child: Text('Forest')),
@@ -244,7 +259,7 @@ class _SleepModePanelState extends State<SleepModePanel> {
                       child: Text('Brown noise'),
                     ),
                   ],
-                  onChanged: busy
+                  onChanged: busy || !sounds.capabilities.supportsPresets
                       ? null
                       : (value) => unawaited(
                           act(() async {
@@ -263,8 +278,11 @@ class _SleepModePanelState extends State<SleepModePanel> {
                     max: 100,
                     value: sounds.volume.clamp(0, 100).toDouble(),
                     label: '${sounds.volume.round()}%',
-                    onChanged: busy ? null : (value) => sounds.setVolume(value),
-                    onChangeEnd: busy
+                    onChanged: busy || !sounds.capabilities.supportsMasterVolume
+                        ? null
+                        : (value) => sounds.setVolume(value),
+                    onChangeEnd:
+                        busy || !sounds.capabilities.supportsMasterVolume
                         ? null
                         : (_) => unawaited(
                             sounds.savePreferences(widget.profileId),
@@ -273,6 +291,126 @@ class _SleepModePanelState extends State<SleepModePanel> {
                 ),
                 Text('Sleep Sounds volume ${sounds.volume.round()}%'),
               ],
+            ),
+            if (sounds.capabilities.supportsPerSoundVolume &&
+                sounds.perSoundVolume.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  collapsedIconColor: Colors.white70,
+                  iconColor: Colors.white70,
+                  title: const Text(
+                    'Individual sound levels',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                  children: [
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        for (final entry in sounds.perSoundVolume.entries)
+                          SizedBox(
+                            width: 220,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${_soundLabel(entry.key)} ${entry.value.round()}%',
+                                  style: const TextStyle(color: Colors.white70),
+                                ),
+                                Slider(
+                                  min: 0,
+                                  max: 100,
+                                  value: entry.value.clamp(0, 100).toDouble(),
+                                  onChanged: busy
+                                      ? null
+                                      : (value) => unawaited(
+                                          sounds.setPerSoundVolume(
+                                            entry.key,
+                                            value,
+                                          ),
+                                        ),
+                                  onChangeEnd: busy
+                                      ? null
+                                      : (_) => unawaited(
+                                          sounds.savePreferences(
+                                            widget.profileId,
+                                          ),
+                                        ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              collapsedIconColor: Colors.white70,
+              iconColor: Colors.white70,
+              title: const Text(
+                'Advanced backend options',
+                style: TextStyle(color: Colors.white70),
+              ),
+              children: [
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Browser fallback'),
+                      selected:
+                          sounds.backend == SleepSoundsBackend.browserFallback,
+                      onSelected: busy
+                          ? null
+                          : (_) => act(() async {
+                              sounds.setBackend(
+                                SleepSoundsBackend.browserFallback,
+                              );
+                              await sounds.savePreferences(widget.profileId);
+                            }),
+                    ),
+                    ChoiceChip(
+                      label: const Text('Embedded WebView (in-app)'),
+                      selected:
+                          sounds.backend == SleepSoundsBackend.embeddedWebView,
+                      onSelected: busy
+                          ? null
+                          : (_) => act(() async {
+                              sounds.setBackend(
+                                SleepSoundsBackend.embeddedWebView,
+                              );
+                              await sounds.savePreferences(widget.profileId);
+                            }),
+                    ),
+                    TextButton(
+                      onPressed:
+                          busy ||
+                              sounds.backend !=
+                                  SleepSoundsBackend.browserFallback
+                          ? null
+                          : () => act(editUrl),
+                      child: const Text('Website address'),
+                    ),
+                  ],
+                ),
+                if (!sounds.capabilities.supportsPauseResume)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Pause/resume and in-app mixing are unavailable in browser fallback mode.',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Playback state: ${sounds.state.name} · Active layers: ${sounds.activeLayers.isEmpty ? 'None' : sounds.activeLayers.join(', ')}',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
             if (sounds.message.isNotEmpty)
               Padding(
@@ -464,7 +602,7 @@ class _SleepModePanelState extends State<SleepModePanel> {
               Text(error, style: const TextStyle(color: Colors.orangeAccent)),
             const SizedBox(height: 10),
             const Text(
-              'Display-off is not PC sleep. Keep Millitop running overnight. Starting a timer does not start website audio. Closing Sleep Sounds does not automatically end keep-awake. Updates are blocked while overnight mode is active.',
+              'Display-off is not PC sleep. Keep Millitop running overnight. Canceling or extending the timer does not change Sleep Sounds playback. Updates are blocked while overnight mode is active.',
               style: TextStyle(color: Colors.white60),
             ),
             const SizedBox(height: 8),

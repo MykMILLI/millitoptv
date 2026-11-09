@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:millitop_tv/services/global_playlists.dart';
@@ -9,10 +11,115 @@ import 'package:millitop_tv/services/sleep_sounds_controller.dart';
 import 'package:millitop_tv/services/viewing_sessions.dart';
 import 'package:millitop_tv/services/sleep_mode.dart';
 
+class _FakeSleepSoundsBackend implements SleepSoundsPlaybackBackend {
+  final StreamController<SleepSoundsBackendStatus> _status =
+      StreamController<SleepSoundsBackendStatus>.broadcast();
+  final StreamController<String> _errors = StreamController<String>.broadcast();
+  final List<String> calls = <String>[];
+  bool _playing = false;
+  bool _paused = false;
+  String _preset = 'rain';
+  double _masterVolume = 70;
+
+  @override
+  SleepSoundsCapabilities get capabilities =>
+      SleepSoundsCapabilities.embeddedDefault;
+
+  @override
+  Stream<SleepSoundsBackendStatus> get statusStream => _status.stream;
+
+  @override
+  Stream<String> get errorStream => _errors.stream;
+
+  @override
+  Future<void> initialize({
+    required int profileId,
+    required String preset,
+    required double masterVolume,
+  }) async {
+    calls.add('initialize:$profileId');
+    _preset = preset;
+    _masterVolume = masterVolume;
+    _emit();
+  }
+
+  @override
+  Future<void> applyPreset(String preset) async {
+    calls.add('applyPreset:$preset');
+    _preset = preset;
+    _emit();
+  }
+
+  @override
+  Future<void> setMasterVolume(double masterVolume) async {
+    calls.add('setMasterVolume:${masterVolume.round()}');
+    _masterVolume = masterVolume;
+    _emit();
+  }
+
+  @override
+  Future<void> setPerSoundVolume(String soundId, double volume) async {
+    calls.add('setPerSoundVolume:$soundId:${volume.round()}');
+  }
+
+  @override
+  Future<void> play() async {
+    calls.add('play');
+    _playing = true;
+    _paused = false;
+    _emit();
+  }
+
+  @override
+  Future<void> pause() async {
+    calls.add('pause');
+    _playing = true;
+    _paused = true;
+    _emit();
+  }
+
+  @override
+  Future<void> resume() async {
+    calls.add('resume');
+    _playing = true;
+    _paused = false;
+    _emit();
+  }
+
+  @override
+  Future<void> stop() async {
+    calls.add('stop');
+    _playing = false;
+    _paused = false;
+    _emit();
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _status.close();
+    await _errors.close();
+  }
+
+  void _emit() {
+    _status.add(
+      SleepSoundsBackendStatus(
+        playing: _playing,
+        paused: _paused,
+        preset: _preset,
+        masterVolume: _masterVolume,
+        perSoundVolume: const {'rain': 80},
+        activeLayers: _playing ? const ['rain'] : const <String>[],
+        capabilities: SleepSoundsCapabilities.embeddedDefault,
+      ),
+    );
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  setUp(() {
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
+    await SleepSoundsController.instance.resetForTesting();
   });
   test('saved app order is stable, removes missing apps, appends new apps', () {
     expect(mergeAppOrder(['a', 'b', 'c'], ['b', 'missing', 'a', 'b']), [
@@ -40,16 +147,21 @@ void main() {
   );
   test('sleep sounds preferences persist per profile', () async {
     final prefs = HomePreferences();
-    expect(await prefs.sleepSoundsPreset(1), 'rain');
+    expect(await prefs.sleepSoundsPreset(1), 'overnight-storm');
     expect(await prefs.sleepSoundsVolume(1), 70);
-    expect(await prefs.sleepSoundsBackend(1), 'browser');
+    expect(await prefs.sleepSoundsBackend(1), 'embedded');
+    final defaults = await prefs.sleepSoundsPerSoundVolumes(1);
+    expect(defaults['thunder'], 58);
     await prefs.setSleepSoundsPreset(1, 'ocean');
     await prefs.setSleepSoundsVolume(1, 42);
     await prefs.setSleepSoundsBackend(1, 'embedded');
+    await prefs.setSleepSoundsPerSoundVolumes(1, const {'thunder': 33.0});
     expect(await prefs.sleepSoundsPreset(1), 'ocean');
     expect(await prefs.sleepSoundsVolume(1), 42);
     expect(await prefs.sleepSoundsBackend(1), 'embedded');
-    expect(await prefs.sleepSoundsPreset(2), 'rain');
+    final savedMap = await prefs.sleepSoundsPerSoundVolumes(1);
+    expect(savedMap['thunder'], 33);
+    expect(await prefs.sleepSoundsPreset(2), 'overnight-storm');
   });
   test(
     'sleep sounds controller starts and stops via launcher callbacks',
@@ -76,27 +188,39 @@ void main() {
     },
   );
   test(
-    'sleep sounds embedded backend stays disabled and does not launch browser fallback',
+    'sleep sounds per-sound volumes can be adjusted before playback starts',
     () async {
       final controller = SleepSoundsController.instance;
-      controller.setBackend(SleepSoundsBackend.embeddedWebView);
-      var launched = 0;
-      await expectLater(
-        controller.play(
-          profileId: 3,
-          url: 'https://sleep.millitop.net',
-          launcher: (_, __) async {
-            launched++;
-          },
-          stopper: (_) async {},
-        ),
-        throwsStateError,
-      );
-      expect(launched, 0);
+      await controller.setPerSoundVolume('thunder', 41);
+      expect(controller.perSoundVolume['thunder'], 41);
       expect(controller.state, SleepSoundsState.stopped);
-      controller.setBackend(SleepSoundsBackend.browserFallback);
+      expect(controller.error, isEmpty);
+      expect(
+        controller.message,
+        contains('will apply when Sleep Sounds starts'),
+      );
     },
   );
+  test('sleep sounds embedded backend invokes contract commands', () async {
+    final controller = SleepSoundsController.instance;
+    controller.setBackend(SleepSoundsBackend.embeddedWebView);
+    final backend = _FakeSleepSoundsBackend();
+    controller.setEmbeddedBackendFactoryForTesting(() => backend);
+    await controller.play(profileId: 3, url: 'https://sleep.millitop.net');
+    expect(controller.state, SleepSoundsState.playing);
+    expect(backend.calls, contains('initialize:3'));
+    expect(backend.calls, contains('applyPreset:overnight-storm'));
+    expect(backend.calls, contains('setMasterVolume:70'));
+    expect(
+      backend.calls.any((entry) => entry.startsWith('setPerSoundVolume:')),
+      isTrue,
+    );
+    expect(backend.calls.last, 'play');
+    await controller.pause();
+    await controller.resume();
+    await controller.stop();
+    expect(backend.calls, containsAll(['pause', 'resume', 'stop']));
+  });
   test('live tv playlist URL is profile scoped and validated', () async {
     final prefs = HomePreferences();
     expect(await prefs.liveTvPlaylistUrl(1), isEmpty);
@@ -522,10 +646,7 @@ file://local-path
     );
     PlaylistPlaybackRegistry.instance.activate(session);
     var now = DateTime(2026, 10, 24, 21, 0, 0);
-    final sleep = SleepMode(
-      clock: () => now,
-      prepareOverride: () async {},
-    );
+    final sleep = SleepMode(clock: () => now, prepareOverride: () async {});
     await sleep.startTimer(1);
     now = now.add(const Duration(minutes: 1));
     await tester.pump(const Duration(seconds: 1));

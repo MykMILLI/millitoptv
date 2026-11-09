@@ -291,7 +291,10 @@ class LiveTvTmdbOverride {
     final mediaType = json['mediaType']?.toString().trim() ?? '';
     final mediaId = json['mediaId']?.toString().trim() ?? '';
     final tmdbId = int.tryParse(json['tmdbId']?.toString() ?? '') ?? 0;
-    if (sourceId.isEmpty || mediaType.isEmpty || mediaId.isEmpty || tmdbId < 1) {
+    if (sourceId.isEmpty ||
+        mediaType.isEmpty ||
+        mediaId.isEmpty ||
+        tmdbId < 1) {
       throw const FormatException('TMDB override is incomplete.');
     }
     final updatedAt =
@@ -300,9 +303,10 @@ class LiveTvTmdbOverride {
     final releaseDate = DateTime.tryParse(
       json['releaseDate']?.toString() ?? '',
     )?.toUtc();
-    final genres = [
-      ...(json['genres'] as List? ?? const []),
-    ].map((value) => value.toString().trim()).where((value) => value.isNotEmpty).toList();
+    final genres = [...(json['genres'] as List? ?? const [])]
+        .map((value) => value.toString().trim())
+        .where((value) => value.isNotEmpty)
+        .toList();
     String? clean(String field) {
       final value = json[field]?.toString().trim();
       return value == null || value.isEmpty ? null : value;
@@ -449,7 +453,7 @@ class HomePreferences {
       (await SharedPreferences.getInstance()).getString(
         'home.sleepSoundsPreset.v1.$profile',
       ) ??
-      'rain';
+      'overnight-storm';
 
   Future<void> setSleepSoundsPreset(int profile, String preset) async {
     final normalized = preset.trim();
@@ -485,7 +489,7 @@ class HomePreferences {
       (await SharedPreferences.getInstance()).getString(
         'home.sleepSoundsBackend.v1.$profile',
       ) ??
-      'browser';
+      'embedded';
 
   Future<void> setSleepSoundsBackend(int profile, String backend) async {
     final normalized = backend.trim().toLowerCase();
@@ -499,6 +503,83 @@ class HomePreferences {
       normalized,
     )) {
       throw StateError('Could not save Sleep Sounds backend.');
+    }
+  }
+
+  Future<Map<String, double>> sleepSoundsPerSoundVolumes(int profile) async {
+    final raw = (await SharedPreferences.getInstance()).getString(
+      'home.sleepSoundsPerSoundVolumes.v1.$profile',
+    );
+    if (raw == null || raw.trim().isEmpty) {
+      return const <String, double>{
+        'heavy-rain': 82,
+        'thunder': 58,
+        'white-noise': 64,
+        'pink-noise': 60,
+        'rain': 78,
+        'ocean': 75,
+        'forest': 72,
+        'brown-noise': 70,
+      };
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Sleep Sounds per-sound volume map is invalid.',
+        );
+      }
+      final result = <String, double>{};
+      for (final entry in decoded.entries) {
+        final key = entry.key.toString().trim().toLowerCase();
+        final value = (entry.value as num?)?.toDouble();
+        if (key.isEmpty || value == null) {
+          continue;
+        }
+        result[key] = value.clamp(0, 100).toDouble();
+      }
+      if (result.isEmpty) {
+        throw const FormatException(
+          'Sleep Sounds per-sound volume map is empty.',
+        );
+      }
+      return result;
+    } catch (_) {
+      return const <String, double>{
+        'heavy-rain': 82,
+        'thunder': 58,
+        'white-noise': 64,
+        'pink-noise': 60,
+        'rain': 78,
+        'ocean': 75,
+        'forest': 72,
+        'brown-noise': 70,
+      };
+    }
+  }
+
+  Future<void> setSleepSoundsPerSoundVolumes(
+    int profile,
+    Map<String, double> values,
+  ) async {
+    final normalized = <String, double>{};
+    for (final entry in values.entries) {
+      final key = entry.key.trim().toLowerCase();
+      if (key.isEmpty) {
+        continue;
+      }
+      normalized[key] = entry.value.clamp(0, 100).toDouble();
+    }
+    if (normalized.isEmpty) {
+      throw const FormatException(
+        'Sleep Sounds per-sound volume map cannot be empty.',
+      );
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      'home.sleepSoundsPerSoundVolumes.v1.$profile',
+      jsonEncode(normalized),
+    )) {
+      throw StateError('Could not save Sleep Sounds per-sound volumes.');
     }
   }
 
@@ -1056,7 +1137,9 @@ class HomePreferences {
         continue;
       }
       try {
-        values.add(LiveTvTmdbOverride.fromJson(Map<String, dynamic>.from(entry)));
+        values.add(
+          LiveTvTmdbOverride.fromJson(Map<String, dynamic>.from(entry)),
+        );
       } catch (_) {}
     }
     values.sort((a, b) => b.updatedAtUtc.compareTo(a.updatedAtUtc));
@@ -1081,7 +1164,11 @@ class HomePreferences {
     required String mediaType,
     required String mediaId,
   }) async {
-    final key = LiveTvTmdbOverride.tmdbOverrideKey(sourceId, mediaType, mediaId);
+    final key = LiveTvTmdbOverride.tmdbOverrideKey(
+      sourceId,
+      mediaType,
+      mediaId,
+    );
     final current = await liveTvTmdbOverrides(profile);
     final filtered = current.where((entry) => entry.key != key).toList();
     await _saveLiveTvTmdbOverrides(profile, filtered);
@@ -1664,6 +1751,7 @@ class HomePreferences {
       'home.sleepSoundsPreset.v1.$profile',
       'home.sleepSoundsVolume.v1.$profile',
       'home.sleepSoundsBackend.v1.$profile',
+      'home.sleepSoundsPerSoundVolumes.v1.$profile',
       'home.liveTvPlaylistUrl.v1.$profile',
       'home.tmdbApiKey.v1.$profile',
       'home.sharedFamilyAlbum.v1.$profile',

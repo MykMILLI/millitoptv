@@ -29,6 +29,8 @@ import 'services/shared_family_album_service.dart';
 import 'screens/music_screen.dart';
 import 'screens/podcasts_screen.dart';
 import 'services/podcast_playback.dart';
+import 'services/sleep_sounds_controller.dart';
+import 'services/sleep_sounds_embedded_host.dart';
 import 'widgets/podcast_player_bar.dart';
 import 'screens/live_tv_screen.dart';
 import 'theme/millitop_visual_theme.dart';
@@ -227,7 +229,12 @@ class _MillitopAppState extends State<MillitopApp> {
           onPointerHover: (_) => DeviceConnection.instance.noteInteraction(),
           onPointerSignal: (_) => DeviceConnection.instance.noteInteraction(),
           child: OvernightWindowGuard(
-            child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+            child: Stack(
+              children: [
+                AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+                const SleepSoundsEmbeddedHostView(),
+              ],
+            ),
           ),
         ),
         theme: MillitopThemeController.instance.materialTheme,
@@ -1912,6 +1919,97 @@ class _LauncherState extends State<Launcher>
     await showSleepModeSheet(context, profileId: widget.profileId);
   }
 
+  Future<void> _toggleSleepSoundsPlayback() async {
+    final sounds = SleepSoundsController.instance;
+    try {
+      if (sounds.state == SleepSoundsState.paused) {
+        await sounds.resume();
+      } else {
+        await sounds.pause();
+      }
+    } catch (e) {
+      if (mounted) {
+        await notice(
+          'Sleep Sounds',
+          e.toString().replaceFirst('Bad state: ', ''),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopSleepSoundsFromOverlay() async {
+    try {
+      await SleepSoundsController.instance.stop();
+    } catch (e) {
+      if (mounted) {
+        await notice(
+          'Sleep Sounds',
+          e.toString().replaceFirst('Bad state: ', ''),
+        );
+      }
+    }
+  }
+
+  Widget _buildSleepSoundsOverlay() {
+    return AnimatedBuilder(
+      animation: SleepSoundsController.instance,
+      builder: (context, _) {
+        final sounds = SleepSoundsController.instance;
+        if (!sounds.running) {
+          return const SizedBox.shrink();
+        }
+        return Positioned(
+          left: 16,
+          right: 16,
+          bottom: 76,
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Icon(Icons.nightlight_round),
+                  Text('Sleep Sounds: ${sounds.state.name}'),
+                  if (sounds.activeLayers.isNotEmpty)
+                    Text(
+                      sounds.activeLayers.join(', '),
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: sounds.capabilities.supportsPauseResume
+                        ? () => unawaited(_toggleSleepSoundsPlayback())
+                        : null,
+                    icon: Icon(
+                      sounds.state == SleepSoundsState.paused
+                          ? Icons.play_arrow
+                          : Icons.pause,
+                    ),
+                    label: Text(
+                      sounds.state == SleepSoundsState.paused
+                          ? 'Resume'
+                          : 'Pause',
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(_stopSleepSoundsFromOverlay()),
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Stop'),
+                  ),
+                  TextButton(
+                    onPressed: _openSleepModeModal,
+                    child: const Text('Open timer controls'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildDarkScreenOverlay() {
     return ListenableBuilder(
       listenable: SleepMode.instance,
@@ -2822,11 +2920,18 @@ class _LauncherState extends State<Launcher>
                                   ),
                             ),
                             sleepChip: ListenableBuilder(
-                              listenable: SleepMode.instance,
+                              listenable: Listenable.merge([
+                                SleepMode.instance,
+                                SleepSoundsController.instance,
+                              ]),
                               builder: (context, _) {
                                 final sleep = SleepMode.instance;
+                                final sounds = SleepSoundsController.instance;
+                                final soundState = sounds.running
+                                    ? ' · Sounds ${sounds.state.name}'
+                                    : '';
                                 final timerText = sleep.deadline == null
-                                    ? 'Sleep sounds & timer'
+                                    ? 'Sleep sounds & timer$soundState'
                                     : '${sleep.remaining.inMinutes}:${(sleep.remaining.inSeconds % 60).toString().padLeft(2, '0')} left';
                                 return OutlinedButton.icon(
                                   key: const ValueKey('footer-sleep-timer'),
@@ -2853,6 +2958,7 @@ class _LauncherState extends State<Launcher>
                 ? Positioned.fill(child: _loginActionOverlay())
                 : const SizedBox.shrink(),
             _buildMusicMiniPlayerOverlay(),
+            _buildSleepSoundsOverlay(),
             AnimatedBuilder(
               animation: PodcastPlayback.instance,
               builder: (context, _) {

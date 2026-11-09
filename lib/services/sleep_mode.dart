@@ -180,9 +180,8 @@ class SleepMode extends ChangeNotifier {
       await _keepAwake();
       await windowManager.setAlwaysOnTop(false);
       await _run('SleepSounds', profile: profile, url: url);
-      await windowManager.minimize();
       message =
-          'Sleep Sounds opened. Choose sounds and press Play on the website.';
+          'Sleep Sounds browser fallback opened. Embedded in-app mode is recommended when available.';
     } finally {
       _opening = false;
       notifyListeners();
