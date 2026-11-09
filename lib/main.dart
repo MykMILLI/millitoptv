@@ -30,7 +30,6 @@ import 'screens/music_screen.dart';
 import 'screens/podcasts_screen.dart';
 import 'services/podcast_playback.dart';
 import 'services/sleep_sounds_controller.dart';
-import 'services/sleep_sounds_embedded_host.dart';
 import 'widgets/podcast_player_bar.dart';
 import 'screens/live_tv_screen.dart';
 import 'theme/millitop_visual_theme.dart';
@@ -229,12 +228,7 @@ class _MillitopAppState extends State<MillitopApp> {
           onPointerHover: (_) => DeviceConnection.instance.noteInteraction(),
           onPointerSignal: (_) => DeviceConnection.instance.noteInteraction(),
           child: OvernightWindowGuard(
-            child: Stack(
-              children: [
-                AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
-                const SleepSoundsEmbeddedHostView(),
-              ],
-            ),
+            child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
           ),
         ),
         theme: MillitopThemeController.instance.materialTheme,

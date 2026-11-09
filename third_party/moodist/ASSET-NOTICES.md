@@ -20,16 +20,11 @@ Selected local assets bundled in this repository:
 | `assets/native/sleep_sounds/moodist/noise/white-noise.wav` | `public/sounds/noise/white-noise.wav` | 1676232 | `02ccb2013118b57c76607f7e3e5d9d479e5a9aaa7868e1a07194cde77c0ea6dd` |
 | `assets/native/sleep_sounds/moodist/noise/pink-noise.wav` | `public/sounds/noise/pink-noise.wav` | 1676972 | `075eecefd60c4103da3ec8672db1c96ba54f073f8a5bc4e7cc1b587c96854fb4` |
 
-Howler runtime bundled locally:
-
-| Local path | Upstream source | Size (bytes) | SHA-256 |
-|---|---|---:|---|
-| `assets/native/sleep_sounds/howler/howler-2.2.4.min.js` | `https://unpkg.com/howler@2.2.4/dist/howler.min.js` | 36173 | `736c339444c88baad593e24afdf1d6e8f574019b4e37a110ecb453ff745ffd41` |
+Playback: these files are played natively by MILLITOP TV (media_kit/libmpv), one looping player per sound. No Moodist or Howler.js code is bundled.
 
 License notes
 -------------
 
 - Moodist code is MIT licensed (`third_party/moodist/LICENSE`).
-- Howler.js is MIT licensed (`third_party/howler/LICENSE.md`).
 - Moodist upstream README states some sound files are third-party and may be under Pixabay Content License and/or CC0.
 - Upstream does not provide per-file provenance/license mapping in-repo for these four files; this repository therefore preserves upstream attribution context but cannot assert a file-by-file source provider beyond Moodist’s published statement.

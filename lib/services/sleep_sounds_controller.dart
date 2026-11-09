@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'app_log.dart';
 import 'home_preferences.dart';
-import 'sleep_sounds_embedded_host.dart';
+import 'sleep_sounds_native_backend.dart';
 
 enum SleepSoundsBackend { browserFallback, embeddedWebView }
 
@@ -232,218 +232,6 @@ class BrowserSleepSoundsBackend implements SleepSoundsPlaybackBackend {
         perSoundVolume: const {},
         activeLayers: const [],
         capabilities: capabilities,
-      ),
-    );
-  }
-}
-
-class EmbeddedSleepSoundsBackend implements SleepSoundsPlaybackBackend {
-  EmbeddedSleepSoundsBackend({SleepSoundsEmbeddedHost? host})
-    : _host = host ?? SleepSoundsEmbeddedHost.instance {
-    _eventsSub = _host.events.listen(_onEvent);
-  }
-
-  final SleepSoundsEmbeddedHost _host;
-  final StreamController<SleepSoundsBackendStatus> _status =
-      StreamController<SleepSoundsBackendStatus>.broadcast();
-  final StreamController<String> _errors = StreamController<String>.broadcast();
-  final Map<String, Completer<void>> _pending = <String, Completer<void>>{};
-  StreamSubscription<Map<String, dynamic>>? _eventsSub;
-  int _counter = 0;
-  String _startupAttemptId = '';
-  SleepSoundsCapabilities _capabilities =
-      SleepSoundsCapabilities.embeddedDefault;
-
-  @override
-  SleepSoundsCapabilities get capabilities => _capabilities;
-
-  @override
-  Stream<SleepSoundsBackendStatus> get statusStream => _status.stream;
-
-  @override
-  Stream<String> get errorStream => _errors.stream;
-
-  @override
-  Future<void> initialize({
-    required int profileId,
-    required String preset,
-    required double masterVolume,
-    required Map<String, bool> enabled,
-    required Map<String, double> volumes,
-  }) async {
-    _startupAttemptId = 'sleep-start-${DateTime.now().microsecondsSinceEpoch}';
-    AppLog.info(
-      LogCategory.playback,
-      'Sleep Sounds start attempt created.',
-      details: {'attemptId': _startupAttemptId, 'profileId': profileId},
-    );
-    await _host.ensureReady(profileId, attemptId: _startupAttemptId);
-    await _send(
-      'initialize',
-      payload: {
-        'attemptId': _startupAttemptId,
-        'preset': preset,
-        'masterVolume': (masterVolume / 100).clamp(0, 1),
-        'enabled': enabled,
-        'volumes': volumes.map(
-          (key, value) => MapEntry(key, (value / 100).clamp(0, 1)),
-        ),
-      },
-    );
-    await _send('status');
-  }
-
-  @override
-  Future<void> applyPreset(String preset) =>
-      _send('applyPreset', payload: {'preset': preset});
-
-  @override
-  Future<void> setMasterVolume(double masterVolume) => _send(
-    'setMasterVolume',
-    payload: {'masterVolume': (masterVolume / 100).clamp(0, 1)},
-  );
-
-  @override
-  Future<void> applyMix({
-    required Map<String, bool> enabled,
-    required Map<String, double> volumes,
-  }) => _send(
-    'applyMix',
-    payload: {
-      'enabled': enabled,
-      'volumes': volumes.map(
-        (key, value) => MapEntry(key, (value / 100).clamp(0, 1)),
-      ),
-    },
-  );
-
-  @override
-  Future<void> setLayerEnabled(String soundId, bool enabled) => _send(
-    'setLayerEnabled',
-    payload: {'soundId': soundId, 'enabled': enabled},
-  );
-
-  @override
-  Future<void> setPerSoundVolume(String soundId, double volume) => _send(
-    'setPerSoundVolume',
-    payload: {'soundId': soundId, 'volume': (volume / 100).clamp(0, 1)},
-  );
-
-  @override
-  Future<void> play() =>
-      _send('play', payload: {'attemptId': _startupAttemptId});
-
-  @override
-  Future<void> pause() => _send('pause');
-
-  @override
-  Future<void> resume() => _send('resume');
-
-  @override
-  Future<void> stop() => _send('stop');
-
-  @override
-  Future<void> dispose() async {
-    await _eventsSub?.cancel();
-    for (final pending in _pending.values) {
-      if (!pending.isCompleted) {
-        pending.completeError(
-          StateError('Sleep Sounds embedded backend was disposed.'),
-        );
-      }
-    }
-    _pending.clear();
-    await _status.close();
-    await _errors.close();
-  }
-
-  Future<void> _send(String action, {Map<String, dynamic>? payload}) async {
-    final commandId = 'embedded-${++_counter}';
-    final completer = Completer<void>();
-    _pending[commandId] = completer;
-    try {
-      await _host.postCommand({
-        'commandId': commandId,
-        'action': action,
-        ...?payload,
-      });
-    } catch (error) {
-      _pending.remove(commandId);
-      rethrow;
-    }
-    await completer.future.timeout(
-      const Duration(seconds: 8),
-      onTimeout: () {
-        _pending.remove(commandId);
-        throw StateError(
-          'Sleep Sounds command "$action" timed out waiting for acknowledgement.',
-        );
-      },
-    );
-  }
-
-  void _onEvent(Map<String, dynamic> event) {
-    final type = event['type']?.toString() ?? '';
-    if (type == 'ack') {
-      final commandId = event['commandId']?.toString();
-      if (commandId != null) {
-        final completer = _pending.remove(commandId);
-        completer?.complete();
-      }
-      return;
-    }
-    if (type == 'error') {
-      final message = event['message']?.toString() ?? 'Unknown embedded error.';
-      final commandId = event['commandId']?.toString();
-      if (commandId != null) {
-        final completer = _pending.remove(commandId);
-        completer?.completeError(StateError(message));
-      }
-      _errors.add(message);
-      return;
-    }
-    if (type != 'status' && type != 'ready') {
-      return;
-    }
-    final caps = event['capabilities'];
-    if (caps is Map) {
-      _capabilities = SleepSoundsCapabilities(
-        supportsEmbeddedPlayback:
-            caps['supportsEmbeddedPlayback'] as bool? ?? true,
-        supportsPresets: caps['supportsPresets'] as bool? ?? true,
-        supportsPauseResume: caps['supportsPauseResume'] as bool? ?? true,
-        supportsMasterVolume: true,
-        supportsPerSoundVolume: caps['supportsPerSoundVolume'] as bool? ?? true,
-      );
-    }
-    final perSoundRaw = event['perSoundVolume'];
-    final perSound = <String, double>{};
-    if (perSoundRaw is Map) {
-      for (final entry in perSoundRaw.entries) {
-        final key = entry.key.toString();
-        final value = (entry.value as num?)?.toDouble();
-        if (value != null) {
-          perSound[key] = value.clamp(0, 1) * 100;
-        }
-      }
-    }
-    final layersRaw = event['activeLayers'];
-    final layers = <String>[];
-    if (layersRaw is List) {
-      for (final layer in layersRaw) {
-        layers.add(layer.toString());
-      }
-    }
-    final master = (event['masterVolume'] as num?)?.toDouble();
-    _status.add(
-      SleepSoundsBackendStatus(
-        playing: event['playing'] as bool? ?? false,
-        paused: event['paused'] as bool? ?? false,
-        preset: event['preset']?.toString() ?? 'rain',
-        masterVolume: ((master ?? 0.7).clamp(0, 1) * 100).toDouble(),
-        perSoundVolume: perSound,
-        activeLayers: layers,
-        capabilities: _capabilities,
       ),
     );
   }
@@ -737,7 +525,7 @@ class SleepSoundsController extends ChangeNotifier {
       return;
     }
     message = backend == SleepSoundsBackend.embeddedWebView
-        ? 'Preparing embedded Sleep Sounds...'
+        ? 'Starting sounds...'
         : 'Opening Sleep Sounds browser fallback...';
     notifyListeners();
     try {
@@ -778,7 +566,7 @@ class SleepSoundsController extends ChangeNotifier {
         ];
       }
       message = backend == SleepSoundsBackend.embeddedWebView
-          ? 'Sleep Sounds is running in-app.'
+          ? 'Sleep sounds are playing.'
           : 'Sleep Sounds browser fallback opened.';
       notifyListeners();
     } catch (e, stackTrace) {
@@ -923,7 +711,7 @@ class SleepSoundsController extends ChangeNotifier {
       final overrideFactory = _embeddedFactoryOverride;
       return overrideFactory != null
           ? overrideFactory()
-          : EmbeddedSleepSoundsBackend();
+          : NativeSleepSoundsBackend();
     }
     final launcher = _launcher;
     final stopper = _stopper;
