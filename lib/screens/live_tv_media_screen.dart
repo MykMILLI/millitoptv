@@ -14,6 +14,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
+import '../services/watch_party/watch_party_service.dart';
 import '../services/playlist_hub.dart';
 import '../services/global_playlists.dart';
 import '../widgets/mixed_playlist_picker.dart';
@@ -1764,7 +1765,11 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       return null;
     }
     final type = mediaType ?? (item.series ? 'series' : 'movie');
-    final key = LiveTvTmdbOverride.tmdbOverrideKey(origin.sourceId, type, item.id);
+    final key = LiveTvTmdbOverride.tmdbOverrideKey(
+      origin.sourceId,
+      type,
+      item.id,
+    );
     return _tmdbOverridesByKey[key];
   }
 
@@ -2328,7 +2333,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         ),
       );
     }
-    clusters.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+    clusters.sort(
+      (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
+    );
     return clusters;
   }
 
@@ -2593,7 +2600,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
   }
 
   LiveTvMediaItem? _mediaItemForLibraryItem(LiveTvLibraryItem item) {
-    for (final candidate in [...movies, ...series, ...adultMovies, ...adultSeries]) {
+    for (final candidate in [
+      ...movies,
+      ...series,
+      ...adultMovies,
+      ...adultSeries,
+    ]) {
       if (candidate.id != item.mediaId) {
         continue;
       }
@@ -2613,7 +2625,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (tmdbApiKey.trim().isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Set a TMDB API key in settings first.')),
+          const SnackBar(
+            content: Text('Set a TMDB API key in settings first.'),
+          ),
         );
       }
       return;
@@ -2657,7 +2671,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       releaseDate: candidate.releaseDate,
       updatedAtUtc: DateTime.now().toUtc(),
     );
-    await HomePreferences().upsertLiveTvTmdbOverride(widget.profileId, override);
+    await HomePreferences().upsertLiveTvTmdbOverride(
+      widget.profileId,
+      override,
+    );
     if (!mounted) {
       return;
     }
@@ -2761,7 +2778,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                         ),
                         const SizedBox(width: 8),
                         FilledButton.icon(
-                          onPressed: pending ? null : () => unawaited(searchNow()),
+                          onPressed: pending
+                              ? null
+                              : () => unawaited(searchNow()),
                           icon: const Icon(Icons.search),
                           label: const Text('Search'),
                         ),
@@ -2771,7 +2790,12 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                     if (pending) const LinearProgressIndicator(),
                     if (errorText.isNotEmpty) ...[
                       const SizedBox(height: 8),
-                      Text(errorText, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+                      Text(
+                        errorText,
+                        style: TextStyle(
+                          color: Theme.of(ctx).colorScheme.error,
+                        ),
+                      ),
                     ],
                     const SizedBox(height: 8),
                     Expanded(
@@ -2784,11 +2808,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                             )
                           : ListView.separated(
                               itemCount: results.length,
-                              separatorBuilder: (_, __) => const Divider(height: 1),
+                              separatorBuilder: (_, __) =>
+                                  const Divider(height: 1),
                               itemBuilder: (_, index) {
                                 final result = results[index];
                                 return ListTile(
-                                  leading: result.posterUrl?.trim().isNotEmpty == true
+                                  leading:
+                                      result.posterUrl?.trim().isNotEmpty ==
+                                          true
                                       ? Image.network(
                                           result.posterUrl!,
                                           width: 40,
@@ -2913,8 +2940,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (!mounted || playlistItems.isEmpty) {
       return;
     }
-    final promptTitle =
-        item.mediaType == 'series' && playlistItems.length > 1
+    final promptTitle = item.mediaType == 'series' && playlistItems.length > 1
         ? 'Add "${item.title}" (${playlistItems.length} episodes) to a playlist'
         : null;
     await addToMixedPlaylistItems(
@@ -2975,13 +3001,14 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
     if (episodes.isEmpty) {
       return [vodHubItem(item)];
     }
-    final orderedEpisodes = [...episodes]..sort((a, b) {
-      final bySeason = a.season.compareTo(b.season);
-      if (bySeason != 0) {
-        return bySeason;
-      }
-      return a.episode.compareTo(b.episode);
-    });
+    final orderedEpisodes = [...episodes]
+      ..sort((a, b) {
+        final bySeason = a.season.compareTo(b.season);
+        if (bySeason != 0) {
+          return bySeason;
+        }
+        return a.episode.compareTo(b.episode);
+      });
     final groupId = 'series:${item.sourceId}:${item.mediaId}';
     final groupTitle = details?.title ?? item.title;
     return [
@@ -2991,7 +3018,10 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
             episode,
             seriesTitle: groupTitle,
             seriesPosterUrl:
-                details?.posterUrl ?? item.posterUrl ?? seriesItem?.posterUrl ?? '',
+                details?.posterUrl ??
+                item.posterUrl ??
+                seriesItem?.posterUrl ??
+                '',
             sourceId: item.sourceId,
             sourceName: item.sourceName,
           );
@@ -3517,7 +3547,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                       ),
                                     );
                                   },
-                                  icon: const Icon(Icons.manage_search_outlined),
+                                  icon: const Icon(
+                                    Icons.manage_search_outlined,
+                                  ),
                                   label: const Text('Identify'),
                                 ),
                                 if (!item.series && resumeMs > 15000)
@@ -3662,51 +3694,55 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                         spacing: 10,
                         runSpacing: 10,
                         children: (castCredits.isNotEmpty
-                                ? castCredits
-                                      .map(
-                                        (entry) => SizedBox(
-                                          width: 128,
-                                          child: Column(
-                                            children: [
-                                              CircleAvatar(
-                                                radius: 28,
-                                                backgroundImage:
-                                                    entry.photoUrl?.trim().isNotEmpty ==
-                                                        true
-                                                    ? NetworkImage(entry.photoUrl!)
-                                                    : null,
-                                                child:
-                                                    entry.photoUrl?.trim().isNotEmpty ==
-                                                        true
-                                                    ? null
-                                                    : const Icon(Icons.person),
-                                              ),
-                                              const SizedBox(height: 6),
-                                              Text(
-                                                entry.name,
-                                                textAlign: TextAlign.center,
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              if (entry.role?.trim().isNotEmpty ==
-                                                  true)
-                                                Text(
-                                                  entry.role!,
-                                                  textAlign: TextAlign.center,
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: Theme.of(ctx)
-                                                      .textTheme
-                                                      .bodySmall,
-                                                ),
-                                            ],
+                            ? castCredits
+                                  .map(
+                                    (entry) => SizedBox(
+                                      width: 128,
+                                      child: Column(
+                                        children: [
+                                          CircleAvatar(
+                                            radius: 28,
+                                            backgroundImage:
+                                                entry.photoUrl
+                                                        ?.trim()
+                                                        .isNotEmpty ==
+                                                    true
+                                                ? NetworkImage(entry.photoUrl!)
+                                                : null,
+                                            child:
+                                                entry.photoUrl
+                                                        ?.trim()
+                                                        .isNotEmpty ==
+                                                    true
+                                                ? null
+                                                : const Icon(Icons.person),
                                           ),
-                                        ),
-                                      )
-                                      .toList()
-                                : cast
-                                      .map((name) => Chip(label: Text(name)))
-                                      .toList()),
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            entry.name,
+                                            textAlign: TextAlign.center,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          if (entry.role?.trim().isNotEmpty ==
+                                              true)
+                                            Text(
+                                              entry.role!,
+                                              textAlign: TextAlign.center,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(
+                                                ctx,
+                                              ).textTheme.bodySmall,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  )
+                                  .toList()
+                            : cast
+                                  .map((name) => Chip(label: Text(name)))
+                                  .toList()),
                       ),
                     ]),
                   ],
@@ -3818,8 +3854,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               )
                               .map(
                                 (entry) => Chip(
-                                  avatar: entry.posterUrl?.trim().isNotEmpty ==
-                                          true
+                                  avatar:
+                                      entry.posterUrl?.trim().isNotEmpty == true
                                       ? CircleAvatar(
                                           backgroundImage: NetworkImage(
                                             entry.posterUrl!,
@@ -4629,7 +4665,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                         return;
                       }
                       final match = seriesDetails.episodes.firstWhere(
-                        (entry) => libraryItem.streamUrl?.trim() == entry.streamUrl.trim(),
+                        (entry) =>
+                            libraryItem.streamUrl?.trim() ==
+                            entry.streamUrl.trim(),
                         orElse: () => episode,
                       );
                       await _showEpisodeDetails(
@@ -5365,9 +5403,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
       onGoToShow: goToShow,
       onGoToSeason: goToSeason,
       onGoToEpisode: goToEpisode,
-      onIdentify: () => unawaited(
-        _identifyLibraryItemWithTmdb(libraryItem, reference: item),
-      ),
+      onIdentify: () =>
+          unawaited(_identifyLibraryItemWithTmdb(libraryItem, reference: item)),
     );
   }
 
@@ -5596,8 +5633,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                 match,
                 seriesTitle:
                     details?.title ?? (entry.seriesName ?? entry.media.title),
-                seriesPoster:
-                    details?.posterUrl ?? entry.media.posterUrl ?? '',
+                seriesPoster: details?.posterUrl ?? entry.media.posterUrl ?? '',
                 sourceId: source?.id ?? item.sourceId,
                 sourceName: source?.name ?? item.sourceName,
                 seriesDescription:
@@ -6496,7 +6532,8 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                                       title: Text(item.title),
                                       subtitle: Text(
                                         item.year?.toString() ??
-                                            mediaItemOrigins[item]?.sourceName ??
+                                            mediaItemOrigins[item]
+                                                ?.sourceName ??
                                             'Unknown year',
                                       ),
                                       onTap: () {
@@ -6925,7 +6962,9 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
                               tab == _MediaTab.collections
                                   ? _shuffleCollectionItems(
                                       _movieCollections
-                                          .expand((collection) => collection.items)
+                                          .expand(
+                                            (collection) => collection.items,
+                                          )
                                           .toList(),
                                       name: 'Collections',
                                     )
@@ -7498,6 +7537,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     final current = player;
     player = null;
     video = null;
+    if (current != null) {
+      WatchPartyService.instance.unregisterLocalPlayback(current);
+    }
     unawaited(WakelockPlus.disable());
     unawaited(current?.dispose() ?? Future<void>.value());
     super.dispose();
@@ -7613,11 +7655,13 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
     StackTrace? lastStack;
     final watch = Stopwatch()..start();
     var attempt = 0;
+    String? openedUrl;
     for (final candidate in candidates) {
       attempt++;
       try {
         await created.open(Media(candidate), play: playImmediately);
         lastError = null;
+        openedUrl = candidate;
         AppLog.info(
           LogCategory.playback,
           'Playback opened "${targetMedia.title}"',
@@ -7654,6 +7698,25 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         },
       );
       throw lastError;
+    }
+    if (openedUrl != null) {
+      final mixed = widget.mixedSession;
+      final queue = _mixedQueueLabel();
+      WatchPartyService.instance.registerLocalPlayback(
+        created,
+        WatchPartyMedia(
+          kind: widget.seriesEpisodePlayback ? 'episode' : 'movie',
+          title: targetMedia.title,
+          subtitle: targetMedia.subtitle,
+          posterUrl: targetMedia.posterUrl,
+          queueLabel: queue == null
+              ? (widget.movieQueue.length > 1
+                    ? 'Queue ${widget.movieQueueIndex + 1}/${widget.movieQueue.length}'
+                    : null)
+              : '${mixed?.shuffled == true ? 'Shuffle' : 'Playlist'} $queue',
+          upstreamUrl: openedUrl,
+        ),
+      );
     }
     if (qualityAdaptive) {
       try {
@@ -7758,7 +7821,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       subscriptions.add(
         created.stream.position.listen((value) {
           final nowUtc = DateTime.now().toUtc();
-          final recentSeek = _lastManualSeekAtUtc != null &&
+          final recentSeek =
+              _lastManualSeekAtUtc != null &&
               nowUtc.difference(_lastManualSeekAtUtc!) <
                   const Duration(seconds: 2);
           final seekTargetMs = _lastManualSeekTargetMs;
@@ -7766,9 +7830,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               seekTargetMs != null &&
               seekTargetMs > 15000 &&
               value.inMilliseconds < 2000) {
-            unawaited(
-              created.seek(Duration(milliseconds: seekTargetMs)),
-            );
+            unawaited(created.seek(Duration(milliseconds: seekTargetMs)));
             return;
           }
           if (mounted) {
@@ -7799,7 +7861,8 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
               }
             });
           }
-          if (nowUtc.difference(lastProgressWrite) >= const Duration(seconds: 5)) {
+          if (nowUtc.difference(lastProgressWrite) >=
+              const Duration(seconds: 5)) {
             lastProgressWrite = nowUtc;
             unawaited(_saveProgressSnapshot());
           }
@@ -7891,6 +7954,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       await WakelockPlus.enable();
       await _applySubtitleRenderingPreferences();
       if (!mounted) {
+        WatchPartyService.instance.unregisterLocalPlayback(created);
         await created.dispose();
         return;
       }
@@ -8875,7 +8939,10 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
       resumePositionMs = 0;
       _lastManualSeekAtUtc = null;
       _lastManualSeekTargetMs = null;
-      await current.open(Media(jellyfin?.playUrl ?? entry.streamUrl), play: true);
+      await current.open(
+        Media(jellyfin?.playUrl ?? entry.streamUrl),
+        play: true,
+      );
       if (!mounted) {
         return;
       }
@@ -9425,7 +9492,9 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
   Future<void> _switchToMixedEntry(String entryId) async {
     final session = widget.mixedSession;
     final target = session?.entryById(entryId);
-    if (session == null || target == null || session.current?.entryId == entryId) {
+    if (session == null ||
+        target == null ||
+        session.current?.entryId == entryId) {
       return;
     }
     if (await _openMixedEntryInPlace(target)) {
@@ -11059,6 +11128,7 @@ class _MediaPlayerScreenState extends State<_MediaPlayerScreen>
         subtitle: _activeMedia.subtitle,
         seekable: true,
         onClose: () async {
+          WatchPartyService.instance.unregisterLocalPlayback(current);
           try {
             await current.dispose().timeout(const Duration(seconds: 8));
           } catch (_) {}
@@ -11882,9 +11952,9 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         textAlign: TextAlign.center,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall,
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall,
                                       ),
                                   ],
                                 ),
@@ -11920,8 +11990,8 @@ class _SeriesDetailsScreenState extends State<_SeriesDetailsScreen> {
                         children: widget.relatedItems
                             .map(
                               (entry) => Chip(
-                                avatar: entry.posterUrl?.trim().isNotEmpty ==
-                                        true
+                                avatar:
+                                    entry.posterUrl?.trim().isNotEmpty == true
                                     ? CircleAvatar(
                                         backgroundImage: NetworkImage(
                                           entry.posterUrl!,

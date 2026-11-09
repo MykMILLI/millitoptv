@@ -1,3 +1,5 @@
+import '../../screens/watch_party_panel.dart';
+import '../../services/watch_party/watch_party_service.dart';
 import 'package:flutter/material.dart';
 
 enum PlayerSidePanel { none, queue, episodes }
@@ -30,6 +32,7 @@ class MediaPlayerChrome extends StatefulWidget {
     required this.onFullscreen,
     required this.onBack,
     this.onSleepTimer,
+    this.onWatchParty,
     this.sleepTimerActive = false,
     this.onPipHome,
     this.onToggleFavorite,
@@ -64,6 +67,10 @@ class MediaPlayerChrome extends StatefulWidget {
       onFullscreen,
       onBack;
   final VoidCallback? onSleepTimer;
+
+  /// Defaults to starting/opening a watch party for whatever is registered
+  /// with [WatchPartyService]. Pass a callback to override.
+  final VoidCallback? onWatchParty;
   final bool sleepTimerActive;
   final VoidCallback? onPipHome;
   final VoidCallback? onToggleFavorite;
@@ -359,6 +366,19 @@ class _MediaPlayerChromeState extends State<MediaPlayerChrome> {
                                   ? Icons.timer_outlined
                                   : Icons.nightlight_round_outlined,
                               widget.onSleepTimer,
+                            ),
+                          if (widget.onWatchParty != null ||
+                              WatchPartyService.instance.hasLocalPlayback ||
+                              WatchPartyService.instance.active)
+                            _button(
+                              WatchPartyService.instance.active
+                                  ? 'Watch party'
+                                  : 'Start a watch party',
+                              WatchPartyService.instance.active
+                                  ? Icons.groups
+                                  : Icons.groups_outlined,
+                              widget.onWatchParty ??
+                                  () => showStartWatchParty(context),
                             ),
                           if (widget.onPipHome != null)
                             _button(

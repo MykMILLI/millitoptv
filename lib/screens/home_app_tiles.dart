@@ -9,7 +9,6 @@ import '../services/live_tv_playlist.dart';
 import '../services/live_tv_source.dart';
 import '../services/web_app_catalog.dart';
 import '../services/web_app_definition.dart';
-import '../services/firefox_browser.dart';
 import '../services/music_service.dart';
 import '../services/podcast_service.dart';
 import '../services/podcast_playback.dart';
@@ -21,6 +20,7 @@ import 'music_screen.dart';
 import 'podcasts_screen.dart';
 import 'youtube_screen.dart';
 import 'app_settings_screen.dart';
+import 'web_app_screen.dart';
 
 class _HoverCardLift extends StatefulWidget {
   final Widget child;
@@ -973,11 +973,16 @@ class _HomeAppTilesState extends State<HomeAppTiles>
         current = matches.first;
       }
       if (mounted) {
-        await FirefoxBrowser.open(
-          context,
-          profileId: widget.profileId,
-          url: current.url,
-          appFullscreen: true,
+        // Opens inside the app (docked app-owned Firefox) with a MILLITOP
+        // top bar for Back, the sleep timer and pop-out.
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => WebAppScreen(
+              title: current.title,
+              url: current.url,
+              profileId: widget.profileId,
+            ),
+          ),
         );
       }
     } catch (e) {

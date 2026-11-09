@@ -1,3 +1,4 @@
+import 'screens/watch_party_panel.dart';
 import 'screens/overnight_window_guard.dart';
 import 'services/sleep_mode.dart';
 import 'services/home_preferences.dart';
@@ -228,7 +229,9 @@ class _MillitopAppState extends State<MillitopApp> {
           onPointerHover: (_) => DeviceConnection.instance.noteInteraction(),
           onPointerSignal: (_) => DeviceConnection.instance.noteInteraction(),
           child: OvernightWindowGuard(
-            child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+            child: WatchPartyOverlay(
+              child: AppUpdateOverlay(child: child ?? const SizedBox.shrink()),
+            ),
           ),
         ),
         theme: MillitopThemeController.instance.materialTheme,

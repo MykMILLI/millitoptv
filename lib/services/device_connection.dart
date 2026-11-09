@@ -78,6 +78,7 @@ class DeviceConnection {
       '/api/device/service/access',
       '/api/device/media-library/catalog',
       '/api/device/telemetry',
+      '/api/device/watch-parties/create',
     }.contains(route)) {
       throw ArgumentError('Unsupported device route.');
     }

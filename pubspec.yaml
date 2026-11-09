@@ -65,6 +65,7 @@ dependencies:
   xml: ^6.6.1
   pstube_engine:
     path: third_party/pstube_engine
+  flutter_webrtc: ^1.6.3
 
 dev_dependencies:
   flutter_test:

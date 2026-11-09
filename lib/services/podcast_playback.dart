@@ -11,6 +11,7 @@ import 'home_preferences.dart';
 import 'live_tv_control.dart';
 import 'podcast_service.dart';
 import 'podcast_downloads.dart';
+import 'watch_party/watch_party_service.dart';
 
 class PodcastPlayback extends ChangeNotifier {
   PodcastPlayback();
@@ -113,7 +114,11 @@ class PodcastPlayback extends ChangeNotifier {
     if (profile == null) {
       throw StateError('Select a profile before saving podcast favorites.');
     }
-    await GlobalPlaylistStore().setFavorite(profile, HubItem.podcast(episode), value);
+    await GlobalPlaylistStore().setFavorite(
+      profile,
+      HubItem.podcast(episode),
+      value,
+    );
     await _persist();
   }
 
@@ -236,6 +241,20 @@ class PodcastPlayback extends ChangeNotifier {
       if (_mediaError != null) throw HttpException(_mediaError!);
       await player!.setRate(library.speed);
       await player!.setVolume(volume);
+      WatchPartyService.instance.registerLocalPlayback(
+        player!,
+        WatchPartyMedia(
+          kind: 'podcast',
+          title: episode.title,
+          subtitle: episode.show.title,
+          posterUrl: episode.artwork.isEmpty ? null : episode.artwork,
+          durationMs: episode.duration.inMilliseconds,
+          audioOnly: !episode.video,
+          // Guests always stream from the publisher, even when the host
+          // plays a downloaded copy.
+          upstreamUrl: episode.mediaUrl,
+        ),
+      );
       final previous = library.progress[episode.key];
       if (!restart && previous is Map && previous['completed'] != true) {
         final saved = previous['positionMs'] as int? ?? 0;
@@ -348,6 +367,10 @@ class PodcastPlayback extends ChangeNotifier {
         await subscription.cancel();
       }
       subscriptions.clear();
+      final departing = player;
+      if (departing != null) {
+        WatchPartyService.instance.unregisterLocalPlayback(departing);
+      }
       await player?.dispose();
       player = null;
       videoController = null;

@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use, unnecessary_getters_setters
 
+import 'watch_party_panel.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -13,6 +14,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 
+import '../services/watch_party/watch_party_service.dart';
 import '../services/global_playlists.dart';
 import '../widgets/mixed_playlist_picker.dart';
 import '../services/device_connection.dart';
@@ -1585,7 +1587,9 @@ class _MusicScreenState extends State<MusicScreen>
       }
     } catch (_) {
       if (!silent && mounted) {
-        setState(() => status = 'Could not refresh share links from Navidrome.');
+        setState(
+          () => status = 'Could not refresh share links from Navidrome.',
+        );
       }
     }
   }
@@ -1611,7 +1615,8 @@ class _MusicScreenState extends State<MusicScreen>
       'username': share['username']?.toString().trim() ?? '',
       if (expires != null) 'expiresAtUtc': expires.toIso8601String(),
       'createdAtUtc':
-          created?.toIso8601String() ?? DateTime.now().toUtc().toIso8601String(),
+          created?.toIso8601String() ??
+          DateTime.now().toUtc().toIso8601String(),
     };
   }
 
@@ -1894,6 +1899,27 @@ class _MusicScreenState extends State<MusicScreen>
           : null;
       await activePlayer.open(Media(mediaSource, start: resumeAt));
       await activePlayer.play();
+      final upstream = track.streamUrl;
+      WatchPartyService.instance.registerLocalPlayback(
+        activePlayer,
+        WatchPartyMedia(
+          kind: 'music',
+          title: track.title,
+          subtitle: [
+            track.artist,
+            track.album,
+          ].where((part) => part.trim().isNotEmpty).join(' · '),
+          posterUrl: _coverArtUrl(track),
+          durationMs: track.durationSeconds > 0
+              ? track.durationSeconds * 1000
+              : null,
+          audioOnly: true,
+          queueLabel: shuffleEnabled ? 'Shuffle' : queueSourceLabel,
+          upstreamUrl: upstream == null || upstream.trim().isEmpty
+              ? null
+              : upstream,
+        ),
+      );
       loadedTrackId = track.id;
       resumePosition = Duration.zero;
     } catch (_) {
@@ -2790,31 +2816,6 @@ class _MusicScreenState extends State<MusicScreen>
     }
   }
 
-  Future<void> _saveCurrentGroupListeningSession() async {
-    final track = activeTrack;
-    if (track == null) {
-      return;
-    }
-    final session = GroupListeningSession(
-      id: const Uuid().v4(),
-      name:
-          'Group ${DateTime.now().toLocal().toIso8601String().substring(11, 19)}',
-      trackId: track.id,
-      positionMs: position.inMilliseconds,
-      members: const <GroupSessionMember>[
-        GroupSessionMember(deviceId: 'local', label: 'This device'),
-      ],
-      updatedAtUtc: DateTime.now().toUtc(),
-    );
-    await groupListeningService.upsertSession(widget.profileId, session);
-    groupSessions = await groupListeningService.sessions(widget.profileId);
-    if (mounted) {
-      setState(() {
-        status = 'Saved synchronized group session.';
-      });
-    }
-  }
-
   Future<void> _resumeGroupSession() async {
     if (groupSessions.isEmpty) {
       return;
@@ -3706,7 +3707,10 @@ class _MusicScreenState extends State<MusicScreen>
                           dense: true,
                           leading: const Icon(Icons.link_outlined),
                           title: Text(
-                            share['description']?.toString().trim().isNotEmpty ==
+                            share['description']
+                                        ?.toString()
+                                        .trim()
+                                        .isNotEmpty ==
                                     true
                                 ? share['description']!.toString()
                                 : (share['url']?.toString() ?? ''),
@@ -3868,7 +3872,9 @@ class _MusicScreenState extends State<MusicScreen>
         await nav.deleteShare(shareId);
       } catch (error) {
         if (mounted) {
-          setState(() => status = 'Could not remove share from Navidrome: $error');
+          setState(
+            () => status = 'Could not remove share from Navidrome: $error',
+          );
         }
         return;
       }
@@ -3890,7 +3896,9 @@ class _MusicScreenState extends State<MusicScreen>
     final nav = client;
     if (nav == null) {
       if (mounted) {
-        setState(() => status = 'Connect to Navidrome to edit share expiration.');
+        setState(
+          () => status = 'Connect to Navidrome to edit share expiration.',
+        );
       }
       return;
     }
@@ -5393,13 +5401,10 @@ class _MusicScreenState extends State<MusicScreen>
                               ),
                             ),
                             OutlinedButton.icon(
-                              onPressed: activeTrack == null
-                                  ? null
-                                  : () => unawaited(
-                                      _saveCurrentGroupListeningSession(),
-                                    ),
+                              onPressed: () =>
+                                  unawaited(showStartWatchParty(context)),
                               icon: const Icon(Icons.group_add_outlined),
-                              label: const Text('Start group listening'),
+                              label: const Text('Start listening party'),
                             ),
                             OutlinedButton.icon(
                               onPressed: groupSessions.isEmpty
@@ -5437,6 +5442,7 @@ class _MusicScreenState extends State<MusicScreen>
             appBar: AppBar(
               title: const Text('Immersive Listening'),
               actions: [
+                const WatchPartyIconButton(),
                 IconButton(
                   tooltip: 'Sleep timer',
                   onPressed: () => unawaited(
@@ -8058,6 +8064,7 @@ class _MusicScreenState extends State<MusicScreen>
           ),
           title: const Text('navidrome'),
           actions: [
+            const WatchPartyIconButton(),
             IconButton(
               tooltip: 'Sleep timer',
               onPressed: () => unawaited(

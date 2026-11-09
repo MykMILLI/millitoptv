@@ -17,6 +17,8 @@ import '../services/shared_family_album_service.dart';
 import '../theme/millitop_visual_theme.dart';
 import 'music_screen.dart';
 import 'media_library_home.dart';
+import 'watch_party_panel.dart';
+import '../services/watch_party/watch_party_service.dart';
 
 Future<void> editWebApp(
   BuildContext context,
@@ -1717,6 +1719,57 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
       const Text(
         'Make Millitop feel right for you.',
         style: TextStyle(color: Colors.white70),
+      ),
+      const SizedBox(height: 18),
+      _settingsCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.groups, color: context.millitopTheme.accentColor),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Watch parties',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Watch or listen together. Start a party from any player with the '
+              'people button, or join one here with a code or invite link.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: () => unawaited(showJoinWatchParty(context)),
+                  icon: const Icon(Icons.login),
+                  label: const Text('Join a watch party'),
+                ),
+                ListenableBuilder(
+                  listenable: WatchPartyService.instance,
+                  builder: (context, _) => WatchPartyService.instance.active
+                      ? OutlinedButton.icon(
+                          onPressed: () =>
+                              WatchPartyService.instance.setPanelOpen(true),
+                          icon: const Icon(Icons.forum_outlined),
+                          label: const Text('Open current party'),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
       const SizedBox(height: 18),
       _settingsCard(

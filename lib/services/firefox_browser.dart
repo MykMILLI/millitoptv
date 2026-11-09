@@ -12,6 +12,47 @@ import 'web_app_definition.dart';
 
 class FirefoxBrowser {
   static bool _busy = false, _recoveryRequired = false;
+
+  /// Folder of the running session (request.json, dock.json, close signal).
+  static Directory? _sessionDir;
+
+  /// True while a docked session is showing inside the app window.
+  static final ValueNotifier<bool> docked = ValueNotifier(false);
+  static bool _dockHidden = false;
+  static double _dockTopInset = 0;
+
+  static Future<void> _writeDock(Map<String, Object?> state) async {
+    final dir = _sessionDir;
+    if (dir == null) return;
+    final temp = File('${dir.path}\\dock.json.tmp');
+    await temp.writeAsString(jsonEncode(state), flush: true);
+    await temp.rename('${dir.path}\\dock.json');
+  }
+
+  /// Hides the docked Firefox window (for example while a MILLITOP sheet is
+  /// open over it) or shows it again.
+  static Future<void> setDockHidden(bool hidden) async {
+    if (!docked.value || _dockHidden == hidden) return;
+    _dockHidden = hidden;
+    await _writeDock({'hidden': hidden, 'topInset': _dockTopInset});
+  }
+
+  /// Turns the docked window into a normal Firefox window.
+  static Future<void> popOut() async {
+    if (!docked.value) return;
+    await _writeDock({'popOut': true});
+    docked.value = false;
+  }
+
+  /// Asks the running Firefox session to close (same path as the sleep timer).
+  static Future<void> requestClose() async {
+    final dir = _sessionDir;
+    if (dir == null) return;
+    await File(
+      '${dir.path}\\close-viewing.signal',
+    ).writeAsString('close', flush: true);
+  }
+
   static const executablePreference = 'browser.firefox.executable.v1';
   static Future<String> _helper() async {
     final directory = Directory(
@@ -40,6 +81,11 @@ class FirefoxBrowser {
     bool addons = false,
     bool payment = false,
     bool appFullscreen = false,
+
+    /// Shows Firefox inside the app window below a [dockTopInset] (logical
+    /// pixels) app bar instead of a separate full-screen window.
+    bool dock = false,
+    double dockTopInset = 56,
   }) async {
     if (_recoveryRequired) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -99,9 +145,13 @@ class FirefoxBrowser {
         executablePreference,
         executable,
       );
+      final docking = dock && !addons && !payment;
       await windowManager.setAlwaysOnTop(false);
-      await windowManager.setFullScreen(false);
+      if (!docking) await windowManager.setFullScreen(false);
       temp = await Directory.systemTemp.createTemp('MillitopFirefoxSession-');
+      _sessionDir = temp;
+      _dockHidden = false;
+      _dockTopInset = dockTopInset;
       final file = File('${temp.path}\\request.json');
       final stopSignal = File('${temp.path}\\close-viewing.signal');
       ViewingSessions.instance.register(key, () async {
@@ -124,6 +174,7 @@ class FirefoxBrowser {
           'managedOnly': true,
           'url': target,
           'appFullscreen': appFullscreen && !addons && !payment,
+          if (docking) 'dock': {'hostPid': pid, 'topInset': dockTopInset},
           'executable': (await SharedPreferences.getInstance()).getString(
             executablePreference,
           ),
@@ -156,9 +207,13 @@ class FirefoxBrowser {
                       jsonDecode(line.replaceFirst('\uFEFF', '')) as Map;
                   if (event['type'] == 'ready') {
                     mightHaveStarted = true;
+                    docked.value = event['docked'] == true;
                     if (!ready.isCompleted) {
                       ready.complete();
                     }
+                  }
+                  if (event['type'] == 'undocked') {
+                    docked.value = false;
                   }
                   if (event['type'] == 'closed') {
                     confirmedClosed = true;
@@ -216,7 +271,7 @@ class FirefoxBrowser {
         }),
       );
       await ready.future.timeout(const Duration(seconds: 65));
-      await windowManager.minimize();
+      if (!docking) await windowManager.minimize();
       final code = await exited;
       await Future.wait([
         outDone.future,
@@ -282,6 +337,8 @@ class FirefoxBrowser {
         } catch (_) {}
       }
       ViewingSessions.instance.remove(key);
+      _sessionDir = null;
+      docked.value = false;
       if (!sessionDone.isCompleted) {
         sessionDone.complete();
       }

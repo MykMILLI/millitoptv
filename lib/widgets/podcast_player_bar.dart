@@ -1,3 +1,4 @@
+import '../screens/watch_party_panel.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -164,6 +165,7 @@ class PodcastPlayerBar extends StatelessWidget {
                   onPressed: onOpenQueue,
                   icon: const Icon(Icons.queue_music),
                 ),
+                const WatchPartyIconButton(),
                 PopupMenuButton<int>(
                   tooltip: playback.sleepUntil == null
                       ? 'Sleep timer'

@@ -1,9 +1,11 @@
+import 'watch_party_panel.dart';
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import '../services/watch_party/watch_party_service.dart';
 import '../services/app_log.dart';
 import '../services/device_connection.dart';
 import '../services/home_preferences.dart';
@@ -674,6 +676,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         subtitle: channel.sourceName,
         seekable: false,
         onClose: () async {
+          WatchPartyService.instance.unregisterLocalPlayback(current);
           try {
             await current.dispose().timeout(const Duration(seconds: 8));
           } catch (_) {}
@@ -1390,6 +1393,9 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     }
     subscriptions.clear();
     final current = player;
+    if (current != null) {
+      WatchPartyService.instance.unregisterLocalPlayback(current);
+    }
     player = null;
     video = null;
     reconnecting = false;
@@ -1574,6 +1580,17 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
         becameNotPlayingAt = null;
         lastPosition = Duration.zero;
         reconnectAttempts = 0;
+        WatchPartyService.instance.registerLocalPlayback(
+          current,
+          WatchPartyMedia(
+            kind: 'live',
+            title: channel.title,
+            subtitle: channel.sourceName ?? channel.group,
+            posterUrl: channel.logo,
+            live: true,
+            upstreamUrl: channel.streamUrl,
+          ),
+        );
       }
       await _setFocusedPane(pane);
       _setState(
@@ -3033,6 +3050,7 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
                         icon: const Icon(Icons.arrow_back),
                       ),
                       actions: [
+                        const WatchPartyIconButton(),
                         IconButton(
                           tooltip: 'Sleep timer',
                           onPressed: () => unawaited(

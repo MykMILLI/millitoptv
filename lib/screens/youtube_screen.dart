@@ -1,3 +1,4 @@
+import 'watch_party_panel.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -7,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:pstube_engine/pstube_engine.dart';
+import '../services/watch_party/watch_party_service.dart';
 import '../services/app_log.dart';
 import '../services/device_connection.dart';
 import '../services/global_playlists.dart';
@@ -511,6 +513,24 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
       );
     }
     if (resume > Duration.zero) await player!.seek(resume);
+    final video = active;
+    if (video != null) {
+      WatchPartyService.instance.registerLocalPlayback(
+        player!,
+        WatchPartyMedia(
+          kind: 'youtube',
+          title: video.title,
+          subtitle: video.author,
+          posterUrl: video.thumbnail.isEmpty ? null : video.thumbnail,
+          durationMs: video.seconds > 0 ? video.seconds * 1000 : null,
+          live: video.live,
+          youtubeId: video.id,
+          queueLabel: _mixedSession == null
+              ? null
+              : (_mixedSession!.shuffled ? 'Shuffle' : 'Playlist'),
+        ),
+      );
+    }
     setState(() => quality = stream.quality);
   }
 
@@ -702,6 +722,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
         subtitle: currentVideo.author,
         seekable: true,
         onClose: () async {
+          WatchPartyService.instance.unregisterLocalPlayback(currentPlayer);
           try {
             await currentPlayer.dispose();
           } catch (_) {}
@@ -940,6 +961,9 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
       unawaited(sub.cancel());
     }
     if (!handedOffToMiniPlayer) {
+      if (departing != null) {
+        WatchPartyService.instance.unregisterLocalPlayback(departing);
+      }
       unawaited(
         departing?.dispose().catchError((Object e) {
               debugPrint('Could not dispose YouTube player: $e');
@@ -1608,6 +1632,7 @@ class _YouTubeScreenState extends State<YouTubeScreen> {
                     ),
                   ),
                 ),
+                const WatchPartyIconButton(),
                 IconButton(
                   tooltip: 'Sleep timer',
                   onPressed: () => unawaited(

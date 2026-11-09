@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<title>Watch party · MILLITOP TV</title>
+<link rel="icon" href="/watch-assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/watch-assets/watch.css">
+</head>
+<body>
+<noscript><p class="noscript">Turn on JavaScript to join this watch party.</p></noscript>
+
+<section id="join-view" class="join-view" hidden>
+  <div class="join-card">
+    <div class="brand"><img src="/watch-assets/icon.svg" alt="" width="28" height="28"><span>MILLITOP TV</span></div>
+    <p class="eyebrow">Watch party</p>
+    <h1 id="join-title">Join a watch party</h1>
+    <p id="join-host" class="muted"></p>
+    <div id="join-now" class="join-now" hidden>
+      <img id="join-poster" alt="" hidden>
+      <div><span class="muted small">Now playing</span><strong id="join-now-title"></strong></div>
+    </div>
+    <form id="join-form" autocomplete="on" novalidate>
+      <label id="code-field" hidden>Party code
+        <input id="join-code" name="code" inputmode="text" autocapitalize="characters" maxlength="9" placeholder="ABCD2345" required>
+      </label>
+      <label>Your name
+        <input id="join-name" name="nickname" maxlength="60" placeholder="What should everyone call you?" required>
+      </label>
+      <button id="join-button" type="submit" class="primary">Join the party</button>
+      <p id="join-error" class="error" role="alert" hidden></p>
+    </form>
+    <p class="muted small">Chat and voice work in this browser. Headphones help avoid echo.</p>
+  </div>
+</section>
+
+<section id="ended-view" class="join-view" hidden>
+  <div class="join-card">
+    <div class="brand"><img src="/watch-assets/icon.svg" alt="" width="28" height="28"><span>MILLITOP TV</span></div>
+    <h1 id="ended-title">This watch party has ended</h1>
+    <p id="ended-text" class="muted">Thanks for watching together.</p>
+    <a class="button secondary" href="/watch">Join another party</a>
+  </div>
+</section>
+
+<main id="room-view" class="room" hidden>
+  <header class="room-header">
+    <div class="room-title">
+      <strong id="room-title"></strong>
+      <span id="room-host" class="muted small"></span>
+    </div>
+    <div class="room-actions">
+      <span id="connection" class="pill" aria-live="polite">Connecting…</span>
+      <button id="copy-link" type="button" class="secondary">Copy invite link</button>
+      <button id="leave" type="button" class="danger">Leave</button>
+    </div>
+  </header>
+
+  <section class="stage" aria-label="Video">
+    <div id="player-wrap" class="player-wrap">
+      <video id="video" playsinline preload="auto"></video>
+      <div id="yt-host" class="yt-host" hidden><div id="yt-player"></div></div>
+      <div id="audio-art" class="audio-art" hidden><img id="audio-poster" alt=""><div id="audio-title"></div></div>
+      <div id="stage-message" class="stage-message" hidden></div>
+      <button id="tap-to-play" type="button" class="tap-to-play primary" hidden>Start watching</button>
+      <div id="reactions-layer" class="reactions-layer" aria-hidden="true"></div>
+    </div>
+    <div class="now-bar">
+      <div class="now-meta">
+        <span id="live-badge" class="live" hidden>LIVE</span>
+        <strong id="now-title">Waiting for the host to start something…</strong>
+        <span id="now-sub" class="muted small"></span>
+      </div>
+      <div class="now-controls">
+        <span id="sync-state" class="muted small"></span>
+        <button id="resync" type="button" class="secondary small-button" title="Jump to the host's position">Resync</button>
+        <label class="volume" title="Volume"><span class="sr-only">Volume</span><input id="volume" type="range" min="0" max="100" value="100"></label>
+        <button id="fullscreen" type="button" class="secondary small-button">Full screen</button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="side" aria-label="Party">
+    <section class="card voice-card">
+      <div class="card-head"><h2>Voice</h2><span id="voice-count" class="muted small"></span></div>
+      <div class="voice-buttons">
+        <button id="voice-join" type="button" class="primary">Join voice</button>
+        <button id="voice-mute" type="button" class="secondary" hidden>Mute</button>
+        <button id="voice-leave" type="button" class="secondary" hidden>Leave voice</button>
+      </div>
+      <p id="voice-error" class="error small" role="alert" hidden></p>
+    </section>
+    <section class="card people-card">
+      <div class="card-head"><h2>People</h2><span id="people-count" class="muted small"></span></div>
+      <ul id="people" class="people"></ul>
+    </section>
+    <section class="card chat-card">
+      <div class="card-head"><h2>Chat</h2>
+        <div class="reaction-buttons" role="group" aria-label="Reactions">
+          <button type="button" data-emoji="👍" aria-label="Thumbs up">👍</button><button type="button" data-emoji="😂" aria-label="Laugh">😂</button><button type="button" data-emoji="😮" aria-label="Wow">😮</button><button type="button" data-emoji="❤️" aria-label="Love">❤️</button><button type="button" data-emoji="🔥" aria-label="Fire">🔥</button>
+        </div>
+      </div>
+      <ol id="messages" class="messages" aria-live="polite"></ol>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" maxlength="1000" placeholder="Say something…" autocomplete="off" aria-label="Message">
+        <button type="submit" class="primary">Send</button>
+      </form>
+    </section>
+  </aside>
+</main>
+<div id="voice-audio" hidden></div>
+<script type="module" src="/watch-assets/watch.js"></script>
+</body>
+</html>

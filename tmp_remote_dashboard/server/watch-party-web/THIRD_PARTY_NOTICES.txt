@@ -1,0 +1,6 @@
+Bundled third-party browser libraries for the watch party join page.
+
+hls.min.js     hls.js 1.5.20     https://github.com/video-dev/hls.js     Apache License 2.0
+mpegts.min.js  mpegts.js 1.8.0   https://github.com/xqq/mpegts.js        Apache License 2.0
+
+Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
