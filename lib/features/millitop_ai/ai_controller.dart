@@ -37,6 +37,7 @@ class AiController extends ChangeNotifier {
           role: AiRole.assistant,
           text: result.text,
           media: result.media,
+          proposal: result.proposal,
         ),
       );
     } catch (_) {

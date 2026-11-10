@@ -83,7 +83,13 @@ class MavaeCatalogService implements AiService {
       throw StateError('Profile changed.');
     }
     final query = mavaeTitleQuery(request.messages.last.text);
-    if (query == null) return fallback.reply(request);
+    if (query == null) {
+      return fallback.reply(request);
+    }
+    return search(query);
+  }
+
+  Future<AiReply> search(String query, {String mediaType = 'all'}) async {
     final connection = DeviceConnection.instance.connectionKey;
     final sources = await _sources();
     final checked = <String>[];
@@ -99,7 +105,9 @@ class MavaeCatalogService implements AiService {
         checked.add(source.name);
         for (final item in [...entry.movies, ...entry.series]) {
           if (AdultContent.isAdult(item) ||
-              !mavaeMatchesTitle(item.title, query)) {
+              !mavaeMatchesTitle(item.title, query) ||
+              (mediaType == 'movie' && item.series) ||
+              (mediaType == 'series' && !item.series)) {
             continue;
           }
           matches.add(
@@ -111,6 +119,9 @@ class MavaeCatalogService implements AiService {
               mediaType: item.series ? 'series' : 'movie',
               cachedAt: entry.savedAt,
               year: item.year,
+              posterUrl: item.posterUrl,
+              overview: item.description,
+              genres: item.genres,
             ),
           );
         }
@@ -139,6 +150,8 @@ class MavaeCatalogService implements AiService {
       if (missing.isNotEmpty)
         'Not checked (cache missing or unreadable): ${missing.join(', ')}. Open those sources in Movies & Series, let them load, then retry.',
       'This first lookup checks configured IPTV and selected Jellyfin caches only. Dashboard-managed SMB libraries, uncatalogued local folders, live TV, and external streaming services are not searched.',
+      if (matches.isNotEmpty)
+        'Matching titles: ${matches.take(12).map((m) => m.title).join('; ')}.',
     ].join('\n\n');
     return AiReply(text: text, media: List.unmodifiable(matches.take(12)));
   }
