@@ -1,3 +1,4 @@
+import 'features/millitop_ai/mavae_host.dart';
 import 'screens/watch_party_panel.dart';
 import 'screens/overnight_window_guard.dart';
 import 'services/sleep_mode.dart';
@@ -236,8 +237,11 @@ class _MillitopAppState extends State<MillitopApp> {
         ),
         theme: MillitopThemeController.instance.materialTheme,
         home: ProfileGate(
-          builder: (profile) =>
-              Launcher(key: ValueKey(profile.id), profileId: profile.id),
+          builder: (profile) => MavaeHost(
+            key: ValueKey('mavae-profile-${profile.id}'),
+            profileId: profile.id,
+            child: Launcher(key: ValueKey(profile.id), profileId: profile.id),
+          ),
         ),
       ),
     );

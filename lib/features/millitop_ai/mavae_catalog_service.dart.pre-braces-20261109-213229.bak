@@ -1,0 +1,144 @@
+import '../../services/adult_content.dart';
+import '../../services/device_connection.dart';
+import '../../services/home_preferences.dart';
+import '../../services/jellyfin_client.dart';
+import '../../services/live_tv_source.dart';
+import '../../services/media_catalog_cache.dart';
+import 'ai_models.dart';
+import 'ai_service.dart';
+
+String? mavaeTitleQuery(String input) {
+  final text = input.trim();
+  final patterns = [
+    RegExp(
+      r'^is\s+(.+?)\s+available(?:\s+to\s+(?:watch|stream))?[?.!]*$',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'^(?:do you have|can i watch|where can i watch)\s+(.+?)[?.!]*$',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'^(?:find|search for|look for)\s+(.+?)[?.!]*$',
+      caseSensitive: false,
+    ),
+  ];
+  for (final pattern in patterns) {
+    final match = pattern.firstMatch(text);
+    if (match == null) continue;
+    var title = match.group(1)!.trim();
+    title = title.replaceAll(RegExp(r'''^["']|["']$'''), '').trim();
+    if (title.length >= 2 && title.length <= 200) return title;
+  }
+  return null;
+}
+
+String mavaeNormalizeTitle(String text) =>
+    text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+bool mavaeMatchesTitle(String title, String query) {
+  final normalized = mavaeNormalizeTitle(title);
+  final tokens = mavaeNormalizeTitle(
+    query,
+  ).split(' ').where((s) => s.isNotEmpty);
+  return tokens.isNotEmpty &&
+      tokens.every((token) => normalized.split(' ').contains(token));
+}
+
+class MavaeCatalogService implements AiService {
+  MavaeCatalogService({
+    required this.profileId,
+    required this.fallback,
+    MediaCatalogCache? cache,
+  }) : cache = cache ?? MediaCatalogCache();
+  final int profileId;
+  final AiService fallback;
+  final MediaCatalogCache cache;
+
+  Future<List<LiveTvSource>> _sources() async {
+    final configured = await HomePreferences().liveTvSources(profileId);
+    final account = await JellyfinAccountStore.instance().load(profileId);
+    return [
+      ...configured,
+      ...?account?.sources,
+    ].where((source) => !AdultContent.isAdultLabel(source.name)).toList();
+  }
+
+  Future<bool> stillListed(AiMediaMatch match) async {
+    final sources = await _sources();
+    for (final source in sources) {
+      if (source.id != match.sourceId) continue;
+      final entry = await cache.source(profileId, source);
+      if (entry == null) return false;
+      final items = match.mediaType == 'series' ? entry.series : entry.movies;
+      return items.any(
+        (item) => item.id == match.mediaId && !AdultContent.isAdult(item),
+      );
+    }
+    return false;
+  }
+
+  @override
+  Future<AiReply> reply(AiRequest request) async {
+    if (request.profileId != profileId.toString()) {
+      throw StateError('Profile changed.');
+    }
+    final query = mavaeTitleQuery(request.messages.last.text);
+    if (query == null) return fallback.reply(request);
+    final connection = DeviceConnection.instance.connectionKey;
+    final sources = await _sources();
+    final checked = <String>[];
+    final missing = <String>[];
+    final matches = <AiMediaMatch>[];
+    for (final source in sources) {
+      try {
+        final entry = await cache.source(profileId, source);
+        if (entry == null) {
+          missing.add(source.name);
+          continue;
+        }
+        checked.add(source.name);
+        for (final item in [...entry.movies, ...entry.series]) {
+          if (AdultContent.isAdult(item) ||
+              !mavaeMatchesTitle(item.title, query))
+            continue;
+          matches.add(
+            AiMediaMatch(
+              sourceId: source.id,
+              sourceName: source.name,
+              mediaId: item.id,
+              title: item.title,
+              mediaType: item.series ? 'series' : 'movie',
+              cachedAt: entry.savedAt,
+              year: item.year,
+            ),
+          );
+        }
+      } catch (_) {
+        missing.add(source.name);
+      }
+    }
+    if (DeviceConnection.instance.connectionKey != connection) {
+      throw StateError('Device connection changed.');
+    }
+    final exact = mavaeNormalizeTitle(query);
+    matches.sort((a, b) {
+      final aExact = mavaeNormalizeTitle(a.title) == exact ? 0 : 1;
+      final bExact = mavaeNormalizeTitle(b.title) == exact ? 0 : 1;
+      final rank = aExact.compareTo(bExact);
+      return rank != 0 ? rank : a.title.compareTo(b.title);
+    });
+    final text = <String>[
+      if (matches.isNotEmpty)
+        'I found ${matches.length} cached catalog match(es) for "$query". Check the title and year below. Playback has not been verified.'
+      else if (checked.isNotEmpty)
+        'I did not find "$query" in the cached catalogs I checked. That does not establish current availability.'
+      else
+        'I do not have a searchable cached catalog for this profile yet.',
+      if (checked.isNotEmpty) 'Cached sources checked: ${checked.join(', ')}.',
+      if (missing.isNotEmpty)
+        'Not checked (cache missing or unreadable): ${missing.join(', ')}. Open those sources in Movies & Series, let them load, then retry.',
+      'This first lookup checks configured IPTV and selected Jellyfin caches only. Dashboard-managed SMB libraries, uncatalogued local folders, live TV, and external streaming services are not searched.',
+    ].join('\n\n');
+    return AiReply(text: text, media: List.unmodifiable(matches.take(12)));
+  }
+}

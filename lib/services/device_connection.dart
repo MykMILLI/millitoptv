@@ -60,6 +60,7 @@ class DeviceConnection {
   }) async {
     await start();
     if (!const {
+      '/api/device/ai/chat',
       '/api/device/messages',
       '/api/device/receipts',
       '/api/device/updates/check',
@@ -86,7 +87,9 @@ class DeviceConnection {
       throw StateError('Device connection is unavailable or changed.');
     }
     final saved = _record!;
-    final requestTimeout = route == '/api/device/media-library/catalog'
+    final requestTimeout = route == '/api/device/ai/chat'
+        ? const Duration(seconds: 60)
+        : route == '/api/device/media-library/catalog'
         ? const Duration(seconds: 90)
         // Starting/stopping a recording waits for the server to open or
         // finalize the channel stream.
