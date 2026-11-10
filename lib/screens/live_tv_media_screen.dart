@@ -6384,6 +6384,7 @@ class _LiveTvMediaScreenState extends State<LiveTvMediaScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
+            key: const ValueKey('media-category-picker-trigger'),
             borderRadius: BorderRadius.circular(8),
             onTap: () => _showCategoryPicker(groupOptions),
             child: InputDecorator(

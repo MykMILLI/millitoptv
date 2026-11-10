@@ -82,13 +82,11 @@ void main() {
     expect(find.text('Movie 0'), findsOneWidget);
 
     final stopwatch = Stopwatch()..start();
-    await tester.tap(find.widgetWithText(FilledButton, 'Filters'));
+    final filtersButton = find.widgetWithText(FilledButton, 'Filters').last;
+    await tester.ensureVisible(filtersButton);
+    await tester.tap(filtersButton, warnIfMissed: false);
     await tester.pumpAndSettle();
-    final categoryTapTarget = find.ancestor(
-      of: find.text('Category').first,
-      matching: find.byType(InkWell),
-    );
-    await tester.tap(categoryTapTarget.first);
+    await tester.tap(find.byKey(const ValueKey('media-category-picker-trigger')));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const ValueKey('category-picker-search')),
