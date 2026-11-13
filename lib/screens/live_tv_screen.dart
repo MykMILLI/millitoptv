@@ -544,7 +544,8 @@ class _LiveTvScreenState extends State<LiveTvScreen> {
     if (context == null) {
       return false;
     }
-    return context.widget is EditableText;
+    return context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null;
   }
 
   Future<Player> _createConfiguredPlayer() async {

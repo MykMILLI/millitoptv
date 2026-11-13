@@ -1,6 +1,29 @@
 ﻿{
     "downloads":  [
                       {
+                          "url":  "/downloads/Millitop-TV-2.1.0-build-66-universal-67b04d948900.apk",
+                          "hint":  "Development-key-signed sideload/testing package. Keep using the same signing key for upgrade compatibility; this is not production/store signing.",
+                          "id":  "android-development-2-1-0-build-66",
+                          "platform":  "android-universal",
+                          "version":  "2.1.0+66",
+                          "sha256":  "67b04d948900f521da85a8a846fb19e7b732907e5c3e2d3d44d259765c9dd8fc",
+                          "downloadLabel":  "Download Android APK (Development key-signed)",
+                          "title":  "MILLITOP TV Android universal development build",
+                          "sizeBytes":  171777901
+                      },
+                      {
+                          "url":  "/downloads/Millitop-TV-2.1.0-build-66-source.zip",
+                          "hint":  "Full application source/build inputs, GPLv3 license, README build instructions, and SOURCE-MANIFEST hashes.",
+                          "id":  "source-release-2-1-0-build-66",
+                          "platform":  "source",
+                          "version":  "2.1.0+66",
+                          "category":  "source",
+                          "sha256":  "6abda5699b9db05a9e8f004fc242afe500b5da97999041ccbffe1ff5b7b325be",
+                          "downloadLabel":  "Download corresponding source ZIP",
+                          "title":  "MILLITOP TV GPLv3 corresponding source",
+                          "sizeBytes":  6915642
+                      },
+                      {
                           "url":  "/downloads/Millitop-TV-2.1.0-build-65-universal-1246a1a812d9.apk",
                           "hint":  "Development-key-signed sideload/testing package. Keep using the same signing key for upgrade compatibility; this is not production/store signing.",
                           "id":  "android-development-2-1-0-build-65",
